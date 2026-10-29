@@ -16,7 +16,7 @@ paired with [rom-sql](https://github.com/hanakai-rb/rom-sql),
 |---|---|
 | Schema | `Schema(Tuple, name, pk)`: a struct, a dataset name, and a primary key. No associations, no attribute metadata. |
 | Query | `Query(T)`: AND-only filters (`eq neq lt lte gt gte`), one `order`, `limit`, `offset`. Fixed capacity of 16 filters. |
-| Value | `null`, `boolean`, `int` (i64), `float`, `string`. No `u64`/`u128`, no timestamps, no bytes. |
+| Value | `null`, `boolean`, `int` (i64), `uint` (u64), `float`, `string`. No `u128`, no timestamps, no bytes. |
 | Relation | Immutable and lazy. `where/order/limit/offset/byPk`, `toSlice/one/first/count`, `mapTo/mapWith`, `create/update/delete`. |
 | Changeset | `Create` (with `map` steps) and `Update` (`set`), committed explicitly. |
 | Mapper | Copies fields by name, with renames. `combineMany` joins loaded slices in memory (O(n·m)). |
@@ -25,7 +25,6 @@ paired with [rom-sql](https://github.com/hanakai-rb/rom-sql),
 | Packaging | One package, `zom`, with all adapters inside it. |
 
 Open issues from the last review, still to fix:
-- A `u64` value above the `i64` maximum crashes in `toValue`.
 - String types other than `[]const u8` are not copied on insert.
 - Enums sort alphabetically, not in declaration order.
 - An update can be left half-done if the arena runs out of memory.

@@ -219,3 +219,51 @@ test "out of range runtime values are rejected without partial writes" {
     try testing.expectEqualStrings("achieng@example.com", achieng.email);
     try testing.expectEqual(@as(u8, 31), achieng.age);
 }
+
+const Counter = struct { id: u64, n: u64 };
+const Counters = zom.Relation(zom.Schema(Counter, "counters", .id), zom.memory.Gateway);
+
+test "u64 values above maxInt(i64) round-trip" {
+    var gw = zom.memory.Gateway.init(testing.allocator);
+    defer gw.deinit();
+    const counters = try Counters.init(&gw);
+
+    const max = std.math.maxInt(u64);
+    const big: u64 = std.math.maxInt(i64) + 1;
+    _ = try counters.create(.{ .id = max, .n = 1 }).commit();
+    _ = try counters.create(.{ .id = big, .n = 2 }).commit();
+    _ = try counters.create(.{ .id = 1, .n = 3 }).commit();
+    try testing.expectError(error.DuplicatePrimaryKey, counters.create(.{ .id = max, .n = 4 }).commit());
+
+    try testing.expectEqual(@as(u64, 1), (try counters.where(.id, .eq, max).one(testing.allocator)).?.n);
+    try testing.expectEqual(@as(usize, 2), counters.where(.id, .gt, std.math.maxInt(i64)).count());
+    try testing.expectEqual(@as(usize, 3), counters.where(.id, .gte, 0).count());
+
+    const rows = try counters.order(.id, .desc).toSlice(testing.allocator);
+    defer testing.allocator.free(rows);
+    try testing.expectEqualSlices(u64, &.{ max, big, 1 }, &.{ rows[0].id, rows[1].id, rows[2].id });
+
+    try testing.expectEqual(@as(usize, 1), try counters.byPk(big).update().set(.n, max).commit());
+    try testing.expectEqual(max, (try counters.byPk(big).one(testing.allocator)).?.n);
+}
+
+test "int and uint values compare across variants" {
+    try testing.expectEqual(std.math.Order.lt, zom.Value.order(.{ .int = -1 }, .{ .uint = 0 }).?);
+    try testing.expectEqual(std.math.Order.gt, zom.Value.order(.{ .uint = 0 }, .{ .int = -1 }).?);
+    try testing.expectEqual(std.math.Order.eq, zom.Value.order(.{ .int = 5 }, .{ .uint = 5 }).?);
+    try testing.expectEqual(std.math.Order.lt, zom.Value.order(.{ .int = std.math.maxInt(i64) }, .{ .uint = std.math.maxInt(u64) }).?);
+    try testing.expectEqual(std.math.Order.gt, zom.Value.order(.{ .uint = std.math.maxInt(u64) }, .{ .float = 1.0 }).?);
+    try testing.expectEqual(std.math.Order.lt, zom.Value.order(.{ .float = -1.0 }, .{ .uint = 0 }).?);
+}
+
+test "u64 above maxInt(u32) on a u32 attribute is rejected" {
+    var gw = zom.memory.Gateway.init(testing.allocator);
+    defer gw.deinit();
+    const users = try Users.init(&gw);
+    try seed(users, try Posts.init(&gw));
+
+    var id: u64 = std.math.maxInt(u64);
+    _ = &id;
+    try testing.expectError(error.ValueOutOfRange, users.byPk(1).update().set(.id, id).commit());
+    try testing.expectEqual(@as(usize, 1), users.where(.id, .eq, 1).count());
+}

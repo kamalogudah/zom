@@ -36,6 +36,8 @@ pub const Value = union(enum) {
     null,
     boolean: bool,
     int: i64,
+    /// Unsigned values that do not fit `int` (u64, usize on 64-bit targets).
+    uint: u64,
     float: f64,
     string: []const u8,
 
@@ -49,12 +51,21 @@ pub const Value = union(enum) {
                 null,
             .int => |x| switch (b) {
                 .int => |y| std.math.order(x, y),
+                // Widening to i128 holds every i64 and u64 value exactly.
+                .uint => |y| std.math.order(@as(i128, x), @as(i128, y)),
+                .float => |y| std.math.order(@as(f64, @floatFromInt(x)), y),
+                else => null,
+            },
+            .uint => |x| switch (b) {
+                .uint => |y| std.math.order(x, y),
+                .int => |y| std.math.order(@as(i128, x), @as(i128, y)),
                 .float => |y| std.math.order(@as(f64, @floatFromInt(x)), y),
                 else => null,
             },
             .float => |x| switch (b) {
                 .float => |y| std.math.order(x, y),
                 .int => |y| std.math.order(x, @as(f64, @floatFromInt(y))),
+                .uint => |y| std.math.order(x, @as(f64, @floatFromInt(y))),
                 else => null,
             },
             .string => |x| if (b == .string) std.mem.order(u8, x, b.string) else null,
@@ -85,7 +96,17 @@ pub fn toValue(v: anytype) Value {
     switch (@typeInfo(T)) {
         .null => return .null,
         .bool => return .{ .boolean = v },
-        .int, .comptime_int => return .{ .int = @intCast(v) },
+        .int => |info| {
+            if (info.bits > 64)
+                @compileError("zom: " ++ @typeName(T) ++ " is wider than 64 bits; u128 support is planned for phase 6");
+            if (info.signedness == .unsigned and info.bits == 64) return .{ .uint = v };
+            return .{ .int = v };
+        },
+        .comptime_int => {
+            if (comptime std.math.cast(i64, v) != null) return .{ .int = v };
+            if (comptime std.math.cast(u64, v) != null) return .{ .uint = v };
+            @compileError(std.fmt.comptimePrint("zom: {d} does not fit in 64 bits; u128 support is planned for phase 6", .{v}));
+        },
         .float, .comptime_float => return .{ .float = v },
         .optional => return if (v) |inner| toValue(inner) else .null,
         .@"enum", .enum_literal => return .{ .string = @tagName(v) },
@@ -105,11 +126,13 @@ pub fn fromValue(comptime F: type, v: Value) error{ValueOutOfRange}!F {
         .bool => return v.boolean,
         .int => return switch (v) {
             .int => |i| std.math.cast(F, i) orelse error.ValueOutOfRange,
+            .uint => |u| std.math.cast(F, u) orelse error.ValueOutOfRange,
             else => unreachable, // assertSettable rejects floats for int attributes
         },
         .float => return switch (v) {
             .float => |f| @floatCast(f),
             .int => |i| @floatFromInt(i),
+            .uint => |u| @floatFromInt(u),
             else => unreachable,
         },
         .@"enum" => return std.meta.stringToEnum(F, v.string) orelse error.ValueOutOfRange,
