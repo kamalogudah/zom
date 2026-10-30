@@ -267,3 +267,54 @@ test "u64 above maxInt(u32) on a u32 attribute is rejected" {
     try testing.expectError(error.ValueOutOfRange, users.byPk(1).update().set(.id, id).commit());
     try testing.expectEqual(@as(usize, 1), users.where(.id, .eq, 1).count());
 }
+
+const Contact = struct {
+    id: u32,
+    name: [:0]const u8,
+    handle: []u8,
+    nickname: ?[:0]const u8 = null,
+};
+const Contacts = zom.Relation(zom.Schema(Contact, "contacts", .id), zom.memory.Gateway);
+
+test "every string type is copied on insert and update" {
+    var gw = zom.memory.Gateway.init(testing.allocator);
+    defer gw.deinit();
+    const contacts = try Contacts.init(&gw);
+
+    const name = try testing.allocator.dupeZ(u8, "Achieng");
+    defer testing.allocator.free(name);
+    const handle = try testing.allocator.dupe(u8, "achieng");
+    defer testing.allocator.free(handle);
+    const nickname = try testing.allocator.dupeZ(u8, "Chi");
+    defer testing.allocator.free(nickname);
+
+    _ = try contacts.create(.{ .id = 1, .name = name, .handle = handle, .nickname = nickname }).commit();
+    _ = try contacts.create(.{ .id = 2, .name = name, .handle = handle }).commit();
+    // The allocator does not catch use-after-free, so clobber the buffers instead.
+    @memset(name, 'x');
+    @memset(handle, 'x');
+    @memset(nickname, 'x');
+
+    const first = (try contacts.byPk(1).one(testing.allocator)).?;
+    try testing.expectEqualStrings("Achieng", first.name);
+    try testing.expectEqual(@as(u8, 0), first.name[first.name.len]);
+    try testing.expectEqualStrings("achieng", first.handle);
+    try testing.expectEqualStrings("Chi", first.nickname.?);
+    try testing.expectEqual(@as(u8, 0), first.nickname.?[first.nickname.?.len]);
+    try testing.expectEqual(@as(?[:0]const u8, null), (try contacts.byPk(2).one(testing.allocator)).?.nickname);
+
+    const renamed = try testing.allocator.dupe(u8, "Otieno");
+    defer testing.allocator.free(renamed);
+    try testing.expectEqual(@as(usize, 1), try contacts.byPk(2).update()
+        .set(.name, renamed).set(.handle, renamed).set(.nickname, renamed).commit());
+    @memset(renamed, 'x');
+
+    const second = (try contacts.byPk(2).one(testing.allocator)).?;
+    try testing.expectEqualStrings("Otieno", second.name);
+    try testing.expectEqual(@as(u8, 0), second.name[second.name.len]);
+    try testing.expectEqualStrings("Otieno", second.handle);
+    try testing.expectEqualStrings("Otieno", second.nickname.?);
+
+    try testing.expectEqual(@as(usize, 1), try contacts.byPk(1).update().set(.nickname, null).commit());
+    try testing.expectEqual(@as(?[:0]const u8, null), (try contacts.byPk(1).one(testing.allocator)).?.nickname);
+}

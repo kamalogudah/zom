@@ -135,9 +135,14 @@ pub fn MemoryDataset(comptime S: type) type {
             return removed;
         }
 
+        /// Strings always fit (their kind is checked at compile time), so only
+        /// the other attribute types need a runtime check.
         fn validate(change: Q.Change) !void {
             switch (change.field) {
-                inline else => |tag| _ = try q.fromValue(@FieldType(T, @tagName(tag)), change.value),
+                inline else => |tag| {
+                    const F = @FieldType(T, @tagName(tag));
+                    if (comptime !isStringField(F)) _ = try q.fromValue(F, change.value);
+                },
             }
         }
 
@@ -159,9 +164,7 @@ pub fn MemoryDataset(comptime S: type) type {
             switch (change.field) {
                 inline else => |tag| {
                     const F = @FieldType(T, @tagName(tag));
-                    var v = change.value;
-                    if (v == .string) v = .{ .string = try self.arena.allocator().dupe(u8, v.string) };
-                    @field(row, @tagName(tag)) = try q.fromValue(F, v);
+                    @field(row, @tagName(tag)) = try ownedValue(F, self.arena.allocator(), change.value);
                 },
             }
         }
@@ -170,13 +173,50 @@ pub fn MemoryDataset(comptime S: type) type {
             const a = self.arena.allocator();
             var out = row;
             inline for (@typeInfo(T).@"struct".fields) |f| {
-                if (f.type == []const u8) {
-                    @field(out, f.name) = try a.dupe(u8, @field(row, f.name));
-                } else if (f.type == ?[]const u8) {
-                    if (@field(row, f.name)) |s| @field(out, f.name) = try a.dupe(u8, s);
+                switch (@typeInfo(f.type)) {
+                    .optional => |o| if (comptime q.isString(o.child)) {
+                        if (@field(row, f.name)) |s| @field(out, f.name) = try dupeString(o.child, a, s);
+                    },
+                    else => if (comptime q.isString(f.type)) {
+                        @field(out, f.name) = try dupeString(f.type, a, @field(row, f.name));
+                    },
                 }
             }
             return out;
         }
     };
+}
+
+fn isStringField(comptime F: type) bool {
+    return switch (@typeInfo(F)) {
+        .optional => |o| q.isString(o.child),
+        else => q.isString(F),
+    };
+}
+
+/// Like `q.fromValue`, but a string is copied into `a` as the attribute's
+/// exact type, so the row never points at the caller's buffer.
+fn ownedValue(comptime F: type, a: Allocator, v: q.Value) !F {
+    return switch (@typeInfo(F)) {
+        .optional => |o| if (v == .null) null else try ownedValue(o.child, a, v),
+        else => if (comptime q.isString(F)) dupeString(F, a, v.string) else q.fromValue(F, v),
+    };
+}
+
+/// Copies `s` into `a` as the string type `S`, keeping any sentinel.
+///
+/// Pointers to arrays (`*const [N]u8`) are rejected: the length is part of
+/// the type, so an update with a runtime string could not be stored without
+/// a length check that fails at runtime. Such fields are almost always
+/// string literals, which are static anyway; use `[]const u8` instead.
+fn dupeString(comptime S: type, a: Allocator, s: []const u8) Allocator.Error!S {
+    const p = @typeInfo(S).pointer;
+    if (p.size != .slice)
+        @compileError("zom: string attributes of type " ++ @typeName(S) ++ " are not supported, use []const u8");
+    if (p.sentinel()) |end| {
+        const buf = try a.allocSentinel(u8, s.len, end);
+        @memcpy(buf, s);
+        return buf;
+    }
+    return a.dupe(u8, s);
 }
