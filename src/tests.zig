@@ -371,3 +371,28 @@ test "enums order and compare in declaration order" {
     defer testing.allocator.free(esc_desc);
     try testing.expectEqualSlices(u32, &.{ 2, 1, 3 }, &.{ esc_desc[0].id, esc_desc[1].id, esc_desc[2].id });
 }
+
+fn updateUnderAllocationFailure(allocator: std.mem.Allocator) !void {
+    var gw = zom.memory.Gateway.init(allocator);
+    defer gw.deinit();
+    const users = try Users.init(&gw);
+    try seed(users, try Posts.init(&gw));
+
+    const before = try users.order(.id, .asc).toSlice(allocator);
+    defer allocator.free(before);
+
+    // Long enough that every copy needs a fresh arena buffer.
+    const name = "n" ** 4096;
+    const changed = users.update().set(.name, name).set(.email, name).commit() catch |err| {
+        const after = try users.order(.id, .asc).toSlice(testing.allocator);
+        defer testing.allocator.free(after);
+        try testing.expectEqualDeep(before, after);
+        return err;
+    };
+    try testing.expectEqual(@as(usize, 3), changed);
+    try testing.expectEqual(@as(usize, 3), users.where(.name, .eq, name).where(.email, .eq, name).count());
+}
+
+test "an update that runs out of memory leaves the dataset unchanged" {
+    try testing.checkAllAllocationFailures(testing.allocator, updateUnderAllocationFailure, .{});
+}
