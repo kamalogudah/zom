@@ -98,7 +98,7 @@ pub fn MemoryDataset(comptime S: type) type {
             return allocator.dupe(T, hits.items[start..end]);
         }
 
-        pub fn count(self: *Self, query: Q) usize {
+        pub fn count(self: *Self, query: Q) !usize {
             var n: usize = 0;
             for (self.rows.items) |row| {
                 if (query.matches(row)) n += 1;
@@ -124,7 +124,7 @@ pub fn MemoryDataset(comptime S: type) type {
             return n;
         }
 
-        pub fn delete(self: *Self, query: Q) usize {
+        pub fn delete(self: *Self, query: Q) !usize {
             var kept: usize = 0;
             for (self.rows.items) |row| {
                 if (!query.matches(row)) {

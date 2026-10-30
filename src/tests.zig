@@ -49,7 +49,7 @@ test "relations are chainable and lazy" {
     try seed(users, posts);
 
     const over_25 = users.where(.age, .gt, 25).order(.name, .asc);
-    try testing.expectEqual(@as(usize, 2), over_25.count());
+    try testing.expectEqual(@as(usize, 2), try over_25.count());
 
     const rows = try over_25.toSlice(testing.allocator);
     defer testing.allocator.free(rows);
@@ -57,7 +57,7 @@ test "relations are chainable and lazy" {
     try testing.expectEqualStrings("Wanjiru", rows[1].name);
 
     // The base relation is untouched by chaining.
-    try testing.expectEqual(@as(usize, 3), users.count());
+    try testing.expectEqual(@as(usize, 3), try users.count());
 
     const page = try users.order(.age, .desc).offset(1).limit(1).toSlice(testing.allocator);
     defer testing.allocator.free(page);
@@ -70,8 +70,8 @@ test "enum and null filters" {
     const users = try Users.init(&gw);
     try seed(users, try Posts.init(&gw));
 
-    try testing.expectEqual(@as(usize, 1), users.where(.role, .eq, .admin).count());
-    try testing.expectEqual(@as(usize, 2), users.where(.deleted_at, .eq, null).count());
+    try testing.expectEqual(@as(usize, 1), try users.where(.role, .eq, .admin).count());
+    try testing.expectEqual(@as(usize, 2), try users.where(.deleted_at, .eq, null).count());
 }
 
 test "one, first and byPk" {
@@ -122,8 +122,8 @@ test "update and delete" {
     try testing.expectEqualStrings("o@example.com", updated.email);
     try testing.expectEqual(@as(u8, 25), updated.age);
 
-    try testing.expectEqual(@as(usize, 1), users.where(.deleted_at, .neq, null).delete());
-    try testing.expectEqual(@as(usize, 2), users.count());
+    try testing.expectEqual(@as(usize, 1), try users.where(.deleted_at, .neq, null).delete());
+    try testing.expectEqual(@as(usize, 2), try users.count());
 }
 
 test "map to entities and combine has-many" {
@@ -243,7 +243,7 @@ test "primary key is unique on create and update" {
 
     // Moving one row to a free key is fine.
     try testing.expectEqual(@as(usize, 1), try users.byPk(2).update().set(.id, 9).commit());
-    try testing.expectEqual(@as(usize, 3), users.count());
+    try testing.expectEqual(@as(usize, 3), try users.count());
 }
 
 test "out of range runtime values are rejected without partial writes" {
@@ -279,8 +279,8 @@ test "u64 values above maxInt(i64) round-trip" {
     try testing.expectError(error.DuplicatePrimaryKey, counters.create(.{ .id = max, .n = 4 }).commit());
 
     try testing.expectEqual(@as(u64, 1), (try counters.where(.id, .eq, max).one(testing.allocator)).?.n);
-    try testing.expectEqual(@as(usize, 2), counters.where(.id, .gt, std.math.maxInt(i64)).count());
-    try testing.expectEqual(@as(usize, 3), counters.where(.id, .gte, 0).count());
+    try testing.expectEqual(@as(usize, 2), try counters.where(.id, .gt, std.math.maxInt(i64)).count());
+    try testing.expectEqual(@as(usize, 3), try counters.where(.id, .gte, 0).count());
 
     const rows = try counters.order(.id, .desc).toSlice(testing.allocator);
     defer testing.allocator.free(rows);
@@ -308,7 +308,7 @@ test "u64 above maxInt(u32) on a u32 attribute is rejected" {
     var id: u64 = std.math.maxInt(u64);
     _ = &id;
     try testing.expectError(error.ValueOutOfRange, users.byPk(1).update().set(.id, id).commit());
-    try testing.expectEqual(@as(usize, 1), users.where(.id, .eq, 1).count());
+    try testing.expectEqual(@as(usize, 1), try users.where(.id, .eq, 1).count());
 }
 
 const Contact = struct {
@@ -390,21 +390,21 @@ test "enums order and compare in declaration order" {
     const above_low = try tasks.where(.priority, .gt, .low).order(.id, .asc).toSlice(testing.allocator);
     defer testing.allocator.free(above_low);
     try testing.expectEqualSlices(u32, &.{ 1, 3 }, &.{ above_low[0].id, above_low[1].id });
-    try testing.expectEqual(@as(usize, 2), tasks.where(.priority, .lt, .high).count());
-    try testing.expectEqual(@as(usize, 1), tasks.where(.priority, .eq, .medium).count());
-    try testing.expectEqual(@as(usize, 2), tasks.where(.priority, .neq, .medium).count());
+    try testing.expectEqual(@as(usize, 2), try tasks.where(.priority, .lt, .high).count());
+    try testing.expectEqual(@as(usize, 1), try tasks.where(.priority, .eq, .medium).count());
+    try testing.expectEqual(@as(usize, 2), try tasks.where(.priority, .neq, .medium).count());
 
     // A runtime enum value goes through the same path as a literal.
     var p: Priority = .medium;
     _ = &p;
-    try testing.expectEqual(@as(usize, 1), tasks.where(.priority, .gte, p).where(.priority, .lt, .high).count());
+    try testing.expectEqual(@as(usize, 1), try tasks.where(.priority, .gte, p).where(.priority, .lt, .high).count());
 
     // Optional enums keep the null rules: ordering never matches null,
     // and nulls sort last on asc, first on desc.
-    try testing.expectEqual(@as(usize, 2), tasks.where(.escalated_to, .gt, .low).count());
-    try testing.expectEqual(@as(usize, 1), tasks.where(.escalated_to, .gt, .medium).count());
-    try testing.expectEqual(@as(usize, 1), tasks.where(.escalated_to, .eq, null).count());
-    try testing.expectEqual(@as(usize, 2), tasks.where(.escalated_to, .neq, null).count());
+    try testing.expectEqual(@as(usize, 2), try tasks.where(.escalated_to, .gt, .low).count());
+    try testing.expectEqual(@as(usize, 1), try tasks.where(.escalated_to, .gt, .medium).count());
+    try testing.expectEqual(@as(usize, 1), try tasks.where(.escalated_to, .eq, null).count());
+    try testing.expectEqual(@as(usize, 2), try tasks.where(.escalated_to, .neq, null).count());
 
     const esc_asc = try tasks.order(.escalated_to, .asc).toSlice(testing.allocator);
     defer testing.allocator.free(esc_asc);
@@ -433,7 +433,7 @@ fn updateUnderAllocationFailure(allocator: std.mem.Allocator) !void {
         return err;
     };
     try testing.expectEqual(@as(usize, 3), changed);
-    try testing.expectEqual(@as(usize, 3), users.where(.name, .eq, name).where(.email, .eq, name).count());
+    try testing.expectEqual(@as(usize, 3), try users.where(.name, .eq, name).where(.email, .eq, name).count());
 }
 
 test "an update that runs out of memory leaves the dataset unchanged" {
