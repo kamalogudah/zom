@@ -34,7 +34,6 @@ pub fn compileSelect(comptime T: type, allocator: Allocator, table: []const u8, 
     try sql.appendSlice(allocator, " FROM ");
     try sql.appendSlice(allocator, table);
 
-    var buf: [24]u8 = undefined;
     for (query.filterSlice(), 0..) |f, i| {
         try sql.appendSlice(allocator, if (i == 0) " WHERE " else " AND ");
         try sql.appendSlice(allocator, @tagName(f.field));
@@ -48,7 +47,7 @@ pub fn compileSelect(comptime T: type, allocator: Allocator, table: []const u8, 
         }
         try sql.append(allocator, ' ');
         try sql.appendSlice(allocator, f.op.sql());
-        try sql.appendSlice(allocator, try std.fmt.bufPrint(&buf, " ${d}", .{params.items.len + 1}));
+        try sql.print(allocator, " ${d}", .{params.items.len + 1});
         try params.append(allocator, f.value);
     }
 
@@ -57,8 +56,8 @@ pub fn compileSelect(comptime T: type, allocator: Allocator, table: []const u8, 
         try sql.appendSlice(allocator, @tagName(o.field));
         try sql.appendSlice(allocator, if (o.direction == .asc) " ASC" else " DESC");
     }
-    if (query.limit) |l| try sql.appendSlice(allocator, try std.fmt.bufPrint(&buf, " LIMIT {d}", .{l}));
-    if (query.offset > 0) try sql.appendSlice(allocator, try std.fmt.bufPrint(&buf, " OFFSET {d}", .{query.offset}));
+    if (query.limit) |l| try sql.print(allocator, " LIMIT {d}", .{l});
+    if (query.offset > 0) try sql.print(allocator, " OFFSET {d}", .{query.offset});
 
     return .{ .sql = try sql.toOwnedSlice(allocator), .params = try params.toOwnedSlice(allocator) };
 }
