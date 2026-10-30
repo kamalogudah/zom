@@ -168,6 +168,23 @@ test "sql compiler renders the same relation as a statement" {
     try testing.expectEqualStrings("admin", compiled.params[1].string);
 }
 
+test "sql compiler renders the largest limit and offset in full" {
+    var gw = zom.memory.Gateway.init(testing.allocator);
+    defer gw.deinit();
+    const users = try Users.init(&gw);
+
+    const max = std.math.maxInt(usize);
+    const rel = users.limit(max).offset(max);
+    const compiled = try zom.sql.compileSelect(UserTuple, testing.allocator, Users.schema.name, rel.query);
+    defer compiled.deinit(testing.allocator);
+
+    var expected: [128]u8 = undefined;
+    try testing.expectEqualStrings(
+        try std.fmt.bufPrint(&expected, "SELECT id, name, email, age, role, deleted_at FROM users LIMIT {d} OFFSET {d}", .{ max, max }),
+        compiled.sql,
+    );
+}
+
 test "order puts nulls last on asc and first on desc" {
     var gw = zom.memory.Gateway.init(testing.allocator);
     defer gw.deinit();
