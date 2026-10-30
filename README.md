@@ -284,6 +284,10 @@ zom: adapter 'csv' is not .writable, so `create` is not available on users (its 
 | `error.InvalidNullComparison` | `sql.compileSelect`, for `lt`/`lte`/`gt`/`gte` against `null`. |
 | `error.OutOfMemory` | Anything that takes or uses an allocator. |
 
+`zom.adapter.Error` reserves the names every adapter uses for the same
+condition (`DuplicatePrimaryKey`, `ValueOutOfRange`, `NotFound`, `ReadOnly`,
+`ConnectionFailed`); its doc comments say when each one applies.
+
 ### Planned changes
 
 These are scheduled in [plan.md](plan.md) and will each come with a version

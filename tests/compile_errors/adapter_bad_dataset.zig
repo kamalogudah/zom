@@ -3,6 +3,7 @@
 // expect: - missing `pub fn count`
 // expect: query.Query(adapter_bad_dataset.Item), mem.Allocator) !adapter_bad_dataset.Item`
 // expect: - `delete` must be `fn (*Self, zom.Query(Tuple)) !usize`, found
+// expect: - `supports` must be a `zom.Supports`, found `bool`
 const std = @import("std");
 const zom = @import("zom");
 
@@ -17,7 +18,9 @@ const FakeGateway = struct {
 
     pub fn Dataset(comptime S: type) type {
         return struct {
-            // Returns one tuple, not a slice; count is missing; delete is not fallible.
+            // Returns one tuple, not a slice; count is missing; delete is not
+            // fallible; supports is not a zom.Supports.
+            pub const supports = true;
             pub fn read(_: *@This(), _: zom.Query(S.Tuple), _: std.mem.Allocator) !S.Tuple {
                 return error.Unused;
             }

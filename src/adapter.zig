@@ -28,11 +28,69 @@
 //!   insertMany(*Self, []const S.Tuple) !usize        // .batch_insert
 //!   update(*Self, Q, []const Q.Change) !usize        // .updatable
 //!   delete(*Self, Q) !usize                          // .deletable
+//!   pub const supports: zom.Supports                 // query features
 //!
 //! `self` may be taken by value, `*Self` or `*const Self`.
 
 const std = @import("std");
 const q = @import("query.zig");
+
+/// The query features a dataset can evaluate itself. A dataset declares
+/// `pub const supports: zom.Supports = ...;`, setting only what it handles;
+/// one that declares nothing gets the defaults. Relations do not check this
+/// yet (plan.md Phase 3).
+pub const Supports = struct {
+    /// Filters combined with `or`.
+    @"or": bool = false,
+    /// `.in` filters: the attribute is one of a list of values.
+    in: bool = false,
+    /// `.like` filters: pattern matching on strings.
+    like: bool = false,
+    /// Ordering by any attribute, not only the primary key.
+    order_on: bool = true,
+    /// Skipping rows with `offset`.
+    offset: bool = true,
+    /// Reading only some attributes (`select`).
+    projection: bool = false,
+    /// Joining another dataset.
+    join: bool = false,
+
+    /// Every feature, e.g. for an adapter that evaluates queries in memory.
+    pub const all: Supports = .{
+        .@"or" = true,
+        .in = true,
+        .like = true,
+        .order_on = true,
+        .offset = true,
+        .projection = true,
+        .join = true,
+    };
+};
+
+/// The error names every adapter must use for the same condition (plan.md
+/// section 3.1), so callers can handle them the same way whatever the
+/// adapter. An adapter may return other errors too; these names are only
+/// reserved for these conditions.
+pub const Error = error{
+    /// `insert` or `insertMany` was given a tuple whose primary key is
+    /// already stored, or `update` would set the primary key to one in use
+    /// (or to the same key on more than one tuple).
+    DuplicatePrimaryKey,
+    /// A runtime value does not fit the attribute it is written to, e.g. 300
+    /// for a `u8`.
+    ValueOutOfRange,
+    /// The adapter looked up one tuple by key, as its backend requires, and
+    /// there is none. A query that matches nothing is not an error: `read`
+    /// returns an empty slice and `count` returns 0.
+    NotFound,
+    /// The backend refuses writes at runtime, e.g. a database opened
+    /// read-only or a replica. An adapter that can never write leaves out
+    /// `insert`, `update` and `delete` instead, which is a compile error.
+    ReadOnly,
+    /// The adapter cannot reach its backend: connecting failed, or the
+    /// connection was lost.
+    ConnectionFailed,
+};
 
 pub const Capability = enum { writable, batch_insert, updatable, deletable, transaction };
 
@@ -74,6 +132,12 @@ pub fn Adapter(comptime G: type) type {
                 @field(caps, @tagName(cap)) = @hasDecl(Owner, declFor(cap));
             }
             return caps;
+        }
+
+        /// The dataset's `supports`, or the defaults when it declares none.
+        pub fn supports(comptime S: type) Supports {
+            const D = Dataset(S);
+            return if (@hasDecl(D, "supports")) D.supports else .{};
         }
 
         pub fn has(comptime S: type, comptime cap: Capability) bool {
@@ -189,6 +253,8 @@ fn checkDataset(comptime G: type, comptime S: type) void {
         .returns = .{ .fallible = usize },
         .text = "fn (*Self, zom.Query(Tuple)) !usize",
     });
+    if (@hasDecl(D, "supports") and @TypeOf(D.supports) != Supports)
+        problems = problems ++ "\n  - `supports` must be a `zom.Supports`, found `" ++ @typeName(@TypeOf(D.supports)) ++ "`";
 
     if (problems.len > 0) @compileError(header ++ problems);
 }

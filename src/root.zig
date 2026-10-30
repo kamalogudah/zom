@@ -22,6 +22,7 @@ pub const adapter = @import("adapter.zig");
 pub const Adapter = adapter.Adapter;
 pub const Capability = adapter.Capability;
 pub const Capabilities = adapter.Capabilities;
+pub const Supports = adapter.Supports;
 
 pub const changeset = @import("changeset.zig");
 
