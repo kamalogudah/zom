@@ -5,41 +5,17 @@
 //! relation, exactly like `users.where(...).order(...)` in ROM. Nothing hits
 //! the dataset until you materialize it (`toSlice`, `one`, `mapTo`, ...).
 //!
-//! The adapter contract is checked at compile time. A gateway must provide:
-//!
-//!   pub fn Dataset(comptime S: type) type    // S is a zom.Schema
-//!   pub fn dataset(self: *Gateway, comptime S: type) !*Dataset(S)
-//!
-//! and the dataset must provide:
-//!
-//!   read(query, allocator) ![]T
-//!   count(query) !usize
-//!   insert(tuple) !T                   // error.DuplicatePrimaryKey on clash
-//!   update(query, changes) !usize
-//!   delete(query) !usize
+//! The adapter contract is checked at compile time by `zom.Adapter` (see
+//! adapter.zig). `create`, `update` and `delete` need the matching dataset
+//! capability, and fail to compile, naming the adapter, when it is missing.
 
 const std = @import("std");
 const q = @import("query.zig");
 const mapper = @import("mapper.zig");
 const changeset = @import("changeset.zig");
-
-fn assertGateway(comptime G: type) void {
-    inline for (.{ "Dataset", "dataset" }) |decl| {
-        if (!@hasDecl(G, decl))
-            @compileError("zom: gateway " ++ @typeName(G) ++ " is missing `" ++ decl ++ "`");
-    }
-}
-
-fn assertDataset(comptime D: type) void {
-    inline for (.{ "read", "count", "insert", "update", "delete" }) |decl| {
-        if (!@hasDecl(D, decl))
-            @compileError("zom: dataset " ++ @typeName(D) ++ " is missing `" ++ decl ++ "`");
-    }
-}
+const adapter = @import("adapter.zig");
 
 pub fn Relation(comptime S: type, comptime Gateway: type) type {
-    comptime assertGateway(Gateway);
-
     return struct {
         const Self = @This();
 
@@ -47,11 +23,8 @@ pub fn Relation(comptime S: type, comptime Gateway: type) type {
         pub const Tuple = S.Tuple;
         pub const Q = q.Query(Tuple);
         pub const Field = Q.Field;
-        pub const DatasetT = Gateway.Dataset(S);
-
-        comptime {
-            assertDataset(DatasetT);
-        }
+        pub const Adapter = adapter.Adapter(Gateway);
+        pub const DatasetT = Adapter.Dataset(S);
 
         dataset: *DatasetT,
         query: Q = .{},
@@ -146,6 +119,7 @@ pub fn Relation(comptime S: type, comptime Gateway: type) type {
 
         /// ROM's `users.by_pk(1).command(:delete).call`.
         pub fn delete(self: Self) !usize {
+            comptime Adapter.require(S, .deletable, "delete");
             return try self.dataset.delete(self.query);
         }
     };

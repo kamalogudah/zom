@@ -10,6 +10,9 @@ const q = @import("../query.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Gateway = struct {
+    pub const adapter_name = "memory";
+    pub const Config = struct {};
+
     allocator: Allocator,
     datasets: std.StringHashMapUnmanaged(Entry) = .empty,
 
@@ -19,7 +22,7 @@ pub const Gateway = struct {
         type_name: []const u8,
     };
 
-    pub fn init(allocator: Allocator) Gateway {
+    pub fn init(allocator: Allocator, _: Config) Gateway {
         return .{ .allocator = allocator };
     }
 

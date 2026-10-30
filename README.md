@@ -7,8 +7,8 @@ that each do one thing, and nothing is an "active record".
 
 | ROM (Ruby)                                 | zom                                                            |
 |--------------------------------------------|----------------------------------------------------------------|
-| `ROM::Gateway` / adapter                   | `zom.memory.Gateway` (any type with `Dataset` + `dataset`)     |
-| dataset                                    | `Gateway.Dataset(Schema)`: `read`, `count`, `insert`, `update`, `delete` |
+| `ROM::Gateway` / adapter                   | `zom.memory.Gateway` (any type that passes `zom.Adapter`)      |
+| dataset                                    | `Gateway.Dataset(Schema)`: `read`, `count`, and optionally `insert`, `insertMany`, `update`, `delete` |
 | `schema(:users) do attribute ... end`      | `zom.Schema(UserTuple, "users", .id)`                          |
 | `ROM::Relation`                            | `zom.Relation(Schema, Gateway)`, an immutable value             |
 | `users.where(...).order(...).limit(...)`   | `users.where(.age, .gt, 25).order(.name, .asc).limit(10)`      |
@@ -47,9 +47,9 @@ Each row below says whether that part exists today or is planned (see
 
 | | rom (Ruby) | zom (Zig) |
 |---|---|---|
-| **Adapter registry** | `ROM.register_adapter(:csv, ROM::CSV)` puts the adapter in a global runtime table, and `ROM.container(:csv, path)` finds it there by symbol. | Zig has no runtime registry, and zom doesn't need one. An adapter is a Zig package that exports a `Gateway` type, and you pass that type in directly: `zom.Relation(Schema, zom_csv.Gateway)`. The contract is checked when the code compiles, not when it runs. *Today: the check exists, for `zom.memory`. Planned: separate adapter packages.* |
-| **Adapter shape** | Adapters subclass `ROM::Gateway`, `ROM::Relation` and `ROM::Memory::Dataset`, then override methods. | No inheritance. A gateway is any type with the right declarations (`Dataset`, `dataset`, and `read`/`count`/`insert`/`update`/`delete` on the dataset). File adapters will *wrap* the memory engine instead of subclassing it. *Planned: `zom.memory.Store(S)`.* |
-| **Optional features** | Whether an adapter supports a command is found out at runtime, when the command is built or run. | An adapter will simply leave out `insert`, `update` or `delete`, and `relation.create(...)` will fail to compile with a message naming the adapter. *Planned.* |
+| **Adapter registry** | `ROM.register_adapter(:csv, ROM::CSV)` puts the adapter in a global runtime table, and `ROM.container(:csv, path)` finds it there by symbol. | Zig has no runtime registry, and zom doesn't need one. An adapter is a Zig package that exports a `Gateway` type, and you pass that type in directly: `zom.Relation(Schema, zom_csv.Gateway)`. The contract is checked when the code compiles, not when it runs. *Today: `zom.Adapter` checks it, for `zom.memory` or any gateway you write. Planned: separate adapter packages.* |
+| **Adapter shape** | Adapters subclass `ROM::Gateway`, `ROM::Relation` and `ROM::Memory::Dataset`, then override methods. | No inheritance. A gateway is any type with the right declarations (see [the adapter contract](#the-adapter-contract)). File adapters will *wrap* the memory engine instead of subclassing it. *Planned: `zom.memory.Store(S)`.* |
+| **Optional features** | Whether an adapter supports a command is found out at runtime, when the command is built or run. | An adapter simply leaves out `insert`, `update` or `delete`, and `relation.create(...).commit()` fails to compile with a message naming the adapter. `zom.Adapter(G).capabilities(S)` says what it supports. |
 | **Checking an adapter** | `ROM::Lint` specs, run by each adapter gem. | `zom.lint`, a test suite each adapter runs in its own `zig build test`. *Planned.* |
 | **Container** | `ROM.container` builds a runtime registry: `container.relations[:users]`. | Relations are types, so a container is a comptime struct with one field per relation: `app.relations.users`. A missing relation is a compile error, not a runtime lookup failure. *Planned: `zom.Container`.* |
 | **Schema inference** | rom-sql can read a table's columns from the database at boot. | A Zig struct has to exist when the code compiles, before any database is reachable, so you write the schema struct yourself. The plan adds a startup check against the database, and later a code generator. |
@@ -68,7 +68,7 @@ const zom = @import("zom");
 const User = struct { id: u32, name: []const u8, age: u8, deleted_at: ?i64 = null };
 const Users = zom.Relation(zom.Schema(User, "users", .id), zom.memory.Gateway);
 
-var gw = zom.memory.Gateway.init(allocator);
+var gw = zom.memory.Gateway.init(allocator, .{});
 defer gw.deinit();
 const users = try Users.init(&gw);
 
@@ -131,7 +131,11 @@ breaking change needs a minor version bump and an entry in
 | Declaration | What it is |
 |---|---|
 | `zom.Schema(T, name, pk)` | Returns a schema type with `Tuple = T`, `name` (the dataset name) and `primary_key` (a field of `T`, as an enum literal). |
-| `zom.Relation(S, Gateway)` | Returns an immutable relation type over schema `S` and an adapter's `Gateway`. Checks the [adapter contract](#the-adapter-contract) at compile time. |
+| `zom.Relation(S, Gateway)` | Returns an immutable relation type over schema `S` and an adapter's `Gateway`. Checks the [adapter contract](#the-adapter-contract) at compile time through `zom.Adapter(Gateway)`, which it exposes as `Relation.Adapter`. |
+| `zom.Adapter(G)` | Checks gateway `G` against the [adapter contract](#the-adapter-contract), reporting every problem in one compile error. Has `Gateway`, `name` (`G.adapter_name`), `Dataset(S)` (checks the dataset for schema `S`), `capabilities(S) Capabilities`, `has(S, cap) bool` and `require(S, cap, method)`. |
+| `zom.Capability` | `writable`, `batch_insert`, `updatable`, `deletable`, `transaction`. |
+| `zom.Capabilities` | A struct with one `bool` per `Capability`, all `false` by default. |
+| `zom.adapter` | The module behind `Adapter`, `Capability` and `Capabilities`. |
 | `zom.Query(T)` | The adapter-neutral query a relation builds: `filters` (AND-ed, at most `max_filters = 16`), `order: ?Order`, `limit: ?usize`, `offset: usize`. Adapters read it through `filterSlice()`, and may use `matches(row)`, `lessThan(order, a, b)` and `fieldValue(row, field)` to evaluate it in memory. Nested types: `Field` (enum of `T`'s fields), `Filter`, `Order`, `Change`. |
 | `zom.Value` | The runtime value carried by filters and changes. See [Value](#value). |
 | `zom.Op` | Filter operators: `eq`, `neq`, `lt`, `lte`, `gt`, `gte`. `op.sql()` returns the SQL spelling. |
@@ -140,7 +144,7 @@ breaking change needs a minor version bump and an entry in
 | `zom.Mapper(Src, Dst, .{ .renames })` | A comptime mapper: `call(src) Dst` and `many(allocator, srcs) ![]Dst`. A `Dst` field takes the `Src` field of the same name (or its rename), else its default; neither is a compile error. |
 | `zom.combineMany(.{ .into, .parent_key, .child_key }, allocator, parents, children)` | Sets `parent.into` to the children whose `child_key` equals the parent's `parent_key`. O(n·m). |
 | `zom.mapper` | The module behind `Mapper` and `combineMany`, with their option types `Options`, `Rename` and `CombineOptions`. |
-| `zom.memory` | The in-memory adapter: `Gateway` (`init(allocator)`, `deinit()`) and `MemoryDataset(S)`. |
+| `zom.memory` | The in-memory adapter: `Gateway` (`adapter_name = "memory"`, `Config = struct {}`, `init(allocator, Config)`, `deinit()`) and `MemoryDataset(S)`. Every capability except `transaction`. |
 | `zom.sql` | `compileSelect(T, allocator, table, query) !Compiled`, returning `Compiled{ sql, params }` with Postgres placeholders (`$1`). `writeIdent` appends a quoted identifier. |
 | `zom.query` | The module behind `Query`, `Value`, `Op` and `Direction`. Adapters can use `toValue(x) Value` and `fromValue(F, value) !F` to convert between attribute values and `Value`. Its `assert*`, `isString` and `isComptimeOnly` helpers are used by the core and are not part of the frozen API. |
 
@@ -197,12 +201,28 @@ compile error until `u128` support lands.
 
 ### The adapter contract
 
-A gateway is any type with these declarations. `zom.Relation` checks that
-they exist when it is compiled:
+A gateway is any type with these declarations. `zom.Adapter(G)` (which
+`zom.Relation` calls) checks them when it is compiled, signatures included,
+and lists every problem in one error:
+
+```
+zom: gateway 'app.CsvGateway' does not satisfy the adapter contract:
+  - missing `pub const adapter_name`
+  - missing `pub fn deinit`
+```
 
 ```zig
-// The smallest gateway zom accepts: every dataset is empty and read-only.
+// The smallest gateway zom accepts: every dataset is empty, and with no
+// insert, update or delete it is read-only.
 const EmptyGateway = struct {
+    pub const adapter_name = "empty";
+    pub const Config = struct {};
+
+    pub fn init(_: std.mem.Allocator, _: Config) @This() {
+        return .{};
+    }
+    pub fn deinit(_: *@This()) void {}
+
     pub fn Dataset(comptime S: type) type {
         return struct {
             const Q = zom.Query(S.Tuple);
@@ -212,15 +232,6 @@ const EmptyGateway = struct {
             }
             pub fn count(_: *@This(), _: Q) !usize {
                 return 0;
-            }
-            pub fn insert(_: *@This(), _: S.Tuple) !S.Tuple {
-                return error.ReadOnly;
-            }
-            pub fn update(_: *@This(), _: Q, _: []const Q.Change) !usize {
-                return error.ReadOnly;
-            }
-            pub fn delete(_: *@This(), _: Q) !usize {
-                return error.ReadOnly;
             }
         };
     }
@@ -236,18 +247,31 @@ const EmptyGateway = struct {
 
 In full, with `Q = zom.Query(S.Tuple)`:
 
-| Declaration | Signature | Contract |
-|---|---|---|
-| `Gateway.Dataset` | `fn (comptime S: type) type` | The dataset type for schema `S`. |
-| `Gateway.dataset` | `fn (*Gateway, comptime S: type) !*Dataset(S)` | Returns the same dataset every time for the same `S`. |
-| `read` | `fn (*Dataset, Q, Allocator) ![]S.Tuple` | Applies filters, then order, then offset and limit. The caller frees the slice. |
-| `count` | `fn (*Dataset, Q) !usize` | Applies filters only. |
-| `insert` | `fn (*Dataset, S.Tuple) !S.Tuple` | Returns the tuple as stored. `error.DuplicatePrimaryKey` on a key clash. |
-| `update` | `fn (*Dataset, Q, []const Q.Change) !usize` | Returns the rows changed. A failed update changes nothing. |
-| `delete` | `fn (*Dataset, Q) !usize` | Returns the rows removed. |
+| Declaration | Signature | Required? | Contract |
+|---|---|---|---|
+| `Gateway.adapter_name` | a string | yes | Names the adapter in error messages. |
+| `Gateway.Config` | a type | yes | What `init` takes. |
+| `Gateway.init` | `fn (Allocator, Config) Gateway` or `!Gateway` | yes | |
+| `Gateway.deinit` | `fn (*Gateway) void` | yes | Frees everything the gateway owns. |
+| `Gateway.Dataset` | `fn (comptime S: type) type` | yes | The dataset type for schema `S`. |
+| `Gateway.dataset` | `fn (*Gateway, comptime S: type) !*Dataset(S)` | yes | Returns the same dataset every time for the same `S`. |
+| `Gateway.transaction` | `fn (*Gateway, ...)` | no, `.transaction` | Not used by the core yet. |
+| `read` | `fn (*Dataset, Q, Allocator) ![]S.Tuple` | yes | Applies filters, then order, then offset and limit. The caller frees the slice. |
+| `count` | `fn (*Dataset, Q) !usize` | yes | Applies filters only. |
+| `insert` | `fn (*Dataset, S.Tuple) !S.Tuple` | no, `.writable` | Returns the tuple as stored. `error.DuplicatePrimaryKey` on a key clash. |
+| `insertMany` | `fn (*Dataset, []const S.Tuple) !usize` | no, `.batch_insert` | Returns the tuples stored. Not used by the core yet. |
+| `update` | `fn (*Dataset, Q, []const Q.Change) !usize` | no, `.updatable` | Returns the rows changed. A failed update changes nothing. |
+| `delete` | `fn (*Dataset, Q) !usize` | no, `.deletable` | Returns the rows removed. |
 
-Every call is fallible, so an adapter's own errors (I/O, connection loss)
-flow through `try`.
+A method may take `self` by value, `*Self` or `*const Self`. Every dataset
+call is fallible, so an adapter's own errors (I/O, connection loss) flow
+through `try`. Without `.writable`, `.updatable` or `.deletable`, the matching
+`create(...).commit()`, `update().commit()` or `delete()` is a compile error
+naming the adapter:
+
+```
+zom: adapter 'csv' is not .writable, so `create` is not available on users (its dataset has no `insert`)
+```
 
 ### Errors
 
@@ -265,9 +289,6 @@ flow through `try`.
 These are scheduled in [plan.md](plan.md) and will each come with a version
 bump and a changelog entry:
 
-- Phase 1: `zom.Adapter(G)` replaces the checks inside `zom.Relation`, and
-  gateways gain `adapter_name`, `Config`, `init` and `deinit`. `insert`,
-  `update` and `delete` become optional capabilities.
 - Phase 3: `zom.sql` moves out of the core into the `zom-sql` package.
 - Phase 4: `zom.combineMany` is deprecated in favour of `combine`.
 - Phase 6: `zom.Value` gains a `u128` variant.
@@ -343,6 +364,7 @@ links to the topics below.
 | `src/root.zig` | Public API: re-exports everything | How a Zig package exposes modules |
 | `src/schema.zig` | `Schema(T, name, pk)` returns a type | Functions that return types (generics) |
 | `src/query.zig` | `Value` union, `Query(T)`, filter matching, compile-time type checks | Tagged unions, `@typeInfo`, `@compileError` |
+| `src/adapter.zig` | `Adapter(G)`: checks the adapter contract and finds a gateway's capabilities | `@hasDecl`, `@typeInfo(...).@"fn"`, building comptime strings |
 | `src/relation.zig` | `Relation(S, Gateway)`: immutable query builder | Comptime field enums, `anytype` |
 | `src/changeset.zig` | `Create` and `Update` changesets | Fixed-capacity arrays |
 | `src/mapper.zig` | Copies tuples into domain structs | `inline for` over struct fields |
@@ -390,13 +412,13 @@ const User = struct { id: u32, age: u8 };
 const Users = zom.Relation(zom.Schema(User, "users", .id), zom.memory.Gateway);
 
 export fn entry() void {
-    var gw = zom.memory.Gateway.init(std.heap.page_allocator);
+    var gw = zom.memory.Gateway.init(std.heap.page_allocator, .{});
     const users = Users.init(&gw) catch return;
     _ = users.where(.age, .eq, null);
 }
 ```
 
-`zig build compile-errors` (also run by `zig build test`) compiles every case and fails if one compiles, or if its stderr doesn't contain the `// expect:` text. To add a case, drop a new `.zig` file in the folder; `build.zig` picks it up. Put the illegal code inside an `export fn` so the compiler analyzes it, and copy the expected text from the real error (types declared in the case show up as `<file name>.<Type>`). To reproduce one by hand:
+`zig build compile-errors` (also run by `zig build test`) compiles every case and fails if one compiles, or if its stderr doesn't contain the `// expect:` text. For a multi-line error, start the file with several `// expect:` lines (one per line of the message, without its indentation); each must appear in stderr, as in `adapter_missing_decls.zig`. To add a case, drop a new `.zig` file in the folder; `build.zig` picks it up. Put the illegal code inside an `export fn` so the compiler analyzes it, and copy the expected text from the real error (types declared in the case show up as `<file name>.<Type>`). To reproduce one by hand:
 
 ```sh
 zig build-obj -fno-emit-bin --dep zom -Mroot=tests/compile_errors/null_on_non_optional.zig -Mzom=src/root.zig

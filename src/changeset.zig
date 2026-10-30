@@ -23,6 +23,7 @@ pub fn Create(comptime Rel: type) type {
 
         /// Returns the tuple as stored by the adapter.
         pub fn commit(self: Self) !Rel.Tuple {
+            comptime Rel.Adapter.require(Rel.schema, .writable, "create");
             return self.relation.dataset.insert(self.tuple);
         }
     };
@@ -50,6 +51,7 @@ pub fn Update(comptime Rel: type) type {
 
         /// Returns the number of tuples updated.
         pub fn commit(self: Self) !usize {
+            comptime Rel.Adapter.require(Rel.schema, .updatable, "update");
             if (self.change_count == 0) return 0;
             return self.relation.dataset.update(self.relation.query, self.changes[0..self.change_count]);
         }

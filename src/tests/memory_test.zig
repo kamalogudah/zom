@@ -8,7 +8,7 @@ const Posts = fixtures.Posts;
 const seed = fixtures.seed;
 
 test "primary key is unique on create and update" {
-    var gw = zom.memory.Gateway.init(testing.allocator);
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
     defer gw.deinit();
     const users = try Users.init(&gw);
     try seed(users, try Posts.init(&gw));
@@ -29,7 +29,7 @@ const Counter = struct { id: u64, n: u64 };
 const Counters = zom.Relation(zom.Schema(Counter, "counters", .id), zom.memory.Gateway);
 
 test "u64 values above maxInt(i64) round-trip" {
-    var gw = zom.memory.Gateway.init(testing.allocator);
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
     defer gw.deinit();
     const counters = try Counters.init(&gw);
 
@@ -70,7 +70,7 @@ const Contact = struct {
 const Contacts = zom.Relation(zom.Schema(Contact, "contacts", .id), zom.memory.Gateway);
 
 test "every string type is copied on insert and update" {
-    var gw = zom.memory.Gateway.init(testing.allocator);
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
     defer gw.deinit();
     const contacts = try Contacts.init(&gw);
 
@@ -113,7 +113,7 @@ test "every string type is copied on insert and update" {
 }
 
 fn updateUnderAllocationFailure(allocator: std.mem.Allocator) !void {
-    var gw = zom.memory.Gateway.init(allocator);
+    var gw = zom.memory.Gateway.init(allocator, .{});
     defer gw.deinit();
     const users = try Users.init(&gw);
     try seed(users, try Posts.init(&gw));

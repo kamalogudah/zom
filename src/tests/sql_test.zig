@@ -7,7 +7,7 @@ const UserTuple = fixtures.UserTuple;
 const Users = fixtures.Users;
 
 test "sql compiler renders the same relation as a statement" {
-    var gw = zom.memory.Gateway.init(testing.allocator);
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
     defer gw.deinit();
     const users = try Users.init(&gw);
 
@@ -26,7 +26,7 @@ test "sql compiler renders the same relation as a statement" {
 }
 
 test "sql compiler renders the largest limit and offset in full" {
-    var gw = zom.memory.Gateway.init(testing.allocator);
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
     defer gw.deinit();
     const users = try Users.init(&gw);
 
