@@ -135,6 +135,47 @@ test "capabilities come from the optional declarations" {
     try testing.expectEqualStrings("tx", zom.Adapter(TransactionalGateway).name);
 }
 
+fn SupportingDataset(comptime S: type) type {
+    const T = S.Tuple;
+    const Q = zom.Query(T);
+    return struct {
+        pub const supports: zom.Supports = .{ .in = true, .offset = false };
+
+        pub fn read(_: *@This(), _: Q, a: std.mem.Allocator) ![]T {
+            return a.alloc(T, 0);
+        }
+        pub fn count(_: *@This(), _: Q) !usize {
+            return 0;
+        }
+    };
+}
+
+test "memory supports every query feature" {
+    try testing.expectEqual(zom.Supports.all, comptime zom.Adapter(zom.memory.Gateway).supports(Items));
+}
+
+test "a dataset without supports gets the defaults" {
+    const s = comptime zom.Adapter(FakeGateway(ReadOnlyDataset)).supports(Items);
+    try testing.expectEqual(zom.Supports{}, s);
+    try testing.expect(!s.@"or" and !s.in and !s.like and !s.projection and !s.join);
+    try testing.expect(s.order_on and s.offset);
+}
+
+test "a declared supports is returned as is" {
+    try testing.expectEqual(
+        zom.Supports{ .in = true, .offset = false },
+        comptime zom.Adapter(FakeGateway(SupportingDataset)).supports(Items),
+    );
+}
+
+test "the shared adapter errors merge into other error sets" {
+    const E = zom.adapter.Error || error{Unrelated};
+    const err: E = error.NotFound;
+    try testing.expectEqual(error.NotFound, err);
+    // Error names are global, so an adapter's own `error.ReadOnly` is the same one.
+    try testing.expect(@as(anyerror, error.ReadOnly) == @as(anyerror, zom.adapter.Error.ReadOnly));
+}
+
 test "a read-only adapter still reads through a relation" {
     const G = FakeGateway(ReadOnlyDataset);
     const Rel = zom.Relation(Items, G);

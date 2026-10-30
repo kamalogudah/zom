@@ -19,6 +19,14 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
   it has, as `zom.Capability` values: `writable` (`insert`), `batch_insert`
   (`insertMany`), `updatable` (`update`), `deletable` (`delete`) and
   `transaction`. `zom.Relation` exposes it as `Relation.Adapter`. ([#12])
+- `zom.Supports` lists the query features a dataset can evaluate (`or`, `in`,
+  `like`, `order_on`, `offset`, `projection`, `join`). A dataset declares
+  `pub const supports: zom.Supports`; `Adapter(G).supports(S)` returns it,
+  or the defaults when there is none. The memory adapter declares `.all`.
+  Relations do not check it yet. ([#13])
+- `zom.adapter.Error` names the errors every adapter must use for the same
+  condition: `DuplicatePrimaryKey`, `ValueOutOfRange`, `NotFound`,
+  `ReadOnly` and `ConnectionFailed`. ([#13])
 
 ### Changed (breaking)
 
@@ -96,3 +104,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#10]: https://github.com/kamalogudah/zom/issues/10
 [#11]: https://github.com/kamalogudah/zom/issues/11
 [#12]: https://github.com/kamalogudah/zom/issues/12
+[#13]: https://github.com/kamalogudah/zom/issues/13

@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const q = @import("../query.zig");
+const Supports = @import("../adapter.zig").Supports;
 const Allocator = std.mem.Allocator;
 
 pub const Gateway = struct {
@@ -59,6 +60,9 @@ pub fn MemoryDataset(comptime S: type) type {
         const T = S.Tuple;
         const Q = q.Query(T);
         const pk = S.primary_key;
+
+        /// Every query is evaluated here, in memory.
+        pub const supports: Supports = .all;
 
         allocator: Allocator,
         arena: std.heap.ArenaAllocator,
