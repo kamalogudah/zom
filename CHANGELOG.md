@@ -7,6 +7,12 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ## [Unreleased]
 
+### Added
+
+- `zig build compile-errors` checks that each file in `tests/compile_errors/`
+  fails to compile with the message on its `// expect:` line. `zig build test`
+  runs it too. ([#11])
+
 ## [0.2.0] - 2026-10-30
 
 Phase 0 of [plan.md](plan.md): the core is tidied and its public API is
@@ -70,3 +76,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#8]: https://github.com/kamalogudah/zom/issues/8
 [#9]: https://github.com/kamalogudah/zom/issues/9
 [#10]: https://github.com/kamalogudah/zom/issues/10
+[#11]: https://github.com/kamalogudah/zom/issues/11
