@@ -25,7 +25,6 @@ paired with [rom-sql](https://github.com/hanakai-rb/rom-sql),
 | Packaging | One package, `zom`, with all adapters inside it. |
 
 Open issues from the last review, still to fix:
-- Enums sort alphabetically, not in declaration order.
 - An update can be left half-done if the arena runs out of memory.
 - In the SQL compiler, large `LIMIT`/`OFFSET` values overflow the format buffer, and identifiers are not quoted.
 

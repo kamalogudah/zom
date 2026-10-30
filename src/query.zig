@@ -264,7 +264,7 @@ pub fn Query(comptime T: type) type {
                     if (!ok) return false;
                     continue;
                 }
-                const ord = actual.order(f.value) orelse return false;
+                const ord = compare(f.field, actual, f.value) orelse return false;
                 const ok = switch (f.op) {
                     .eq => ord == .eq,
                     .neq => ord != .eq,
@@ -278,6 +278,27 @@ pub fn Query(comptime T: type) type {
             return true;
         }
 
+        /// `Value.order`, except enum attributes compare in declaration order
+        /// (as Postgres ENUMs do) rather than by tag name. Both values must
+        /// be non-null.
+        fn compare(field: Field, a: Value, b: Value) ?std.math.Order {
+            switch (field) {
+                inline else => |tag| {
+                    const E = Base(@FieldType(T, @tagName(tag)));
+                    if (comptime @typeInfo(E) != .@"enum") return a.order(b);
+                    return std.math.order(@intFromEnum(toEnum(E, a)), @intFromEnum(toEnum(E, b)));
+                },
+            }
+        }
+
+        fn toEnum(comptime E: type, v: Value) E {
+            const e = std.meta.stringToEnum(E, v.string);
+            // assertAssignable only lets values of E reach this attribute,
+            // so the tag name always resolves.
+            std.debug.assert(e != null);
+            return e.?;
+        }
+
         pub fn lessThan(o: Order, a: T, b: T) bool {
             const x = fieldValue(a, o.field);
             const y = fieldValue(b, o.field);
@@ -286,7 +307,7 @@ pub fn Query(comptime T: type) type {
             const ord = if (x == .null or y == .null)
                 std.math.order(@intFromBool(x == .null), @intFromBool(y == .null))
             else
-                x.order(y) orelse return false;
+                compare(o.field, x, y) orelse return false;
             return switch (o.direction) {
                 .asc => ord == .lt,
                 .desc => ord == .gt,

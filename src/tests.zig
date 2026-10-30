@@ -318,3 +318,56 @@ test "every string type is copied on insert and update" {
     try testing.expectEqual(@as(usize, 1), try contacts.byPk(1).update().set(.nickname, null).commit());
     try testing.expectEqual(@as(?[:0]const u8, null), (try contacts.byPk(1).one(testing.allocator)).?.nickname);
 }
+
+const Priority = enum { low, medium, high };
+
+const Task = struct {
+    id: u32,
+    priority: Priority,
+    escalated_to: ?Priority = null,
+};
+const Tasks = zom.Relation(zom.Schema(Task, "tasks", .id), zom.memory.Gateway);
+
+test "enums order and compare in declaration order" {
+    var gw = zom.memory.Gateway.init(testing.allocator);
+    defer gw.deinit();
+    const tasks = try Tasks.init(&gw);
+    _ = try tasks.create(.{ .id = 1, .priority = .high, .escalated_to = .high }).commit();
+    _ = try tasks.create(.{ .id = 2, .priority = .low }).commit();
+    _ = try tasks.create(.{ .id = 3, .priority = .medium, .escalated_to = .medium }).commit();
+
+    const asc = try tasks.order(.priority, .asc).toSlice(testing.allocator);
+    defer testing.allocator.free(asc);
+    try testing.expectEqualSlices(Priority, &.{ .low, .medium, .high }, &.{ asc[0].priority, asc[1].priority, asc[2].priority });
+
+    const desc = try tasks.order(.priority, .desc).toSlice(testing.allocator);
+    defer testing.allocator.free(desc);
+    try testing.expectEqualSlices(Priority, &.{ .high, .medium, .low }, &.{ desc[0].priority, desc[1].priority, desc[2].priority });
+
+    const above_low = try tasks.where(.priority, .gt, .low).order(.id, .asc).toSlice(testing.allocator);
+    defer testing.allocator.free(above_low);
+    try testing.expectEqualSlices(u32, &.{ 1, 3 }, &.{ above_low[0].id, above_low[1].id });
+    try testing.expectEqual(@as(usize, 2), tasks.where(.priority, .lt, .high).count());
+    try testing.expectEqual(@as(usize, 1), tasks.where(.priority, .eq, .medium).count());
+    try testing.expectEqual(@as(usize, 2), tasks.where(.priority, .neq, .medium).count());
+
+    // A runtime enum value goes through the same path as a literal.
+    var p: Priority = .medium;
+    _ = &p;
+    try testing.expectEqual(@as(usize, 1), tasks.where(.priority, .gte, p).where(.priority, .lt, .high).count());
+
+    // Optional enums keep the null rules: ordering never matches null,
+    // and nulls sort last on asc, first on desc.
+    try testing.expectEqual(@as(usize, 2), tasks.where(.escalated_to, .gt, .low).count());
+    try testing.expectEqual(@as(usize, 1), tasks.where(.escalated_to, .gt, .medium).count());
+    try testing.expectEqual(@as(usize, 1), tasks.where(.escalated_to, .eq, null).count());
+    try testing.expectEqual(@as(usize, 2), tasks.where(.escalated_to, .neq, null).count());
+
+    const esc_asc = try tasks.order(.escalated_to, .asc).toSlice(testing.allocator);
+    defer testing.allocator.free(esc_asc);
+    try testing.expectEqualSlices(u32, &.{ 3, 1, 2 }, &.{ esc_asc[0].id, esc_asc[1].id, esc_asc[2].id });
+
+    const esc_desc = try tasks.order(.escalated_to, .desc).toSlice(testing.allocator);
+    defer testing.allocator.free(esc_desc);
+    try testing.expectEqualSlices(u32, &.{ 2, 1, 3 }, &.{ esc_desc[0].id, esc_desc[1].id, esc_desc[2].id });
+}
