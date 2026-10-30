@@ -106,17 +106,19 @@ pub fn MemoryDataset(comptime S: type) type {
             return n;
         }
 
-        /// Checks every change before touching a row, so a bad value or a key
-        /// clash leaves the dataset unchanged.
+        /// Converts every change (copying strings once) into `patch` before
+        /// touching a row, so a bad value, a key clash or running out of
+        /// memory leaves the dataset unchanged. Applying cannot fail.
         pub fn update(self: *Self, query: Q, changes: []const Q.Change) !usize {
+            var patch: T = undefined;
+            for (changes) |c| try self.prepare(&patch, c);
             for (changes) |c| {
-                try validate(c);
                 if (c.field == pk) try self.checkKeyChange(query, c.value);
             }
             var n: usize = 0;
             for (self.rows.items) |*row| {
                 if (!query.matches(row.*)) continue;
-                for (changes) |c| try self.apply(row, c);
+                for (changes) |c| apply(row, &patch, c.field);
                 n += 1;
             }
             return n;
@@ -135,13 +137,14 @@ pub fn MemoryDataset(comptime S: type) type {
             return removed;
         }
 
-        /// Strings always fit (their kind is checked at compile time), so only
-        /// the other attribute types need a runtime check.
-        fn validate(change: Q.Change) !void {
+        /// Writes the change's typed value into `patch`, checking its range
+        /// and copying strings into the arena. A copy left unused because a
+        /// later change fails is freed with the arena.
+        fn prepare(self: *Self, patch: *T, change: Q.Change) !void {
             switch (change.field) {
                 inline else => |tag| {
                     const F = @FieldType(T, @tagName(tag));
-                    if (comptime !isStringField(F)) _ = try q.fromValue(F, change.value);
+                    @field(patch, @tagName(tag)) = try ownedValue(F, self.arena.allocator(), change.value);
                 },
             }
         }
@@ -160,12 +163,9 @@ pub fn MemoryDataset(comptime S: type) type {
             if (matched > 1) return error.DuplicatePrimaryKey;
         }
 
-        fn apply(self: *Self, row: *T, change: Q.Change) !void {
-            switch (change.field) {
-                inline else => |tag| {
-                    const F = @FieldType(T, @tagName(tag));
-                    @field(row, @tagName(tag)) = try ownedValue(F, self.arena.allocator(), change.value);
-                },
+        fn apply(row: *T, patch: *const T, field: Q.Field) void {
+            switch (field) {
+                inline else => |tag| @field(row, @tagName(tag)) = @field(patch, @tagName(tag)),
             }
         }
 
@@ -184,13 +184,6 @@ pub fn MemoryDataset(comptime S: type) type {
             }
             return out;
         }
-    };
-}
-
-fn isStringField(comptime F: type) bool {
-    return switch (@typeInfo(F)) {
-        .optional => |o| q.isString(o.child),
-        else => q.isString(F),
     };
 }
 
