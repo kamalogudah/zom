@@ -28,5 +28,9 @@ pub const memory = @import("adapters/memory.zig");
 pub const sql = @import("adapters/sql.zig");
 
 test {
-    _ = @import("tests.zig");
+    _ = @import("tests/relation_test.zig");
+    _ = @import("tests/changeset_test.zig");
+    _ = @import("tests/mapper_test.zig");
+    _ = @import("tests/memory_test.zig");
+    _ = @import("tests/sql_test.zig");
 }
