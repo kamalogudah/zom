@@ -350,6 +350,7 @@ links to the topics below.
 | `src/adapters/sql.zig` | Compiles a query to a SQL string | Building strings with `ArrayList(u8)` |
 | `src/tests/` | Tests, one file per layer, with shared `fixtures.zig` | `std.testing` |
 | `examples/readme.zig` | Every README code block, compiled by `zig build test` | Using zom as a package import |
+| `tests/compile_errors/` | Code that must *not* compile, checked by `zig build compile-errors` | What `@compileError` messages users see |
 
 ### 3. Zig concepts used everywhere in zom
 
@@ -375,6 +376,31 @@ The language reference for this version is https://ziglang.org/documentation/0.1
 - Follow the project's principles ([plan.md](plan.md) section 6): compile-time checks first, explicit fixed limits, relations stay plain values, callers own allocations, and adapters must pass `zom.lint`.
 - Match the surrounding style: doc comments (`//!` at file level, `///` on declarations) explain *why*, and the rom equivalent is named where there is one.
 - Stuck? Comment on the issue with what you tried and the exact compiler error. Zig's errors usually point at the right line, so include the whole message.
+
+### Compile-error tests
+
+Many of zom's guarantees are things that don't compile, and `zig test` can't express that. Each file in `tests/compile_errors/` imports `zom`, does one illegal thing, and starts with the error text it must produce:
+
+```zig
+// expect: zom: attribute 'age' is not optional, null is not allowed
+const std = @import("std");
+const zom = @import("zom");
+
+const User = struct { id: u32, age: u8 };
+const Users = zom.Relation(zom.Schema(User, "users", .id), zom.memory.Gateway);
+
+export fn entry() void {
+    var gw = zom.memory.Gateway.init(std.heap.page_allocator);
+    const users = Users.init(&gw) catch return;
+    _ = users.where(.age, .eq, null);
+}
+```
+
+`zig build compile-errors` (also run by `zig build test`) compiles every case and fails if one compiles, or if its stderr doesn't contain the `// expect:` text. To add a case, drop a new `.zig` file in the folder; `build.zig` picks it up. Put the illegal code inside an `export fn` so the compiler analyzes it, and copy the expected text from the real error (types declared in the case show up as `<file name>.<Type>`). To reproduce one by hand:
+
+```sh
+zig build-obj -fno-emit-bin --dep zom -Mroot=tests/compile_errors/null_on_non_optional.zig -Mzom=src/root.zig
+```
 
 ### 5. Good first tickets
 
