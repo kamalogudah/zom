@@ -78,14 +78,213 @@ const active = try users.where(.deleted_at, .eq, null).order(.name, .asc).toSlic
 defer allocator.free(active);
 ```
 
-Run the tests with `zig build test`.
+Run the tests with `zig build test`. Every code block in this README is also
+compiled and run by that command, from [examples/readme.zig](examples/readme.zig).
+
+### A longer tour
+
+Continuing from the block above:
+
+```zig
+const Post = struct { id: u32, user_id: u32, title: []const u8 };
+const Author = struct { id: u32, full_name: []const u8, posts: []const Post = &.{} };
+const Posts = zom.Relation(zom.Schema(Post, "posts", .id), zom.memory.Gateway);
+const AuthorMapper = zom.Mapper(User, Author, .{
+    .renames = &.{.{ .from = "name", .to = "full_name" }},
+});
+
+const posts = try Posts.init(&gw);
+_ = try posts.create(.{ .id = 10, .user_id = 1, .title = "Relations are values" }).commit();
+
+// Updates and deletes target whatever the relation selects.
+const changed = try users.byPk(1).update().set(.age, 32).commit(); // 1
+const removed = try users.where(.age, .gt, 100).delete(); // 0
+
+// Tuples become entities, then children are attached. combineMany
+// allocates one slice per parent, so give it an arena.
+var arena = std.heap.ArenaAllocator.init(allocator);
+defer arena.deinit();
+const authors = try users.mapWith(AuthorMapper, arena.allocator());
+try zom.combineMany(
+    .{ .into = "posts", .parent_key = "id", .child_key = "user_id" },
+    arena.allocator(),
+    authors,
+    try posts.toSlice(arena.allocator()),
+);
+
+// The same relation compiles to SQL instead.
+const compiled = try zom.sql.compileSelect(User, allocator, "users", users.where(.age, .gte, 18).query);
+defer compiled.deinit(allocator);
+// compiled.sql: SELECT "id", "name", "age", "deleted_at" FROM "users" WHERE "age" >= $1
+```
+
+## API (v0.2)
+
+This is the public API as of 0.2.0: everything `src/root.zig` exports.
+Adapters written from Phase 1 on build against it. While zom is on `0.x`, a
+breaking change needs a minor version bump and an entry in
+[CHANGELOG.md](CHANGELOG.md). The changes already planned are listed under
+[Planned changes](#planned-changes).
+
+### Exports
+
+| Declaration | What it is |
+|---|---|
+| `zom.Schema(T, name, pk)` | Returns a schema type with `Tuple = T`, `name` (the dataset name) and `primary_key` (a field of `T`, as an enum literal). |
+| `zom.Relation(S, Gateway)` | Returns an immutable relation type over schema `S` and an adapter's `Gateway`. Checks the [adapter contract](#the-adapter-contract) at compile time. |
+| `zom.Query(T)` | The adapter-neutral query a relation builds: `filters` (AND-ed, at most `max_filters = 16`), `order: ?Order`, `limit: ?usize`, `offset: usize`. Adapters read it through `filterSlice()`, and may use `matches(row)`, `lessThan(order, a, b)` and `fieldValue(row, field)` to evaluate it in memory. Nested types: `Field` (enum of `T`'s fields), `Filter`, `Order`, `Change`. |
+| `zom.Value` | The runtime value carried by filters and changes. See [Value](#value). |
+| `zom.Op` | Filter operators: `eq`, `neq`, `lt`, `lte`, `gt`, `gte`. `op.sql()` returns the SQL spelling. |
+| `zom.Direction` | `asc`, `desc`. |
+| `zom.changeset` | `Create(Rel)` and `Update(Rel)`, the types returned by `relation.create` and `relation.update`. You don't name them yourself. |
+| `zom.Mapper(Src, Dst, .{ .renames })` | A comptime mapper: `call(src) Dst` and `many(allocator, srcs) ![]Dst`. A `Dst` field takes the `Src` field of the same name (or its rename), else its default; neither is a compile error. |
+| `zom.combineMany(.{ .into, .parent_key, .child_key }, allocator, parents, children)` | Sets `parent.into` to the children whose `child_key` equals the parent's `parent_key`. O(n·m). |
+| `zom.mapper` | The module behind `Mapper` and `combineMany`, with their option types `Options`, `Rename` and `CombineOptions`. |
+| `zom.memory` | The in-memory adapter: `Gateway` (`init(allocator)`, `deinit()`) and `MemoryDataset(S)`. |
+| `zom.sql` | `compileSelect(T, allocator, table, query) !Compiled`, returning `Compiled{ sql, params }` with Postgres placeholders (`$1`). `writeIdent` appends a quoted identifier. |
+| `zom.query` | The module behind `Query`, `Value`, `Op` and `Direction`. Adapters can use `toValue(x) Value` and `fromValue(F, value) !F` to convert between attribute values and `Value`. Its `assert*`, `isString` and `isComptimeOnly` helpers are used by the core and are not part of the frozen API. |
+
+### Relation
+
+`users` below is a `zom.Relation(S, Gateway)`. Building methods return a new
+relation and never touch the dataset. `field` is always an enum literal, and
+`value` is type-checked against the attribute at compile time.
+
+| Method | Returns | Notes |
+|---|---|---|
+| `Relation.init(*Gateway)` | `!Relation` | Asks the gateway for the schema's dataset. |
+| `where(field, op, value)` | `Relation` | Filters are AND-ed. `null` means `IS NULL` (`eq`) or `IS NOT NULL` (`neq`). |
+| `byPk(value)` | `Relation` | `where(primary_key, .eq, value)`. |
+| `order(field, direction)` | `Relation` | One order; a second call replaces it. |
+| `limit(n)`, `offset(n)` | `Relation` | `n: usize`. |
+| `toSlice(allocator)` | `![]Tuple` | Caller frees. |
+| `one(allocator)` | `!?Tuple` | `null` when empty, `error.MoreThanOneTuple` when ambiguous. |
+| `first(allocator)` | `!?Tuple` | |
+| `count()` | `!usize` | |
+| `mapTo(E, allocator)` | `![]E` | `mapWith(zom.Mapper(Tuple, E, .{}))`. |
+| `mapWith(M, allocator)` | `![]M.Output` | `M` is a `zom.Mapper`. |
+| `create(tuple)` | `Create` | `.map(f)` applies `f: fn (Tuple) Tuple`; `.commit()` returns `!Tuple`, the stored tuple. |
+| `update()` | `Update` | `.set(field, value)` adds a change (at most `max_changes = 16`); `.commit()` returns `!usize`, the rows changed. |
+| `delete()` | `!usize` | The rows removed. |
+
+The relation's fields `dataset` and `query` are public too, so a relation
+can be handed to an adapter function such as `zom.sql.compileSelect`.
+
+### Value
+
+```zig
+const big: zom.Value = .{ .uint = std.math.maxInt(u64) };
+std.debug.assert(big.order(.{ .int = -1 }).? == .gt);
+std.debug.assert(big.order(.{ .string = "x" }) == null); // different kinds never compare
+std.debug.assert(zom.query.toValue(@as(u64, 7)).eql(.{ .int = 7 }));
+```
+
+`zom.Value` is a `union(enum)`:
+
+| Variant | Holds |
+|---|---|
+| `null` | A `null` optional attribute. |
+| `boolean: bool` | `bool`. |
+| `int: i64` | Every integer type up to 64 bits, except `u64`. |
+| `uint: u64` | `u64` (and `usize` on 64-bit targets), and integer literals above `maxInt(i64)`. |
+| `float: f64` | Float types. |
+| `string: []const u8` | Strings, and enum values (by tag name). |
+
+`a.order(b)` returns `?std.math.Order`: numbers compare across `int`, `uint`
+and `float`, strings compare bytewise, and values of different kinds return
+`null`. `a.eql(b)` is `order == .eq`. Integers wider than 64 bits are a
+compile error until `u128` support lands.
+
+### The adapter contract
+
+A gateway is any type with these declarations. `zom.Relation` checks that
+they exist when it is compiled:
+
+```zig
+// The smallest gateway zom accepts: every dataset is empty and read-only.
+const EmptyGateway = struct {
+    pub fn Dataset(comptime S: type) type {
+        return struct {
+            const Q = zom.Query(S.Tuple);
+
+            pub fn read(_: *@This(), _: Q, allocator: std.mem.Allocator) ![]S.Tuple {
+                return allocator.alloc(S.Tuple, 0);
+            }
+            pub fn count(_: *@This(), _: Q) !usize {
+                return 0;
+            }
+            pub fn insert(_: *@This(), _: S.Tuple) !S.Tuple {
+                return error.ReadOnly;
+            }
+            pub fn update(_: *@This(), _: Q, _: []const Q.Change) !usize {
+                return error.ReadOnly;
+            }
+            pub fn delete(_: *@This(), _: Q) !usize {
+                return error.ReadOnly;
+            }
+        };
+    }
+
+    pub fn dataset(_: *@This(), comptime S: type) !*Dataset(S) {
+        const static = struct {
+            var instance: Dataset(S) = .{};
+        };
+        return &static.instance;
+    }
+};
+```
+
+In full, with `Q = zom.Query(S.Tuple)`:
+
+| Declaration | Signature | Contract |
+|---|---|---|
+| `Gateway.Dataset` | `fn (comptime S: type) type` | The dataset type for schema `S`. |
+| `Gateway.dataset` | `fn (*Gateway, comptime S: type) !*Dataset(S)` | Returns the same dataset every time for the same `S`. |
+| `read` | `fn (*Dataset, Q, Allocator) ![]S.Tuple` | Applies filters, then order, then offset and limit. The caller frees the slice. |
+| `count` | `fn (*Dataset, Q) !usize` | Applies filters only. |
+| `insert` | `fn (*Dataset, S.Tuple) !S.Tuple` | Returns the tuple as stored. `error.DuplicatePrimaryKey` on a key clash. |
+| `update` | `fn (*Dataset, Q, []const Q.Change) !usize` | Returns the rows changed. A failed update changes nothing. |
+| `delete` | `fn (*Dataset, Q) !usize` | Returns the rows removed. |
+
+Every call is fallible, so an adapter's own errors (I/O, connection loss)
+flow through `try`.
+
+### Errors
+
+| Error | Returned by |
+|---|---|
+| `error.DuplicatePrimaryKey` | `create(...).commit()`, or an update that sets the primary key to one already in use (or sets it on more than one row). |
+| `error.ValueOutOfRange` | `update().set(...).commit()` with a runtime value that does not fit the attribute, e.g. a `u32` holding 300 set on a `u8`. |
+| `error.MoreThanOneTuple` | `one`. |
+| `error.DatasetTypeMismatch` | `memory.Gateway.dataset` (and so `Relation.init`), when two different schema types share a dataset name. |
+| `error.InvalidNullComparison` | `sql.compileSelect`, for `lt`/`lte`/`gt`/`gte` against `null`. |
+| `error.OutOfMemory` | Anything that takes or uses an allocator. |
+
+### Planned changes
+
+These are scheduled in [plan.md](plan.md) and will each come with a version
+bump and a changelog entry:
+
+- Phase 1: `zom.Adapter(G)` replaces the checks inside `zom.Relation`, and
+  gateways gain `adapter_name`, `Config`, `init` and `deinit`. `insert`,
+  `update` and `delete` become optional capabilities.
+- Phase 3: `zom.sql` moves out of the core into the `zom-sql` package.
+- Phase 4: `zom.combineMany` is deprecated in favour of `combine`.
+- Phase 6: `zom.Value` gains a `u128` variant.
 
 ## Memory rules
 
-- `toSlice`, `mapTo` and `mapWith` return slices the caller owns.
+- `toSlice`, `mapTo`, `mapWith` and `Mapper.many` return slices the caller
+  owns. `sql.compileSelect` returns a `Compiled` that the caller frees with
+  `compiled.deinit(allocator)`.
 - String attributes are copied into the dataset's arena on insert and update,
-  so input buffers can be reused straight away. Strings you read back are
-  valid for as long as the gateway lives.
+  so input buffers can be reused straight away. Strings you read back
+  (including those in tuples from `one`, `first` and `create(...).commit()`)
+  are valid for as long as the gateway lives.
+- A relation does not copy the values you filter on. A string passed to
+  `where` must stay alive until the relation is last used.
+- The gateway must outlive every relation made from it, and
+  `memory.Gateway.deinit` frees all of its datasets at once.
 - For `combineMany`, use an arena: it allocates one child slice per parent.
 
 ## Memory adapter semantics
@@ -105,7 +304,7 @@ Run the tests with `zig build test`.
 separate adapter packages, the way rom-core pairs with rom-sql, rom-csv and
 rom-yaml:
 
-0. Tidy the core (open issues).
+0. Tidy the core and freeze the API as v0.2. *Done in 0.2.0.*
 1. Adapter contract, `zom.lint` conformance suite, and `zom.Container`.
 2. `zom-csv` and `zom-yaml`, built on the memory engine.
 3. `zom-sql` compiler and the `zom-pg` driver on `karlseguin/pg.zig`,
@@ -137,7 +336,7 @@ links to the topics below.
    If nothing is printed and the exit code is 0, every test passed. Add `--summary all` to see each step.
 4. Editor support: install [ZLS](https://github.com/zigtools/zls) built for 0.16, which gives you go-to-definition into the standard library. That's the fastest way to learn the std API.
 
-### 2. A tour of the code (about 1,100 lines)
+### 2. A tour of the code (about 1,400 lines, a third of them tests)
 
 | File | What it does | Read it for |
 |---|---|---|
@@ -149,7 +348,8 @@ links to the topics below.
 | `src/mapper.zig` | Copies tuples into domain structs | `inline for` over struct fields |
 | `src/adapters/memory.zig` | In-memory gateway and dataset | Allocators, arenas, `ArrayList`, hash maps, type erasure with `*anyopaque` |
 | `src/adapters/sql.zig` | Compiles a query to a SQL string | Building strings with `ArrayList(u8)` |
-| `src/tests.zig` | All the tests | `std.testing` |
+| `src/tests/` | Tests, one file per layer, with shared `fixtures.zig` | `std.testing` |
+| `examples/readme.zig` | Every README code block, compiled by `zig build test` | Using zom as a package import |
 
 ### 3. Zig concepts used everywhere in zom
 

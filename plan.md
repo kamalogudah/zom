@@ -20,13 +20,12 @@ paired with [rom-sql](https://github.com/hanakai-rb/rom-sql),
 | Relation | Immutable and lazy. `where/order/limit/offset/byPk`, `toSlice/one/first/count`, `mapTo/mapWith`, `create/update/delete`. |
 | Changeset | `Create` (with `map` steps) and `Update` (`set`), committed explicitly. |
 | Mapper | Copies fields by name, with renames. `combineMany` joins loaded slices in memory (O(n·m)). |
-| Adapter seam | The contract is checked at compile time: `Gateway.Dataset(S)` and `dataset(S)`, plus `read count insert update delete` on the dataset. |
+| Adapter seam | The contract is checked at compile time: `Gateway.Dataset(S)` and `dataset(S)`, plus `read count insert update delete` on the dataset. Every dataset call is fallible. |
 | Adapters | `memory` (full), with primary keys enforced. `sql.compileSelect` (SELECT only, Postgres placeholders, no driver). |
 | Packaging | One package, `zom`, with all adapters inside it. |
 
-Open issues from the last review, still to fix:
-- An update can be left half-done if the arena runs out of memory.
-- In the SQL compiler, large `LIMIT`/`OFFSET` values overflow the format buffer, and identifiers are not quoted.
+Every issue from the last review is fixed in 0.2.0, and the public API is
+frozen there (see [CHANGELOG.md](CHANGELOG.md) and the README's API section).
 
 ## 2. What rom has, and how each part maps to zom
 
@@ -99,7 +98,7 @@ A dataset implements everything it can:
 | Decl | Required? | Notes |
 |---|---|---|
 | `read(query, allocator) ![]T` | yes | |
-| `count(query) !usize` | yes | Becomes fallible (I/O). |
+| `count(query) !usize` | yes | Fallible since 0.2 (I/O). |
 | `insert(T) !T` | no, `writable` | A read-only adapter leaves it out, and `relation.create` gives a compile error naming the adapter. |
 | `insertMany([]const T) !usize` | no, `batch_insert` | Falls back to a loop over `insert`. TigerBeetle wants this. |
 | `update(query, changes) !usize` | no, `updatable` | TigerBeetle leaves it out (its records are immutable). |
@@ -134,7 +133,7 @@ checks these.
 Each phase ends with `zig build test` green, the README updated, and the
 lint suite covering the new contract surface.
 
-### Phase 0: tidy the core (small, do first)
+### Phase 0: tidy the core (done in 0.2.0)
 - Fix the open issues in section 1 (`u64` handling, string copying, enum
   order, half-done updates, the SQL buffer and identifier quoting).
 - Make `count` fallible in the contract now, before any adapter depends on it.
