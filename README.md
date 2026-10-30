@@ -15,7 +15,7 @@ that each do one thing, and nothing is an "active record".
 | `users.by_pk(1).one`                       | `users.byPk(1).one(allocator)`                                 |
 | `users.changeset(:create, data).commit`    | `users.create(tuple).map(f).commit()`                          |
 | `users.by_pk(1).changeset(:update, ...)`   | `users.byPk(1).update().set(.email, "...").commit()`           |
-| `command(:delete)`                         | `users.where(...).delete()`                                    |
+| `command(:delete)`                         | `try users.where(...).delete()`                                |
 | `ROM::Mapper`, `map_with`, `map_to`        | `zom.Mapper(Tuple, Entity, .{ .renames = ... })`, `mapWith`, `mapTo` |
 | `users.combine(:posts)`                    | `zom.combineMany(.{ .into, .parent_key, .child_key }, ...)`    |
 | rom-sql (Sequel)                           | `zom.sql.compileSelect`, a query-to-SQL compiler with no driver yet |
@@ -95,6 +95,9 @@ Run the tests with `zig build test`.
 - An update checks every change before writing, so a rejected update leaves
   every row as it was.
 - `order` sorts nulls the way Postgres does: last on `.asc`, first on `.desc`.
+- `count` and `delete` return `!usize` like every other dataset call, because
+  real adapters do I/O for them. The memory adapter never fails, but callers
+  still write `try users.count()`.
 
 ## Roadmap
 
@@ -102,7 +105,7 @@ Run the tests with `zig build test`.
 separate adapter packages, the way rom-core pairs with rom-sql, rom-csv and
 rom-yaml:
 
-0. Tidy the core (open issues, `count` becomes fallible).
+0. Tidy the core (open issues).
 1. Adapter contract, `zom.lint` conformance suite, and `zom.Container`.
 2. `zom-csv` and `zom-yaml`, built on the memory engine.
 3. `zom-sql` compiler and the `zom-pg` driver on `karlseguin/pg.zig`,

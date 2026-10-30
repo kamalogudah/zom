@@ -13,10 +13,10 @@
 //! and the dataset must provide:
 //!
 //!   read(query, allocator) ![]T
-//!   count(query) usize
+//!   count(query) !usize
 //!   insert(tuple) !T                   // error.DuplicatePrimaryKey on clash
 //!   update(query, changes) !usize
-//!   delete(query) usize
+//!   delete(query) !usize
 
 const std = @import("std");
 const q = @import("query.zig");
@@ -115,8 +115,8 @@ pub fn Relation(comptime S: type, comptime Gateway: type) type {
             return if (rows.len == 1) rows[0] else null;
         }
 
-        pub fn count(self: Self) usize {
-            return self.dataset.count(self.query);
+        pub fn count(self: Self) !usize {
+            return try self.dataset.count(self.query);
         }
 
         /// ROM's `relation.map_to(Entity)` / auto_struct: copy matching
@@ -145,8 +145,8 @@ pub fn Relation(comptime S: type, comptime Gateway: type) type {
         }
 
         /// ROM's `users.by_pk(1).command(:delete).call`.
-        pub fn delete(self: Self) usize {
-            return self.dataset.delete(self.query);
+        pub fn delete(self: Self) !usize {
+            return try self.dataset.delete(self.query);
         }
     };
 }
