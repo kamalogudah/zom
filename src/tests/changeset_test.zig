@@ -16,7 +16,7 @@ fn promoteToAdmin(t: UserTuple) UserTuple {
 }
 
 test "create changeset with a map step" {
-    var gw = zom.memory.Gateway.init(testing.allocator);
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
     defer gw.deinit();
     const users = try Users.init(&gw);
 
@@ -33,7 +33,7 @@ test "create changeset with a map step" {
 }
 
 test "update and delete" {
-    var gw = zom.memory.Gateway.init(testing.allocator);
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
     defer gw.deinit();
     const users = try Users.init(&gw);
     try seed(users, try Posts.init(&gw));
@@ -49,7 +49,7 @@ test "update and delete" {
 }
 
 test "out of range runtime values are rejected without partial writes" {
-    var gw = zom.memory.Gateway.init(testing.allocator);
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
     defer gw.deinit();
     const users = try Users.init(&gw);
     try seed(users, try Posts.init(&gw));
@@ -66,7 +66,7 @@ test "out of range runtime values are rejected without partial writes" {
 }
 
 test "u64 above maxInt(u32) on a u32 attribute is rejected" {
-    var gw = zom.memory.Gateway.init(testing.allocator);
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
     defer gw.deinit();
     const users = try Users.init(&gw);
     try seed(users, try Posts.init(&gw));

@@ -11,7 +11,25 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 - `zig build compile-errors` checks that each file in `tests/compile_errors/`
   fails to compile with the message on its `// expect:` line. `zig build test`
-  runs it too. ([#11])
+  runs it too. ([#11]) A case can start with several `// expect:` lines, and
+  each one must appear in stderr. ([#12])
+- `zom.Adapter(G)` checks a gateway against the v1 adapter contract (plan.md
+  section 3.1), signatures included, and reports every problem in one compile
+  error. `capabilities(S)` and `has(S, cap)` say which optional declarations
+  it has, as `zom.Capability` values: `writable` (`insert`), `batch_insert`
+  (`insertMany`), `updatable` (`update`), `deletable` (`delete`) and
+  `transaction`. `zom.Relation` exposes it as `Relation.Adapter`. ([#12])
+
+### Changed (breaking)
+
+- A gateway must declare `adapter_name`, `Config`, `init(allocator, Config)`
+  and `deinit` as well as `Dataset` and `dataset`. ([#12])
+- `zom.memory.Gateway.init` takes a `Config` (an empty struct for now):
+  write `zom.memory.Gateway.init(allocator, .{})`. ([#12])
+- A dataset's `insert`, `update` and `delete` are optional. Without one,
+  `create(...).commit()`, `update().commit()` or `delete()` is a compile error
+  naming the adapter, instead of a missing-declaration error from
+  `zom.Relation`. ([#12])
 
 ## [0.2.0] - 2026-10-30
 
@@ -77,3 +95,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#9]: https://github.com/kamalogudah/zom/issues/9
 [#10]: https://github.com/kamalogudah/zom/issues/10
 [#11]: https://github.com/kamalogudah/zom/issues/11
+[#12]: https://github.com/kamalogudah/zom/issues/12

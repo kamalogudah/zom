@@ -9,7 +9,7 @@ const Posts = fixtures.Posts;
 const seed = fixtures.seed;
 
 test "relations are chainable and lazy" {
-    var gw = zom.memory.Gateway.init(testing.allocator);
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
     defer gw.deinit();
     const users = try Users.init(&gw);
     const posts = try Posts.init(&gw);
@@ -32,7 +32,7 @@ test "relations are chainable and lazy" {
 }
 
 test "enum and null filters" {
-    var gw = zom.memory.Gateway.init(testing.allocator);
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
     defer gw.deinit();
     const users = try Users.init(&gw);
     try seed(users, try Posts.init(&gw));
@@ -42,7 +42,7 @@ test "enum and null filters" {
 }
 
 test "one, first and byPk" {
-    var gw = zom.memory.Gateway.init(testing.allocator);
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
     defer gw.deinit();
     const users = try Users.init(&gw);
     try seed(users, try Posts.init(&gw));
@@ -55,7 +55,7 @@ test "one, first and byPk" {
 }
 
 test "order puts nulls last on asc and first on desc" {
-    var gw = zom.memory.Gateway.init(testing.allocator);
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
     defer gw.deinit();
     const users = try Users.init(&gw);
     for ([_]?i64{ 3, null, 1, 2 }, 1..) |deleted_at, id| {
@@ -81,7 +81,7 @@ const Task = struct {
 const Tasks = zom.Relation(zom.Schema(Task, "tasks", .id), zom.memory.Gateway);
 
 test "enums order and compare in declaration order" {
-    var gw = zom.memory.Gateway.init(testing.allocator);
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
     defer gw.deinit();
     const tasks = try Tasks.init(&gw);
     _ = try tasks.create(.{ .id = 1, .priority = .high, .escalated_to = .high }).commit();

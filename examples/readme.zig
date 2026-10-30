@@ -14,7 +14,7 @@ test "README: Usage, then A longer tour" {
     const User = struct { id: u32, name: []const u8, age: u8, deleted_at: ?i64 = null };
     const Users = zom.Relation(zom.Schema(User, "users", .id), zom.memory.Gateway);
 
-    var gw = zom.memory.Gateway.init(allocator);
+    var gw = zom.memory.Gateway.init(allocator, .{});
     defer gw.deinit();
     const users = try Users.init(&gw);
 
@@ -81,8 +81,17 @@ test "README: The adapter contract" {
     const zom = @import("zom");
 
     // -- README: The adapter contract -------------------------------------
-    // The smallest gateway zom accepts: every dataset is empty and read-only.
+    // The smallest gateway zom accepts: every dataset is empty, and with no
+    // insert, update or delete it is read-only.
     const EmptyGateway = struct {
+        pub const adapter_name = "empty";
+        pub const Config = struct {};
+
+        pub fn init(_: std.mem.Allocator, _: Config) @This() {
+            return .{};
+        }
+        pub fn deinit(_: *@This()) void {}
+
         pub fn Dataset(comptime S: type) type {
             return struct {
                 const Q = zom.Query(S.Tuple);
@@ -92,15 +101,6 @@ test "README: The adapter contract" {
                 }
                 pub fn count(_: *@This(), _: Q) !usize {
                     return 0;
-                }
-                pub fn insert(_: *@This(), _: S.Tuple) !S.Tuple {
-                    return error.ReadOnly;
-                }
-                pub fn update(_: *@This(), _: Q, _: []const Q.Change) !usize {
-                    return error.ReadOnly;
-                }
-                pub fn delete(_: *@This(), _: Q) !usize {
-                    return error.ReadOnly;
                 }
             };
         }
@@ -116,9 +116,10 @@ test "README: The adapter contract" {
     // -- checks (not in the README) ---------------------------------------
     const Item = struct { id: u32 };
     const Items = zom.Relation(zom.Schema(Item, "items", .id), EmptyGateway);
-    var gw: EmptyGateway = .{};
+    var gw = EmptyGateway.init(testing.allocator, .{});
+    defer gw.deinit();
     const items = try Items.init(&gw);
     try testing.expectEqual(0, try items.count());
     try testing.expectEqual(null, try items.one(testing.allocator));
-    try testing.expectError(error.ReadOnly, items.create(.{ .id = 1 }).commit());
+    try testing.expectEqual(zom.Capabilities{}, comptime zom.Adapter(EmptyGateway).capabilities(Items.schema));
 }

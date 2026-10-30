@@ -10,7 +10,7 @@ const Posts = fixtures.Posts;
 const seed = fixtures.seed;
 
 test "map to entities and combine has-many" {
-    var gw = zom.memory.Gateway.init(testing.allocator);
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
     defer gw.deinit();
     const users = try Users.init(&gw);
     const posts = try Posts.init(&gw);

@@ -18,6 +18,11 @@ pub const Query = query.Query;
 pub const Schema = @import("schema.zig").Schema;
 pub const Relation = @import("relation.zig").Relation;
 
+pub const adapter = @import("adapter.zig");
+pub const Adapter = adapter.Adapter;
+pub const Capability = adapter.Capability;
+pub const Capabilities = adapter.Capabilities;
+
 pub const changeset = @import("changeset.zig");
 
 pub const mapper = @import("mapper.zig");
@@ -28,6 +33,7 @@ pub const memory = @import("adapters/memory.zig");
 pub const sql = @import("adapters/sql.zig");
 
 test {
+    _ = @import("tests/adapter_test.zig");
     _ = @import("tests/relation_test.zig");
     _ = @import("tests/changeset_test.zig");
     _ = @import("tests/mapper_test.zig");
