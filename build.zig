@@ -39,7 +39,7 @@ pub fn build(b: *std.Build) void {
 /// on zom through `.path = "../.."`. They are listed rather than found by
 /// scanning, because `adapters/` is not in zom's `.paths`: a project that
 /// fetches zom doesn't get it, and these steps only run from a checkout.
-const adapter_dirs = [_][]const u8{"csv"};
+const adapter_dirs = [_][]const u8{ "csv", "yaml" };
 
 /// Runs `zig build test` inside each adapter's directory, as a separate
 /// build, so the adapter resolves zom the same way an application would.

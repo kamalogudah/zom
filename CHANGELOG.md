@@ -9,6 +9,25 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- `zom-yaml` (`adapters/yaml`), starting with `yaml.parseDatasets` and
+  `yaml.parseRecords`. They parse a documented subset of YAML: a mapping
+  from dataset name to a block sequence of flat records, or one bare
+  sequence. Every record field is a key mapped to scalar text, or `null`
+  for `~`, `null`, `Null`, `NULL` and an empty value; `zom.codec` decodes
+  the text. Scalars may be plain, `'single'` (with `''`) or `"double"`
+  (with every YAML escape, including `\xXX`, `\uXXXX` and `\UXXXXXXXX`).
+  Comments, blank lines, CRLF, a BOM and a leading `---` are accepted.
+  `users: []` and `users:` with no items are empty datasets. Anchors,
+  aliases, tags, block scalars, flow collections, nested values, complex
+  keys, directives and multiple documents fail with
+  `error.UnsupportedYaml`. A tab in indentation fails with
+  `error.TabIndentation`, and misaligned lines with `error.BadIndentation`.
+  Other errors are `UnterminatedQuote`, `InvalidEscape`, `DuplicateKey` and
+  `InvalidSyntax`. A `yaml.Diagnostic` gives the line and column and formats
+  as `2:6: unsupported YAML: an anchor (&name)`. Values without escapes
+  borrow the input. Everything else lives in an arena that the result owns.
+  This is our own parser, not kubkon/zig-yaml (findings in [#26]).
+  `zig build test-adapters` now runs it too. ([#26])
 - `zom_csv.WritableGateway`, the writable twin of `zom_csv.Gateway`. Its
   datasets add `insert`, `insertMany`, `update` and `delete`, which change
   the in-memory store and mark the dataset dirty. `sync()`, on a dataset or
@@ -217,3 +236,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#22]: https://github.com/kamalogudah/zom/issues/22
 [#23]: https://github.com/kamalogudah/zom/issues/23
 [#25]: https://github.com/kamalogudah/zom/issues/25
+[#26]: https://github.com/kamalogudah/zom/issues/26

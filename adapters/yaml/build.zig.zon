@@ -1,0 +1,10 @@
+.{
+    .name = .zom_yaml,
+    .version = "0.0.0",
+    .fingerprint = 0xe0105c3bdde36192,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .zom = .{ .path = "../.." },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}
