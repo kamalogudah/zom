@@ -25,10 +25,33 @@ pub fn build(b: *std.Build) void {
     const compile_errors = b.step("compile-errors", "Check that tests/compile_errors/*.zig fail with the expected message");
     addCompileErrorCases(b, compile_errors);
 
+    const test_adapters = b.step("test-adapters", "Run each adapters/<name> package's tests");
+    addAdapterTests(b, test_adapters, optimize);
+
     const test_step = b.step("test", "Run zom.zig tests");
     test_step.dependOn(&run_tests.step);
     test_step.dependOn(&run_readme.step);
     test_step.dependOn(compile_errors);
+    test_step.dependOn(test_adapters);
+}
+
+/// The packages under `adapters/`. Each has its own build.zig.zon depending
+/// on zom through `.path = "../.."`. They are listed rather than found by
+/// scanning, because `adapters/` is not in zom's `.paths`: a project that
+/// fetches zom doesn't get it, and these steps only run from a checkout.
+const adapter_dirs = [_][]const u8{"csv"};
+
+/// Runs `zig build test` inside each adapter's directory, as a separate
+/// build, so the adapter resolves zom the same way an application would.
+fn addAdapterTests(b: *std.Build, step: *std.Build.Step, optimize: std.builtin.OptimizeMode) void {
+    for (adapter_dirs) |name| {
+        const run = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test", b.fmt("-Doptimize={t}", .{optimize}) });
+        run.setName(b.fmt("test adapters/{s}", .{name}));
+        run.setCwd(b.path(b.fmt("adapters/{s}", .{name})));
+        // The adapter's build has its own cache; always hand it control.
+        run.has_side_effects = true;
+        step.dependOn(&run.step);
+    }
 }
 
 const compile_errors_dir = "tests/compile_errors";

@@ -387,6 +387,39 @@ Note that `zig build test` shows any test's stderr under a `failed command:`
 header even when every test passes, so an adapter whose checks get skipped
 will see that header on a green run.
 
+### Writing an adapter
+
+Adapters are separate Zig packages, like rom-csv next to rom-core. Until they
+move to their own repos they live in `adapters/<name>/`, and each one depends
+on zom by path, so splitting one out later only changes that path into a
+`.url` and `.hash`:
+
+```
+adapters/csv/
+├── build.zig.zon   .name = .zom_csv, its own .fingerprint, .zom = .{ .path = "../.." }
+├── build.zig       b.dependency("zom", ...).module("zom"), a zom_csv module, a test step
+└── src/root.zig    pub const Gateway = struct { pub const adapter_name = "csv"; ... }
+```
+
+`adapters/csv` is the template: copy it, rename the package (`.name =
+.zom_yaml`), delete the `.fingerprint` line and run `zig build` once, which
+fails and prints a fresh fingerprint to paste in. Every package needs its own.
+An application depends on `zom` plus the adapters it uses, and
+`@import("zom")` and `@import("zom_csv")` are the only imports it needs: the
+gateway is `zom_csv.Gateway`, passed to `zom.Relation` like any other.
+
+To work on an adapter, run its tests from its own directory:
+
+```sh
+cd adapters/csv && zig build test
+```
+
+From the repo root, `zig build test-adapters` does that for every adapter, and
+`zig build test` runs it too. A new adapter must be added to `adapter_dirs` in
+the root `build.zig`. `adapters/` is not in zom's `.paths`, so changing an
+adapter never changes zom's package hash. Every adapter's tests should call
+`zom.lint.run` once it can store the lint seed rows.
+
 ### Errors
 
 | Error | Returned by |
@@ -502,6 +535,7 @@ links to the topics below.
 | `src/tests/` | Tests, one file per layer, with shared `fixtures.zig` | `std.testing` |
 | `examples/readme.zig` | Every README code block, compiled by `zig build test` | Using zom as a package import |
 | `tests/compile_errors/` | Code that must *not* compile, checked by `zig build compile-errors` | What `@compileError` messages users see |
+| `adapters/csv/` | The `zom-csv` package (a skeleton for now), depending on zom by path | `build.zig.zon` dependencies, `b.dependency(...).module(...)` |
 
 ### 3. Zig concepts used everywhere in zom
 

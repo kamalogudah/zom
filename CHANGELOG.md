@@ -9,6 +9,12 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- The `adapters/<name>/` package layout, with `adapters/csv` (`zom-csv`) as
+  the first, still a stub gateway. Each adapter has its own `build.zig.zon`
+  depending on zom through `.path = "../.."`. `zig build test-adapters` runs
+  every adapter's `zig build test`, and `zig build test` runs it too.
+  `adapters/` is outside zom's `.paths`, so it doesn't affect zom's package
+  hash. README: "Writing an adapter". ([#20])
 - `zom.lint.run(G, Factory)`, the adapter conformance suite (like rom's
   `ROM::Lint`). It seeds its own schema, `zom.lint.Users`, through the
   factory's `seed` or the dataset's `insertMany`/`insert`, and checks reads,
@@ -160,3 +166,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#17]: https://github.com/kamalogudah/zom/issues/17
 [#18]: https://github.com/kamalogudah/zom/issues/18
 [#19]: https://github.com/kamalogudah/zom/issues/19
+[#20]: https://github.com/kamalogudah/zom/issues/20
