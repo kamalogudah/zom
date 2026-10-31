@@ -52,7 +52,7 @@ Each row below says whether that part exists today or is planned (see
 | **Adapter shape** | Adapters subclass `ROM::Gateway`, `ROM::Relation` and `ROM::Memory::Dataset`, then override methods. | No inheritance. A gateway is any type with the right declarations (see [the adapter contract](#the-adapter-contract)). File adapters *wrap* the memory engine, `zom.memory.Store(S)`, instead of subclassing it. |
 | **Optional features** | Whether an adapter supports a command is found out at runtime, when the command is built or run. | An adapter simply leaves out `insert`, `update` or `delete`, and `relation.create(...).commit()` fails to compile with a message naming the adapter. `zom.Adapter(G).capabilities(S)` says what it supports. |
 | **Checking an adapter** | `ROM::Lint` specs, run by each adapter gem. | `zom.lint.run(Gateway, Factory)`, a test suite each adapter runs in its own `zig build test`. *Today: read, filter, null, ordering, limit/offset, `one`, insert, `insertMany`, update and delete checks.* |
-| **Container** | `ROM.container` builds a runtime registry: `container.relations[:users]`. | Relations are types, so a container is a comptime struct with one field per relation: `app.relations.users`. A missing relation is a compile error, not a runtime lookup failure. *Planned: `zom.Container`.* |
+| **Container** | `ROM.container` builds a runtime registry: `container.relations[:users]`. | Relations are types, so a container is a comptime struct with one field per relation: `app.relations.users`. A missing relation is a compile error, not a runtime lookup failure. *Today: `zom.Container`.* |
 | **Schema inference** | rom-sql can read a table's columns from the database at boot. | A Zig struct has to exist when the code compiles, before any database is reachable, so you write the schema struct yourself. The plan adds a startup check against the database, and later a code generator. |
 | **Structs** | `ROM::Struct` builds result classes at runtime from the schema. | You declare the entity struct (or use the tuple), and `mapTo` copies fields by name. Narrowed types, like a future `select(.{ .id, .name })`, are built at compile time with `@Struct`. |
 | **Type errors** | Found at runtime, if the database or a type check catches them. | Found at compile time: wrong field names, wrong value types, `null` on a non-optional field, an enum value that doesn't exist, an integer literal that doesn't fit. |
@@ -141,6 +141,7 @@ breaking change needs a minor version bump and an entry in
 | `zom.Value` | The runtime value carried by filters and changes. See [Value](#value). |
 | `zom.Op` | Filter operators: `eq`, `neq`, `lt`, `lte`, `gt`, `gte`. `op.sql()` returns the SQL spelling. |
 | `zom.Direction` | `asc`, `desc`. |
+| `zom.Container(spec)` | Declares gateways and relations once; `init(self, allocator, Config)` / `deinit()` connect and disconnect them all. See [Container](#container). |
 | `zom.changeset` | `Create(Rel)`, `CreateMany(Rel)` and `Update(Rel)`, the types returned by `relation.create`, `relation.createMany` and `relation.update`. You don't name them yourself. |
 | `zom.Mapper(Src, Dst, .{ .renames })` | A comptime mapper: `call(src) Dst` and `many(allocator, srcs) ![]Dst`. A `Dst` field takes the `Src` field of the same name (or its rename), else its default; neither is a compile error. |
 | `zom.combineMany(.{ .into, .parent_key, .child_key }, allocator, parents, children)` | Sets `parent.into` to the children whose `child_key` equals the parent's `parent_key`. O(n·m). |
@@ -177,6 +178,52 @@ relation and never touch the dataset. `field` is always an enum literal, and
 
 The relation's fields `dataset` and `query` are public too, so a relation
 can be handed to an adapter function such as `zom.sql.compileSelect`.
+
+### Container
+
+`zom.Container(spec)` declares the gateways and the relations over them in
+one place, like `ROM.container`. Each relation names its gateway with an enum
+literal:
+
+```zig
+const UserSchema = zom.Schema(User, "users", .id);
+const PostSchema = zom.Schema(Post, "posts", .id);
+
+const App = zom.Container(.{
+    .gateways = .{ .default = zom.memory.Gateway, .archive = zom.memory.Gateway },
+    .relations = .{ .users = .{ UserSchema, .default }, .posts = .{ PostSchema, .archive } },
+});
+
+var app: App = undefined;
+try app.init(allocator, .{});
+defer app.deinit();
+
+const users = app.relations.users;
+_ = try users.create(.{ .id = 1, .name = "Achieng", .age = 31 }).commit();
+```
+
+`App` has three generated struct types: `Gateways` (one field per gateway),
+`Relations` (one `zom.Relation(Schema, Gateway)` per relation) and `Config`
+(one `Gateway.Config` per gateway). A `Config` field defaults to `.{}` when
+every field of that gateway's `Config` has a default, so `.{}` is enough for
+memory gateways; any other gateway's settings must be passed, e.g.
+`.{ .files = .{ .path = "data/" } }`.
+
+`init` initialises the gateways in declaration order, then builds each
+relation. If a gateway or a relation fails, the gateways already initialised
+are deinitialised, last first, and the error is returned. `deinit` also runs
+in reverse order.
+
+`init` takes `self: *App` and fills it in place, and **the container must
+not be copied or moved between `init` and `deinit`**. A relation holds a
+pointer to its dataset, and the adapter contract lets a gateway keep its
+datasets inside its own struct, where a copy would leave that pointer stale.
+(The memory gateway heap-allocates its datasets, so it would survive a copy,
+but other adapters need not.)
+
+A relation that names a gateway the container doesn't have, a relation that
+isn't `.{ Schema, .gateway }`, and a gateway that fails `zom.Adapter` are all
+compile errors.
 
 ### Value
 
@@ -447,6 +494,7 @@ links to the topics below.
 | `src/adapter.zig` | `Adapter(G)`: checks the adapter contract and finds a gateway's capabilities | `@hasDecl`, `@typeInfo(...).@"fn"`, building comptime strings |
 | `src/lint.zig` | `lint.run(G, Factory)`: the conformance suite every adapter runs | Tests as library code, `inline for` over a tuple of generic functions |
 | `src/relation.zig` | `Relation(S, Gateway)`: immutable query builder | Comptime field enums, `anytype` |
+| `src/container.zig` | `Container(spec)`: gateways and relations declared once, init/deinit in one place | Building struct types with `@Struct`, `errdefer` with a counter in an `inline for` |
 | `src/changeset.zig` | `Create`, `CreateMany` and `Update` changesets | Fixed-capacity arrays, slices, comptime capability branching |
 | `src/mapper.zig` | Copies tuples into domain structs | `inline for` over struct fields |
 | `src/adapters/memory.zig` | In-memory gateway and dataset | Allocators, arenas, `ArrayList`, hash maps, type erasure with `*anyopaque` |

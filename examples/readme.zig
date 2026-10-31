@@ -149,3 +149,28 @@ const lint_example = struct {
 test {
     _ = lint_example;
 }
+
+test "README: Container" {
+    const allocator = testing.allocator;
+    const zom = @import("zom");
+    const User = struct { id: u32, name: []const u8, age: u8, deleted_at: ?i64 = null };
+    const Post = struct { id: u32, user_id: u32, title: []const u8 };
+
+    const UserSchema = zom.Schema(User, "users", .id);
+    const PostSchema = zom.Schema(Post, "posts", .id);
+
+    const App = zom.Container(.{
+        .gateways = .{ .default = zom.memory.Gateway, .archive = zom.memory.Gateway },
+        .relations = .{ .users = .{ UserSchema, .default }, .posts = .{ PostSchema, .archive } },
+    });
+
+    var app: App = undefined;
+    try app.init(allocator, .{});
+    defer app.deinit();
+
+    const users = app.relations.users;
+    _ = try users.create(.{ .id = 1, .name = "Achieng", .age = 31 }).commit();
+
+    try testing.expectEqual(1, try users.count());
+    try testing.expectEqual(0, try app.relations.posts.count());
+}

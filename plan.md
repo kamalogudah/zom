@@ -158,7 +158,8 @@ lint suite covering the new contract surface.
       .gateways = .{ .default = zom.memory.Gateway, .files = zom_csv.Gateway },
       .relations = .{ .users = .{ UserSchema, .default }, .imports = .{ ImportSchema, .files } },
   });
-  var app = try App.init(allocator, .{ .files = .{ .path = "data/" } });
+  var app: App = undefined; // init fills it in place: relations point into it
+  try app.init(allocator, .{ .files = .{ .path = "data/" } });
   defer app.deinit();
   const users = app.relations.users;
   ```

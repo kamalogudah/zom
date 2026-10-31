@@ -59,6 +59,14 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
   `loadMany(rows)` (insert without the primary-key check, for trusted bulk
   loads) and `clear()` (drops every row and resets the string arena).
   `memory.Gateway.Dataset(S)` is `Store(S)`. ([#16])
+- `zom.Container(.{ .gateways = ..., .relations = ... })`, like
+  `ROM.container`: declares gateways and the relations over them once, and
+  generates `Gateways`, `Relations` and `Config` structs. `app.init(allocator,
+  config)` initialises the gateways in declaration order and builds the
+  relations, deinitialising the gateways already initialised if anything
+  fails; `deinit` runs in reverse. `init` fills the container in place, so it
+  must not be moved before `deinit`. An unknown gateway name or an invalid
+  gateway is a compile error. ([#19])
 
 ### Changed (breaking)
 
@@ -151,3 +159,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#16]: https://github.com/kamalogudah/zom/issues/16
 [#17]: https://github.com/kamalogudah/zom/issues/17
 [#18]: https://github.com/kamalogudah/zom/issues/18
+[#19]: https://github.com/kamalogudah/zom/issues/19

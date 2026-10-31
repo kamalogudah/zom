@@ -26,6 +26,8 @@ pub const Supports = adapter.Supports;
 
 pub const changeset = @import("changeset.zig");
 
+pub const Container = @import("container.zig").Container;
+
 pub const lint = @import("lint.zig");
 
 pub const mapper = @import("mapper.zig");
@@ -39,6 +41,7 @@ test {
     _ = @import("tests/adapter_test.zig");
     _ = @import("tests/relation_test.zig");
     _ = @import("tests/changeset_test.zig");
+    _ = @import("tests/container_test.zig");
     _ = @import("tests/mapper_test.zig");
     _ = @import("tests/memory_test.zig");
     _ = @import("tests/store_test.zig");
