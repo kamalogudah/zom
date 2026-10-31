@@ -405,6 +405,14 @@ adapters/csv/
 `adapters/csv` is the template: copy it, rename the package (`.name =
 .zom_yaml`), delete the `.fingerprint` line and run `zig build` once, which
 fails and prints a fresh fingerprint to paste in. Every package needs its own.
+A file adapter (one that loads files into `zom.memory.Store`) doesn't write
+a gateway at all. It writes a `Format` with `load` and `dump`, and
+`zom.file.Gateway(Format, .read_only)` / `.writable` supply the rest:
+finding the file, loading each dataset once, the read-only and writable
+dataset types, and the atomic `sync`. zom-csv and zom-yaml are both built
+this way. The contract is listed in `src/file.zig` and checked with
+`@hasDecl` when the gateway type is built.
+
 An application depends on `zom` plus the adapters it uses, and
 `@import("zom")` and `@import("zom_csv")` are the only imports it needs: the
 gateway is `zom_csv.Gateway`, passed to `zom.Relation` like any other.
@@ -537,7 +545,9 @@ links to the topics below.
 | `src/tests/` | Tests, one file per layer, with shared `fixtures.zig` | `std.testing` |
 | `examples/readme.zig` | Every README code block, compiled by `zig build test` | Using zom as a package import |
 | `tests/compile_errors/` | Code that must *not* compile, checked by `zig build compile-errors` | What `@compileError` messages users see |
-| `adapters/csv/` | The `zom-csv` package (a skeleton for now), depending on zom by path | `build.zig.zon` dependencies, `b.dependency(...).module(...)` |
+| `src/file.zig` | `zom.file`: the gateway and datasets file adapters share, over a `Format` (load and dump) | Comptime-parameterised generics, duck typing checked with `@hasDecl`/`@hasField`, atomic writes (temp file, fsync, rename) |
+| `adapters/csv/` | The `zom-csv` package, a CSV `Format` for `zom.file`, depending on zom by path | `build.zig.zon` dependencies, `b.dependency(...).module(...)` |
+| `adapters/yaml/` | The `zom-yaml` package: a YAML-subset parser and writer, and a YAML `Format` for `zom.file` | A hand-written line parser, arenas, escaping that round-trips |
 
 ### 3. Zig concepts used everywhere in zom
 

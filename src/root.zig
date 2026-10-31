@@ -37,6 +37,7 @@ pub const combineMany = mapper.combineMany;
 pub const codec = @import("codec.zig");
 
 pub const memory = @import("adapters/memory.zig");
+pub const file = @import("file.zig");
 pub const sql = @import("adapters/sql.zig");
 
 test {
@@ -50,4 +51,5 @@ test {
     _ = @import("tests/lint_test.zig");
     _ = @import("tests/codec_test.zig");
     _ = @import("tests/sql_test.zig");
+    _ = file;
 }

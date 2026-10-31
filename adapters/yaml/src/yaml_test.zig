@@ -506,3 +506,86 @@ test "no leaks when allocation fails" {
         \\  - id: 10
     });
 }
+
+test "writeScalar: every value reads back unchanged, as a value and as a key, in every style" {
+    // Every byte alone, every byte between letters and at both ends, and
+    // strings with YAML meaning.
+    var cases: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (cases.items) |c| testing.allocator.free(c);
+        cases.deinit(testing.allocator);
+    }
+    for (0..256) |b| {
+        const c: u8 = @intCast(b);
+        try cases.append(testing.allocator, try std.fmt.allocPrint(testing.allocator, "{c}", .{c}));
+        try cases.append(testing.allocator, try std.fmt.allocPrint(testing.allocator, "a{c}b", .{c}));
+        try cases.append(testing.allocator, try std.fmt.allocPrint(testing.allocator, "{c}a", .{c}));
+        try cases.append(testing.allocator, try std.fmt.allocPrint(testing.allocator, "a{c}", .{c}));
+        try cases.append(testing.allocator, try std.fmt.allocPrint(testing.allocator, "a {c}b", .{c}));
+        try cases.append(testing.allocator, try std.fmt.allocPrint(testing.allocator, "{c} a", .{c}));
+    }
+    for ([_][]const u8{
+        "",      "~",   "null", "NULL",            "---",         "...", "--- a", "- a", "? a", ": a", "a: b", "a:", "a #b",
+        "\"x\"", "'x'", "x\\y", "\xEF\xBB\xBFbom", "caf\xC3\xA9", "1",   "-1",    "yes", "1e3",
+    }) |s| try cases.append(testing.allocator, try testing.allocator.dupe(u8, s));
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    for (cases.items) |s| {
+        for ([_]yaml.Style{ .plain_if_safe, .string, .quoted }) |style| {
+            out.clearRetainingCapacity();
+            try out.writer.writeAll("- fixed_key: ");
+            try yaml.writeScalar(&out.writer, s, style);
+            try out.writer.writeAll("\n  ");
+            try yaml.writeScalar(&out.writer, s, style);
+            try out.writer.writeAll(": v\n");
+            var diag: yaml.Diagnostic = .{};
+            var r = yaml.parseRecords(testing.allocator, out.written(), &diag) catch |err| {
+                std.debug.print("{t} on {f} for {any}: {f}\n", .{ style, std.zig.fmtString(s), s, diag });
+                return err;
+            };
+            defer r.deinit();
+            const fields = r.items[0].fields;
+            testing.expectEqualStrings(s, fields[0].value.?) catch |err| {
+                std.debug.print("value, {t}: {f}\n", .{ style, std.zig.fmtString(out.written()) });
+                return err;
+            };
+            testing.expectEqualStrings(s, fields[1].key) catch |err| {
+                std.debug.print("key, {t}: {f}\n", .{ style, std.zig.fmtString(out.written()) });
+                return err;
+            };
+        }
+    }
+
+    out.clearRetainingCapacity();
+    try yaml.writeScalar(&out.writer, null, .quoted);
+    try testing.expectEqualStrings("~", out.written());
+}
+
+test "writeScalar: plain when safe, quoted when another reader would type it" {
+    const cases = .{
+        .{ "Ada", .string, "Ada" },
+        .{ "Lovelace, Ada", .string, "Lovelace, Ada" },
+        .{ "123", .plain_if_safe, "123" },
+        .{ "123", .string, "\"123\"" },
+        .{ "Yes", .string, "\"Yes\"" },
+        .{ "null", .plain_if_safe, "\"null\"" },
+        .{ "", .plain_if_safe, "\"\"" },
+        .{ "a\tb\n", .string, "\"a\\tb\\n\"" },
+        .{ "\x01", .string, "\"\\x01\"" },
+    };
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    inline for (cases) |c| {
+        out.clearRetainingCapacity();
+        try yaml.writeScalar(&out.writer, c[0], c[1]);
+        try testing.expectEqualStrings(c[2], out.written());
+    }
+}
+
+test "Field.quoted says whether the value was quoted" {
+    var r = try yaml.parseRecords(testing.allocator, "- a: 1\n  b: \"1\"\n  c: '1'\n  d:\n", null);
+    defer r.deinit();
+    const f = r.items[0].fields;
+    try testing.expect(!f[0].quoted and f[1].quoted and f[2].quoted and !f[3].quoted);
+}

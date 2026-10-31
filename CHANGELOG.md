@@ -9,6 +9,42 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- `zom_yaml.Gateway` and `zom_yaml.WritableGateway`, with the same structure
+  as zom-csv. `Config.path` is one YAML file mapping every dataset name to
+  its records (rom-yaml's layout), or a directory of `<name>.yaml` files,
+  each a bare sequence. Each dataset is loaded into a `zom.memory.Store(S)`
+  on first use. Every record's keys are checked against the schema: a
+  missing required key or an unknown one (unless `unknown_keys = .ignore`)
+  is `error.SchemaMismatch`, and the message names the file, the line, the
+  dataset, the 0-based list index and every bad key, as in
+  `data.yaml:4: users[1]: missing key "name"`. Values decode through
+  `zom.codec`, and errors read `data.yaml:6: users[1].age: "old" is not an
+  integer from 0 to 255`. YAML null on a non-optional field is
+  `error.UnexpectedNull`. On an optional field it wins over the field's
+  default. `WritableGateway.sync()` writes records with keys in schema order
+  and null as `~`. It quotes strings that other YAML readers would type
+  (`"123"`, `"yes"`) and anything that can't be written plain. A
+  single-file sync re-reads the file and keeps the other datasets as they
+  are, in order and with their quoting. Comments are not kept.
+  `writeRecords` and `writeDataset` write the same format. ([#27])
+- `zom.file`, which zom-csv and zom-yaml now share:
+  `Gateway(Format, mode)` and `FileDataset(S, Format, mode)` hold the file
+  lookup, size limit and BOM handling, lazy per-dataset loading, the
+  read-only and writable dataset types, the dirty flag and the atomic
+  `sync`. A format supplies `name`, `extension`, `layout` (`.one_per_file`
+  or `.all_in_file`), `Config`, `WriteError`, `load`, `dump` and optionally
+  `State(S)`. Missing or mistyped declarations are listed in one compile
+  error. `zom.file.Diagnostic` (with `list` for several problems in one
+  message) and `zom.file.Unknown` replace the CSV-only versions;
+  `zom_csv.Diagnostic` and `zom_csv.UnknownColumns` are now aliases of
+  them, so zom-csv's API and messages are unchanged. ([#27])
+- `yaml.writeScalar(writer, value, style)`, which writes a key or value
+  that the parser reads back as the same bytes. `yaml.Field.quoted` says
+  whether a value was quoted. ([#27])
+- `zom.codec.Diagnostic.formatProblem`, the message without the
+  `row:column (field)` prefix, for adapters that name the place their own
+  way. ([#27])
+
 - `zom-yaml` (`adapters/yaml`), starting with `yaml.parseDatasets` and
   `yaml.parseRecords`. They parse a documented subset of YAML: a mapping
   from dataset name to a block sequence of flat records, or one bare
@@ -237,3 +273,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#23]: https://github.com/kamalogudah/zom/issues/23
 [#25]: https://github.com/kamalogudah/zom/issues/25
 [#26]: https://github.com/kamalogudah/zom/issues/26
+[#27]: https://github.com/kamalogudah/zom/issues/27

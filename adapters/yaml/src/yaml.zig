@@ -44,6 +44,10 @@
 //! a second document or `...`, multi-line scalars, and records that are not
 //! mappings. Malformed input fails with one of the other `Error` values.
 //!
+//! Writing: `writeScalar` writes a key or value so that the parser reads it
+//! back as the same text (or null), plain when that is safe and
+//! double-quoted otherwise.
+//!
 //! Memory: the result owns an arena holding every list and every unescaped
 //! string. Values without escapes are sub-slices of `input`, so `input`
 //! must outlive the result. On error nothing is leaked.
@@ -106,6 +110,9 @@ pub const Field = struct {
     value: ?[]const u8,
     /// 1-based line of the key, for decode errors.
     line: usize,
+    /// The value was written in quotes (`"02134"`, `''`), so a writer keeps
+    /// it a string rather than a number, bool or null.
+    quoted: bool = false,
 };
 
 /// One item of a sequence: its fields in file order, keys unique.
@@ -173,6 +180,83 @@ pub fn parseRecords(gpa: Allocator, input: []const u8, diag: ?*Diagnostic) Error
     var p: Parser = .init(arena.allocator(), input, diag);
     const items = try p.records();
     return .{ .arena = arena, .items = items };
+}
+
+/// How `writeScalar` chooses between plain and double-quoted text.
+pub const Style = enum {
+    /// Plain when the parser reads it back unchanged, else quoted. For
+    /// numbers, bools, enum tags and text that was plain when parsed.
+    plain_if_safe,
+    /// As `plain_if_safe`, and also quoted when another YAML reader would
+    /// take it as a number, bool or null (`"123"`, `"yes"`, `"1e3"`). For
+    /// string fields.
+    string,
+    /// Always double-quoted.
+    quoted,
+};
+
+/// Writes `value` as a YAML scalar, or `~` for null. The parser reads the
+/// output back as `value` exactly, whatever bytes it holds: control
+/// characters, `"` and `\` are escaped in double quotes.
+pub fn writeScalar(w: *std.Io.Writer, value: ?[]const u8, style: Style) std.Io.Writer.Error!void {
+    const s = value orelse return w.writeByte('~');
+    const plain = switch (style) {
+        .plain_if_safe => isPlainSafe(s),
+        .string => isPlainSafe(s) and !looksTyped(s),
+        .quoted => false,
+    };
+    if (plain) return w.writeAll(s);
+    try w.writeByte('"');
+    var start: usize = 0;
+    for (s, 0..) |c, i| {
+        const esc: ?[]const u8 = switch (c) {
+            '"' => "\\\"",
+            '\\' => "\\\\",
+            '\n' => "\\n",
+            '\t' => "\\t",
+            '\r' => "\\r",
+            0 => "\\0",
+            else => null,
+        };
+        if (esc == null and c >= 0x20 and c != 0x7F) continue;
+        try w.writeAll(s[start..i]);
+        if (esc) |e| try w.writeAll(e) else try w.print("\\x{x:0>2}", .{c});
+        start = i + 1;
+    }
+    try w.writeAll(s[start..]);
+    try w.writeByte('"');
+}
+
+/// Whether the parser reads `s` back unchanged as a plain key or value.
+fn isPlainSafe(s: []const u8) bool {
+    if (s.len == 0 or isNull(s)) return false;
+    switch (s[0]) {
+        '&', '*', '!', '|', '>', '[', ']', '{', '}', '?', ':', '%', '@', '`', ',', '#', '\'', '"', ' ' => return false,
+        '-' => if (separated(s, 1)) return false,
+        else => {},
+    }
+    if (std.mem.startsWith(u8, s, "---") or std.mem.startsWith(u8, s, "...")) return false;
+    const last = s[s.len - 1];
+    if (last == ' ' or last == ':') return false;
+    for (s, 0..) |c, i| {
+        if (c < 0x20 or c == 0x7F) return false; // also tabs
+        if (c == ':' and separated(s, i + 1)) return false;
+        if (c == '#' and s[i - 1] == ' ') return false; // i > 0: s[0] != '#'
+    }
+    return true;
+}
+
+/// Whether a YAML 1.1 or 1.2 reader would resolve plain `s` to something
+/// other than a string: null, a bool (`true`, `yes`, `on`, ...) or a number.
+/// Errs towards yes: `2nd` counts, since quoting it costs nothing.
+fn looksTyped(s: []const u8) bool {
+    if (isNull(s)) return true;
+    const words = [_][]const u8{ "true", "false", "yes", "no", "on", "off", "y", "n", ".inf", "-.inf", "+.inf", ".nan" };
+    for (words) |word| if (std.ascii.eqlIgnoreCase(s, word)) return true;
+    const body = if (s[0] == '+' or s[0] == '-') s[1..] else s;
+    if (body.len == 0) return false;
+    if (std.ascii.isDigit(body[0])) return true;
+    return body[0] == '.' and body.len > 1 and std.ascii.isDigit(body[1]);
 }
 
 /// A line with content: not blank and not only a comment.
@@ -326,7 +410,8 @@ const Parser = struct {
         for (fields.items) |f| if (std.mem.eql(u8, f.key, kv.key))
             return p.fail(error.DuplicateKey, line, 0, "a key used twice in one record");
         const value = try p.scalar(line, kv.rest, kv.rest_off);
-        try fields.append(p.arena, .{ .key = kv.key, .value = value, .line = line.number });
+        const is_quoted = kv.rest.len > 0 and (kv.rest[0] == '"' or kv.rest[0] == '\'');
+        try fields.append(p.arena, .{ .key = kv.key, .value = value, .line = line.number, .quoted = is_quoted });
         return trimComment(kv.rest).len == 0;
     }
 
