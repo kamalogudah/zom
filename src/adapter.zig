@@ -156,18 +156,33 @@ pub fn Adapter(comptime G: type) type {
         /// e.g. "create". Because Zig only analyses a function when it is
         /// called, calling this from a method makes only that method fail.
         pub fn require(comptime S: type, comptime cap: Capability, comptime method: []const u8) void {
-            if (has(S, cap)) return;
-            const problem = if (cap != .transaction and readOnly(S))
+            requireAny(S, &.{cap}, method);
+        }
+
+        /// Like `require`, but any one of `caps` is enough, e.g.
+        /// `createMany` runs on `insertMany` or, failing that, `insert`.
+        /// `caps` must all be dataset capabilities or all be `.transaction`.
+        pub fn requireAny(comptime S: type, comptime caps: []const Capability, comptime method: []const u8) void {
+            for (caps) |cap| if (has(S, cap)) return;
+            const on_gateway = caps[0] == .transaction;
+            var tags: []const u8 = "";
+            var decls: []const u8 = "";
+            for (caps, 0..) |cap, i| {
+                const sep = if (i == 0) "" else " or ";
+                tags = tags ++ sep ++ "`" ++ @tagName(cap) ++ "`";
+                decls = decls ++ sep ++ "`" ++ declFor(cap) ++ "`";
+            }
+            const problem = if (!on_gateway and readOnly(S))
                 std.fmt.comptimePrint("is read-only for relation '{s}'", .{S.name})
             else
                 std.fmt.comptimePrint("does not support `{s}` for relation '{s}'", .{ method, S.name });
-            @compileError(std.fmt.comptimePrint("zom: adapter '{s}' {s}: `{s}` needs the `{s}` capability ({s} has no `{s}`)", .{
+            @compileError(std.fmt.comptimePrint("zom: adapter '{s}' {s}: `{s}` needs the {s} capability ({s} has no {s})", .{
                 name,
                 problem,
                 method,
-                @tagName(cap),
-                if (cap == .transaction) "gateway" else "dataset",
-                declFor(cap),
+                tags,
+                if (on_gateway) "gateway" else "dataset",
+                decls,
             }));
         }
     };

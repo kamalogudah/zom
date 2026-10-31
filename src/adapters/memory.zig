@@ -93,6 +93,29 @@ pub fn MemoryDataset(comptime S: type) type {
             return owned;
         }
 
+        /// All or nothing: every key is checked, against the stored rows and
+        /// against the rest of the batch, and the row capacity is reserved
+        /// before anything is stored. If copying a string then runs out of
+        /// memory, the rows appended so far are dropped again. Strings
+        /// already copied stay in the arena until the gateway is freed, as
+        /// with `update`, so there is nothing else to undo.
+        pub fn insertMany(self: *Self, batch: []const T) !usize {
+            for (batch, 0..) |row, i| {
+                const key = Q.fieldValue(row, pk);
+                for (self.rows.items) |existing| {
+                    if (Q.fieldValue(existing, pk).eql(key)) return error.DuplicatePrimaryKey;
+                }
+                for (batch[0..i]) |earlier| {
+                    if (Q.fieldValue(earlier, pk).eql(key)) return error.DuplicatePrimaryKey;
+                }
+            }
+            try self.rows.ensureUnusedCapacity(self.allocator, batch.len);
+            const old_len = self.rows.items.len;
+            errdefer self.rows.shrinkRetainingCapacity(old_len);
+            for (batch) |row| self.rows.appendAssumeCapacity(try self.dupeStrings(row));
+            return batch.len;
+        }
+
         pub fn read(self: *Self, query: Q, allocator: Allocator) ![]T {
             var hits: std.ArrayList(T) = .empty;
             defer hits.deinit(allocator);

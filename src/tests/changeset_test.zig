@@ -76,3 +76,19 @@ test "u64 above maxInt(u32) on a u32 attribute is rejected" {
     try testing.expectError(error.ValueOutOfRange, users.byPk(1).update().set(.id, id).commit());
     try testing.expectEqual(@as(usize, 1), try users.where(.id, .eq, 1).count());
 }
+
+test "createMany inserts every tuple and returns the count" {
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
+    defer gw.deinit();
+    const users = try Users.init(&gw);
+
+    const a: UserTuple = .{ .id = 1, .name = "Achieng", .email = "achieng@example.com", .age = 31 };
+    const b: UserTuple = .{ .id = 2, .name = "Otieno", .email = "otieno@example.com", .age = 24 };
+    const c: UserTuple = .{ .id = 3, .name = "Wanjiru", .email = "wanjiru@example.com", .age = 42 };
+    try testing.expectEqual(@as(usize, 3), try users.createMany(&.{ a, b, c }).commit());
+    try testing.expectEqual(@as(usize, 3), try users.count());
+    try testing.expectEqualStrings("Otieno", (try users.byPk(2).one(testing.allocator)).?.name);
+
+    try testing.expectEqual(@as(usize, 0), try users.createMany(&.{}).commit());
+    try testing.expectEqual(@as(usize, 3), try users.count());
+}

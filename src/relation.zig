@@ -7,7 +7,8 @@
 //!
 //! The adapter contract is checked at compile time by `zom.Adapter` (see
 //! adapter.zig). `create`, `update` and `delete` need the matching dataset
-//! capability, and fail to compile, naming the adapter, when it is missing.
+//! capability (`createMany` needs `batch_insert` or `writable`), and fail to
+//! compile, naming the adapter, when it is missing.
 //! Zig only analyses a function that is called, so a relation over a
 //! read-only adapter compiles fine as long as only its reads are used.
 
@@ -113,6 +114,15 @@ pub fn Relation(comptime S: type, comptime Gateway: type) type {
         pub fn create(self: Self, tuple: Tuple) changeset.Create(Self) {
             comptime Adapter.require(S, .writable, "create");
             return .{ .relation = self, .tuple = tuple };
+        }
+
+        /// ROM's `users.changeset(:create, [data, ...])`. Uses the dataset's
+        /// `insertMany` when it has one, else loops over `insert`; see
+        /// `changeset.CreateMany` for what a failure leaves behind. The
+        /// changeset borrows `tuples` until `commit`.
+        pub fn createMany(self: Self, tuples: []const Tuple) changeset.CreateMany(Self) {
+            comptime Adapter.requireAny(S, &.{ .batch_insert, .writable }, "createMany");
+            return .{ .relation = self, .tuples = tuples };
         }
 
         /// ROM's `users.by_pk(1).changeset(:update, data)`, built with `.set`.
