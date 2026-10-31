@@ -9,6 +9,14 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- `zom.codec.encodeField(writer, value, opts)` and `encodeRow(writer, T,
+  row, opts, sep)`, the inverse of `decodeField`/`decodeRow`, for CSV sync
+  and YAML writing. They write integers as `{d}`, floats as the shortest text
+  that parses back to the same bits (decimal when `1e-6 <= abs(x) < 1e21`,
+  scientific such as `1e300` otherwise), bools as `true`/`false`, enums as
+  tag names, strings unchanged and `null` as `Options.null_text`. When
+  `null_text` is `null` they fail with `error.NullNotRepresentable`. Nothing
+  is quoted, because quoting is the format writer's job. ([#22])
 - `zom.codec`, which decodes text cells (CSV, YAML scalars, SQL text
   results) into tuple field types. `decodeField(F, text, opts)` handles
   integers, floats, bools (`true`/`false`/`1`/`0`/`t`/`f`, any case), enums,
@@ -179,3 +187,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#19]: https://github.com/kamalogudah/zom/issues/19
 [#20]: https://github.com/kamalogudah/zom/issues/20
 [#21]: https://github.com/kamalogudah/zom/issues/21
+[#22]: https://github.com/kamalogudah/zom/issues/22

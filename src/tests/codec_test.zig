@@ -210,3 +210,152 @@ test "Diagnostic messages per error" {
         try testing.expectEqualStrings(c.msg, try std.fmt.bufPrint(&buf, "{f}", .{diag}));
     }
 }
+
+// Encoding.
+
+fn encodeAlloc(value: anytype, opts: codec.Options) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try codec.encodeField(&out.writer, value, opts);
+    return out.toOwnedSlice();
+}
+
+fn expectEncoded(want: []const u8, value: anytype, opts: codec.Options) !void {
+    const got = try encodeAlloc(value, opts);
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings(want, got);
+}
+
+test "encodeField per type" {
+    try expectEncoded("0", @as(u8, 0), .{});
+    try expectEncoded("-9223372036854775808", @as(i64, std.math.minInt(i64)), .{});
+    try expectEncoded("42", 42, .{});
+    try expectEncoded("true", true, .{});
+    try expectEncoded("false", false, .{});
+    try expectEncoded("member", Role.member, .{});
+    try expectEncoded(" Ada ", @as([]const u8, " Ada "), .{});
+    try expectEncoded("a,b", "a,b", .{}); // no quoting: that's the CSV writer's job
+    try expectEncoded("", @as(?u8, null), .{});
+    try expectEncoded("NULL", @as(?u8, null), .{ .null_text = "NULL" });
+    try expectEncoded("7", @as(?u8, 7), .{ .null_text = "NULL" });
+    try testing.expectError(error.NullNotRepresentable, encodeAlloc(@as(?u8, null), .{ .null_text = null }));
+}
+
+test "encodeField floats: decimal for everyday magnitudes, scientific outside" {
+    const cases = [_]struct { f64, []const u8 }{
+        .{ 0.1, "0.1" },
+        .{ 1.5, "1.5" },
+        .{ 100, "100" },
+        .{ 0, "0" },
+        .{ -0.0, "-0" },
+        .{ 1e-6, "0.000001" },
+        .{ 1e20, "100000000000000000000" },
+        .{ 1e21, "1e21" },
+        .{ 1e-7, "1e-7" },
+        .{ 1e300, "1e300" },
+        .{ 5e-324, "5e-324" },
+        .{ std.math.inf(f64), "inf" },
+        .{ -std.math.inf(f64), "-inf" },
+        .{ std.math.nan(f64), "nan" },
+    };
+    for (cases) |c| try expectEncoded(c[1], c[0], .{});
+    // Shortest for the field's own type, not for f64.
+    try expectEncoded("0.1", @as(f32, 0.1), .{});
+    try expectEncoded("1e4000", @as(f128, 1e4000), .{});
+}
+
+/// Field-by-field equality: strings by content, floats by bits (so -0 and
+/// nan compare as themselves).
+fn expectRowEqual(comptime T: type, want: T, got: T) !void {
+    inline for (@typeInfo(T).@"struct".fields) |f| {
+        const w = @field(want, f.name);
+        const g = @field(got, f.name);
+        errdefer std.debug.print("field {s}: want {any}, got {any}\n", .{ f.name, w, g });
+        switch (@typeInfo(f.type)) {
+            .optional => |o| {
+                try testing.expectEqual(w == null, g == null);
+                if (w) |wv| try expectValueEqual(o.child, wv, g.?);
+            },
+            else => try expectValueEqual(f.type, w, g),
+        }
+    }
+}
+
+fn expectValueEqual(comptime F: type, want: F, got: F) !void {
+    if (F == []const u8) return testing.expectEqualStrings(want, got);
+    if (@typeInfo(F) == .float) {
+        const Bits = @Int(.unsigned, @bitSizeOf(F));
+        return testing.expectEqual(@as(Bits, @bitCast(want)), @as(Bits, @bitCast(got)));
+    }
+    return testing.expectEqual(want, got);
+}
+
+fn roundTrip(comptime T: type, row: T, opts: codec.Options, sep: []const u8) !void {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try codec.encodeRow(&out.writer, T, row, opts, sep);
+
+    var cells: [@typeInfo(T).@"struct".fields.len][]const u8 = undefined;
+    var it = std.mem.splitSequence(u8, out.written(), sep);
+    var n: usize = 0;
+    while (it.next()) |cell| : (n += 1) cells[n] = cell;
+    try testing.expectEqual(cells.len, n);
+
+    errdefer std.debug.print("encoded: \"{s}\"\n", .{out.written()});
+    try expectRowEqual(T, row, try codec.decodeRow(T, &cells, opts, null));
+}
+
+const Reading = struct {
+    id: u64,
+    delta: i16,
+    name: []const u8,
+    role: Role,
+    ok: bool,
+    value: f64,
+    small: f32,
+    note: ?[]const u8,
+    limit: ?f64,
+    rank: ?u8,
+};
+
+test "encodeRow then decodeRow gives back the row" {
+    const rows = [_]Reading{
+        .{ .id = 1, .delta = -3, .name = "Ada", .role = .admin, .ok = true, .value = 0.1, .small = 0.1, .note = "x", .limit = 1e300, .rank = 0 },
+        .{ .id = std.math.maxInt(u64), .delta = std.math.minInt(i16), .name = "", .role = .member, .ok = false, .value = 1e300, .small = std.math.floatMax(f32), .note = null, .limit = null, .rank = null },
+        .{ .id = 0, .delta = 0, .name = " padded ", .role = .admin, .ok = true, .value = -0.0, .small = std.math.floatTrueMin(f32), .note = "NULLish", .limit = 5e-324, .rank = 255 },
+        .{ .id = 2, .delta = 1, .name = "Grace", .role = .member, .ok = false, .value = 1e-7, .small = -1.5, .note = null, .limit = -std.math.inf(f64), .rank = 9 },
+        .{ .id = 3, .delta = 2, .name = "π", .role = .admin, .ok = true, .value = 1.0 / 3.0, .small = 1e21, .note = "", .limit = 0.30000000000000004, .rank = null },
+    };
+    for (rows, 0..) |row, i| {
+        errdefer std.debug.print("row {d}\n", .{i});
+        // Row 4's note is "", which reads back as null under the default
+        // null_text, so that row uses "NULL" instead.
+        if (i != 4) try roundTrip(Reading, row, .{}, ",");
+        try roundTrip(Reading, row, .{ .null_text = "NULL" }, "\t");
+    }
+}
+
+fn expectFloatRoundTrip(comptime F: type, x: F) !void {
+    if (std.math.isNan(x)) return;
+    var buf: [64]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try codec.encodeField(&w, x, .{});
+    const back = try codec.decodeField(F, w.buffered(), .{});
+    errdefer std.debug.print("{s}: \"{s}\"\n", .{ @typeName(F), w.buffered() });
+    const Bits = @Int(.unsigned, @bitSizeOf(F));
+    try testing.expectEqual(@as(Bits, @bitCast(x)), @as(Bits, @bitCast(back)));
+}
+
+test "floats round-trip across the whole range" {
+    // Every f16, then random bit patterns (subnormals, huge exponents and
+    // all) for f32 and f64. f128 is left to the fixed cases above: parsing
+    // its extreme exponents in Debug takes ~70ms a value.
+    for (0..1 << 16) |bits| try expectFloatRoundTrip(f16, @bitCast(@as(u16, @intCast(bits))));
+    var prng: std.Random.DefaultPrng = .init(0x5eed);
+    const r = prng.random();
+    for (0..20_000) |_| {
+        try expectFloatRoundTrip(f32, @bitCast(r.int(u32)));
+        try expectFloatRoundTrip(f64, @bitCast(r.int(u64)));
+    }
+    try testing.expect(std.math.isNan(try codec.decodeField(f64, "nan", .{})));
+}

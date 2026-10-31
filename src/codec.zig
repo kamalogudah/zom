@@ -20,6 +20,23 @@
 //! A non-optional, non-string field given `null_text` (by default `""`) is
 //! `UnexpectedNull`, so an empty CSV cell in an integer column says "empty"
 //! rather than "not an integer". A string field takes it as a value.
+//!
+//! `encodeField` and `encodeRow` go the other way, so that
+//! `decodeField(F, encode(x)) == x`:
+//!
+//! | Type | Written as |
+//! |---|---|
+//! | integers | `{d}` |
+//! | floats | the shortest text that parses back to the same value: decimal (`0.1`, `1500`) when `1e-6 <= abs(x) < 1e21` or `x` is 0, scientific (`1e300`, `5e-324`) otherwise; `inf`, `-inf`, `nan` |
+//! | `bool` | `true`, `false` |
+//! | enums | the tag name |
+//! | strings | as they are |
+//! | `null` | `Options.null_text`, or `error.NullNotRepresentable` when that is `null` |
+//!
+//! Nothing is quoted or escaped: a CSV writer quotes a cell holding its
+//! separator, and the codec doesn't know the format. One value can't round-
+//! trip: an optional string equal to `null_text` (`""` by default) decodes
+//! back as `null`.
 
 const std = @import("std");
 
@@ -160,6 +177,52 @@ pub fn decodeRow(comptime T: type, cells: []const []const u8, opts: Options, dia
     return out;
 }
 
+pub const EncodeError = std.Io.Writer.Error || error{
+    /// A `null` value, but `Options.null_text` is `null`, so no text means null.
+    NullNotRepresentable,
+};
+
+/// Writes one value as text, the inverse of `decodeField`. See the module
+/// comment for each type's format. Only `opts.null_text` is used.
+pub fn encodeField(writer: *std.Io.Writer, value: anytype, opts: Options) EncodeError!void {
+    const F = @TypeOf(value);
+    if (comptime isEncodableText(F)) return writer.writeAll(value);
+    switch (@typeInfo(F)) {
+        .optional => if (value) |v| return encodeField(writer, v, opts) else {
+            return writer.writeAll(opts.null_text orelse return error.NullNotRepresentable);
+        },
+        .null => return writer.writeAll(opts.null_text orelse return error.NullNotRepresentable),
+        .int, .comptime_int => return writer.print("{d}", .{value}),
+        .float => return writeFloat(writer, value),
+        .comptime_float => return writeFloat(writer, @as(f64, value)),
+        .bool => return writer.writeAll(if (value) "true" else "false"),
+        .@"enum", .enum_literal => return writer.writeAll(@tagName(value)),
+        .pointer => @compileError("zom.codec: string fields must be []const u8, got " ++ @typeName(F)),
+        else => @compileError("zom.codec: unsupported field type " ++ @typeName(F)),
+    }
+}
+
+/// Writes every field of `row` in declaration order, with `sep` between them
+/// and nothing after the last, the inverse of `decodeRow` without
+/// `Options.columns`. Only `opts.null_text` is used.
+pub fn encodeRow(writer: *std.Io.Writer, comptime T: type, row: T, opts: Options, sep: []const u8) EncodeError!void {
+    if (@typeInfo(T) != .@"struct")
+        @compileError("zom.codec.encodeRow: expected a tuple struct, got " ++ @typeName(T));
+    inline for (@typeInfo(T).@"struct".fields, 0..) |f, i| {
+        if (i != 0) try writer.writeAll(sep);
+        try encodeField(writer, @field(row, f.name), opts);
+    }
+}
+
+/// Ryu's shortest round-trip digits, in decimal for everyday magnitudes and
+/// scientific outside them, so `1e300` isn't 301 characters (and an `f128`
+/// never needs more than `{d}`'s fixed buffer).
+fn writeFloat(writer: *std.Io.Writer, value: anytype) std.Io.Writer.Error!void {
+    const a = @abs(value);
+    if (a == 0 or (a >= 1e-6 and a < 1e21)) return writer.print("{d}", .{value});
+    return writer.print("{e}", .{value}); // also inf and nan
+}
+
 /// Case-insensitive `true`/`false`/`1`/`0`/`t`/`f`.
 fn parseBool(text: []const u8) DecodeError!bool {
     const truthy = [_][]const u8{ "true", "t", "1" };
@@ -177,6 +240,19 @@ fn isNull(text: []const u8, opts: Options) bool {
 fn isText(comptime F: type) bool {
     return switch (@typeInfo(F)) {
         .pointer => |p| p.size == .slice and p.child == u8 and p.is_const,
+        else => false,
+    };
+}
+
+/// What `encodeField` writes as it is: any `u8` slice, or a pointer to a
+/// `u8` array (a string literal).
+fn isEncodableText(comptime F: type) bool {
+    return switch (@typeInfo(F)) {
+        .pointer => |p| (p.size == .slice and p.child == u8) or
+            (p.size == .one and switch (@typeInfo(p.child)) {
+                .array => |a| a.child == u8,
+                else => false,
+            }),
         else => false,
     };
 }
