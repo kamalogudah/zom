@@ -4,31 +4,43 @@ const Allocator = std.mem.Allocator;
 const zom = @import("zom");
 const root = @import("root.zig");
 const Gateway = root.Gateway;
+const WritableGateway = root.WritableGateway;
 
 // -- zom.lint ----------------------------------------------------------------
 
-/// Each lint check gets a fresh temp directory, seeded with one CSV file per
-/// schema through `writeTable`. Checks run one at a time, so one slot is
+/// Each lint check gets a fresh temp directory. With `seed_files`, it is
+/// seeded with one CSV file per schema through `writeTable`, so lint reads
+/// loaded files; without, a writable gateway starts from no file and lint
+/// seeds it through `insertMany`. Checks run one at a time, so one slot is
 /// enough.
-const LintFactory = struct {
-    var tmp: ?testing.TmpDir = null;
+fn LintFactory(comptime G: type, comptime seed_files: bool) type {
+    const Base = struct {
+        var tmp: ?testing.TmpDir = null;
 
-    pub fn create(allocator: Allocator) !Gateway {
-        std.debug.assert(tmp == null);
-        tmp = testing.tmpDir(.{});
-        return Gateway.init(allocator, .{ .io = testing.io, .dir = tmp.?.dir, .path = "." });
-    }
+        pub fn create(allocator: Allocator) !G {
+            std.debug.assert(tmp == null);
+            tmp = testing.tmpDir(.{});
+            return G.init(allocator, .{ .io = testing.io, .dir = tmp.?.dir, .path = "." });
+        }
 
-    pub fn destroy(g: *Gateway) void {
-        g.deinit();
-        tmp.?.cleanup();
-        tmp = null;
-    }
+        pub fn destroy(g: *G) void {
+            g.deinit();
+            tmp.?.cleanup();
+            tmp = null;
+        }
+    };
+    // `zom.lint` checks for a `seed` declaration, so the unseeded factory
+    // must not have one at all.
+    if (!seed_files) return Base;
+    return struct {
+        pub const create = Base.create;
+        pub const destroy = Base.destroy;
 
-    pub fn seed(g: *Gateway, comptime S: type, rows: []const S.Tuple) !void {
-        try writeFixture(g.config.dir, S.name ++ ".csv", S.Tuple, rows);
-    }
-};
+        pub fn seed(g: *G, comptime S: type, rows: []const S.Tuple) !void {
+            try writeFixture(g.config.dir, S.name ++ ".csv", S.Tuple, rows);
+        }
+    };
+}
 
 fn writeFixture(dir: std.Io.Dir, name: []const u8, comptime T: type, rows: []const T) !void {
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
@@ -39,7 +51,16 @@ fn writeFixture(dir: std.Io.Dir, name: []const u8, comptime T: type, rows: []con
 
 test "zom.lint: read checks pass, write checks are skipped" {
     try testing.expect(zom.Adapter(Gateway).readOnly(zom.lint.Users));
-    try zom.lint.run(Gateway, LintFactory);
+    try zom.lint.run(Gateway, LintFactory(Gateway, true));
+}
+
+test "zom.lint: every check passes on WritableGateway, loaded or new file" {
+    const A = zom.Adapter(WritableGateway);
+    inline for (.{ .writable, .batch_insert, .updatable, .deletable }) |cap| {
+        try testing.expect(A.has(zom.lint.Users, cap));
+    }
+    try zom.lint.run(WritableGateway, LintFactory(WritableGateway, true));
+    try zom.lint.run(WritableGateway, LintFactory(WritableGateway, false));
 }
 
 // -- loading -----------------------------------------------------------------
@@ -236,4 +257,231 @@ fn loadAll(allocator: Allocator, dir: std.Io.Dir) !void {
     const rows = try d.read(.{}, allocator);
     defer allocator.free(rows);
     try testing.expectEqualStrings("A\"da", rows[0].name);
+}
+
+// -- writing and sync --------------------------------------------------------
+
+fn writable(dir: std.Io.Dir) WritableGateway {
+    return WritableGateway.init(testing.allocator, .{ .io = testing.io, .dir = dir, .path = "." });
+}
+
+fn expectFile(dir: std.Io.Dir, name: []const u8, want: []const u8) !void {
+    const got = try dir.readFileAlloc(testing.io, name, testing.allocator, .unlimited);
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings(want, got);
+}
+
+fn expectNoFile(dir: std.Io.Dir, name: []const u8) !void {
+    try testing.expectError(error.FileNotFound, dir.statFile(testing.io, name, .{}));
+}
+
+test "insert, sync, and a new gateway on the same directory reads the rows" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        var gw = writable(tmp.dir);
+        defer gw.deinit();
+        const users = try zom.Relation(Users, WritableGateway).init(&gw);
+        _ = try users.create(.{ .id = 1, .name = "Lovelace, Ada", .age = 36, .role = .admin }).commit();
+        _ = try users.createMany(&.{
+            .{ .id = 2, .name = "Bob", .age = null },
+            .{ .id = 3, .name = "Cy", .age = 7 },
+        }).commit();
+        // Nothing reaches the file before sync.
+        try expectNoFile(tmp.dir, "users.csv");
+        try gw.sync();
+    }
+    // A new file gets the columns in schema order.
+    try expectFile(tmp.dir, "users.csv",
+        \\id,name,age,role
+        \\1,"Lovelace, Ada",36,admin
+        \\2,Bob,,member
+        \\3,Cy,7,member
+        \\
+    );
+    try expectNoFile(tmp.dir, "users.csv.tmp");
+
+    var gw = writable(tmp.dir);
+    defer gw.deinit();
+    const users = try zom.Relation(Users, WritableGateway).init(&gw);
+    const rows = try users.order(.id, .asc).toSlice(testing.allocator);
+    defer testing.allocator.free(rows);
+    try testing.expectEqualDeep(&[_]User{
+        .{ .id = 1, .name = "Lovelace, Ada", .age = 36, .role = .admin },
+        .{ .id = 2, .name = "Bob", .age = null, .role = .member },
+        .{ .id = 3, .name = "Cy", .age = 7, .role = .member },
+    }, rows);
+}
+
+test "sync keeps the header's column order and appends the fields it lacked" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "users.csv", .data = "name,id\r\nAda,1\r\nBob,2\r\nCy,3\r\n" });
+
+    var gw = writable(tmp.dir);
+    defer gw.deinit();
+    const users = try zom.Relation(Users, WritableGateway).init(&gw);
+    try testing.expectEqual(1, try users.byPk(2).update().set(.age, 40).commit());
+    try testing.expectEqual(1, try users.byPk(3).delete());
+    try gw.sync();
+    try expectFile(tmp.dir, "users.csv",
+        \\name,id,age,role
+        \\Ada,1,,member
+        \\Bob,2,40,member
+        \\
+    );
+}
+
+test "sync writes only dirty datasets, and only once" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const original = "id,name\n1,Ada\n";
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "users.csv", .data = original });
+
+    var gw = writable(tmp.dir);
+    defer gw.deinit();
+    const d = try gw.dataset(Users);
+    const Posts = zom.Schema(struct { id: u32 }, "posts", .id);
+    const posts = try gw.dataset(Posts);
+
+    // A missing file is an empty dataset, and with no writes stays missing.
+    // Writes that change nothing do not mark the dataset dirty either.
+    const users = try zom.Relation(Users, WritableGateway).init(&gw);
+    try testing.expectEqual(0, try users.byPk(9).delete());
+    try testing.expectEqual(0, try d.insertMany(&.{}));
+    try gw.sync();
+    try expectFile(tmp.dir, "users.csv", original);
+    try expectNoFile(tmp.dir, "posts.csv");
+
+    _ = try posts.insert(.{ .id = 1 });
+    try testing.expect(posts.dirty and !d.dirty);
+    try gw.sync();
+    try testing.expect(!posts.dirty);
+    try expectFile(tmp.dir, "posts.csv", "id\n1\n");
+    try expectFile(tmp.dir, "users.csv", original);
+}
+
+test "deinit does not sync" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        var gw = writable(tmp.dir);
+        defer gw.deinit();
+        _ = try (try gw.dataset(Users)).insert(.{ .id = 1, .name = "Ada", .age = null });
+    }
+    try expectNoFile(tmp.dir, "users.csv");
+}
+
+test "a writable gateway rejects unknown columns even with .ignore" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "users.csv", .data = "id,email,name\n1,a@example.com,Ada\n" });
+    var gw = WritableGateway.init(testing.allocator, .{
+        .io = testing.io,
+        .dir = tmp.dir,
+        .path = ".",
+        .unknown_columns = .ignore,
+    });
+    defer gw.deinit();
+    try testing.expectError(error.SchemaMismatch, gw.dataset(Users));
+    try testing.expectEqualStrings(
+        "users.csv: header does not match 'users': unknown column \"email\" (sync would drop it)",
+        gw.diagnostic.message(),
+    );
+}
+
+test "a writable path may name a CSV file that does not exist yet" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "data");
+    var gw = WritableGateway.init(testing.allocator, .{ .io = testing.io, .dir = tmp.dir, .path = "data/users.csv" });
+    defer gw.deinit();
+    _ = try (try gw.dataset(Users)).insert(.{ .id = 1, .name = "Ada", .age = 2 });
+    try gw.sync();
+    try expectFile(tmp.dir, "data/users.csv", "id,name,age,role\n1,Ada,2,member\n");
+}
+
+test "sync's line_ending and separator round-trip" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var gw = WritableGateway.init(testing.allocator, .{
+        .io = testing.io,
+        .dir = tmp.dir,
+        .path = ".",
+        .separator = ';',
+        .line_ending = "\r\n",
+        .null_text = "NULL",
+    });
+    defer gw.deinit();
+    _ = try (try gw.dataset(Users)).insert(.{ .id = 1, .name = "a;b", .age = null });
+    try gw.sync();
+    try expectFile(tmp.dir, "users.csv", "id;name;age;role\r\n1;\"a;b\";NULL;member\r\n");
+}
+
+/// A dirty `users` dataset over a file holding `original`.
+fn dirtyUsers(tmp: *testing.TmpDir, original: []const u8) !WritableGateway {
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "users.csv", .data = original });
+    var gw = writable(tmp.dir);
+    errdefer gw.deinit();
+    _ = try (try gw.dataset(Users)).insert(.{ .id = 2, .name = "Bob", .age = null });
+    return gw;
+}
+
+test "a sync that cannot create the temp file leaves the original unchanged" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const original = "id,name\n1,Ada\n";
+    var gw = try dirtyUsers(&tmp, original);
+    defer gw.deinit();
+
+    // Something already at the temp path that is not a file.
+    try tmp.dir.createDirPath(testing.io, "users.csv.tmp");
+    try testing.expectError(error.IsDir, gw.sync());
+    try testing.expectEqualStrings("users.csv: sync failed: IsDir", gw.diagnostic.message());
+    try expectFile(tmp.dir, "users.csv", original);
+
+    // Still dirty: once the obstacle is gone, the retry writes the row.
+    try tmp.dir.deleteDir(testing.io, "users.csv.tmp");
+    try gw.sync();
+    try expectFile(tmp.dir, "users.csv", "id,name,age,role\n1,Ada,,member\n2,Bob,,member\n");
+}
+
+test "a sync into a read-only directory leaves the original unchanged" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const original = "id,name\n1,Ada\n";
+    var gw = try dirtyUsers(&tmp, original);
+    defer gw.deinit();
+
+    const Perm = std.Io.File.Permissions;
+    if (!@hasDecl(Perm, "fromMode")) return error.SkipZigTest;
+    // Through the parent: the temp dir's own handle may not allow fchmod.
+    try tmp.parent_dir.setFilePermissions(testing.io, &tmp.sub_path, .fromMode(0o555), .{});
+    defer tmp.parent_dir.setFilePermissions(testing.io, &tmp.sub_path, .fromMode(0o755), .{}) catch {};
+
+    // Root (or a file system ignoring modes) can still write: nothing to test.
+    if (tmp.dir.createFile(testing.io, "probe", .{})) |f| {
+        f.close(testing.io);
+        return error.SkipZigTest;
+    } else |_| {}
+
+    if (gw.sync()) |_| return error.TestUnexpectedResult else |err| switch (err) {
+        error.AccessDenied, error.PermissionDenied, error.ReadOnlyFileSystem => {},
+        else => return err,
+    }
+    try expectFile(tmp.dir, "users.csv", original);
+    try expectNoFile(tmp.dir, "users.csv.tmp");
+}
+
+test "sync keeps the file's permissions" {
+    const Perm = std.Io.File.Permissions;
+    if (!@hasDecl(Perm, "fromMode")) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var gw = try dirtyUsers(&tmp, "id,name\n1,Ada\n");
+    defer gw.deinit();
+    try tmp.dir.setFilePermissions(testing.io, "users.csv", .fromMode(0o600), .{});
+    try gw.sync();
+    const st = try tmp.dir.statFile(testing.io, "users.csv", .{});
+    try testing.expectEqual(0o600, st.permissions.toMode() & 0o777);
 }

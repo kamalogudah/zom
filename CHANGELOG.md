@@ -9,6 +9,21 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- `zom_csv.WritableGateway`, the writable twin of `zom_csv.Gateway`. Its
+  datasets add `insert`, `insertMany`, `update` and `delete`, which change
+  the in-memory store and mark the dataset dirty. `sync()`, on a dataset or
+  on the gateway for every dirty one, writes the header and rows to
+  `<name>.csv.tmp`, flushes, fsyncs, closes it and renames it over
+  `<name>.csv`. On any error the temp file is deleted, the original is left
+  byte-for-byte unchanged and the dataset stays dirty. Columns keep the
+  order of the header read at load time, and fields that header lacked
+  follow in schema order. A new file uses schema order. The file keeps its
+  permissions. A missing file is an empty dataset, created by the first
+  sync after a write. Unknown columns are rejected even with
+  `unknown_columns = .ignore`, because sync would drop them. `deinit` does
+  not sync. New `Config.line_ending` (default `"\n"`). `writeTable` now
+  reports a full row buffer as `error.OutOfMemory`, not
+  `error.WriteFailed`. ([#25])
 - `zom-csv`: `csv.Reader` and `csv.writeRow`, an RFC 4180 CSV reader and
   writer. The reader takes the whole file as `[]const u8` and yields rows
   (`while (try reader.next()) |row|`). It handles a configurable separator,
@@ -201,3 +216,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#21]: https://github.com/kamalogudah/zom/issues/21
 [#22]: https://github.com/kamalogudah/zom/issues/22
 [#23]: https://github.com/kamalogudah/zom/issues/23
+[#25]: https://github.com/kamalogudah/zom/issues/25
