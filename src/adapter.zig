@@ -144,13 +144,31 @@ pub fn Adapter(comptime G: type) type {
             return @field(capabilities(S), @tagName(cap));
         }
 
-        /// A compile error naming the adapter when it lacks `cap` for `S`.
-        /// `method` is what the caller tried to use, e.g. "create".
+        /// True when the dataset for `S` has none of `insert`, `insertMany`,
+        /// `update` and `delete`.
+        pub fn readOnly(comptime S: type) bool {
+            const caps = capabilities(S);
+            return !(caps.writable or caps.batch_insert or caps.updatable or caps.deletable);
+        }
+
+        /// A compile error naming the adapter and relation when the adapter
+        /// lacks `cap` for `S`. `method` is what the caller tried to use,
+        /// e.g. "create". Because Zig only analyses a function when it is
+        /// called, calling this from a method makes only that method fail.
         pub fn require(comptime S: type, comptime cap: Capability, comptime method: []const u8) void {
             if (has(S, cap)) return;
-            const owner = if (cap == .transaction) "gateway" else "dataset";
-            @compileError("zom: adapter '" ++ name ++ "' is not ." ++ @tagName(cap) ++ ", so `" ++ method ++
-                "` is not available on " ++ S.name ++ " (its " ++ owner ++ " has no `" ++ declFor(cap) ++ "`)");
+            const problem = if (cap != .transaction and readOnly(S))
+                std.fmt.comptimePrint("is read-only for relation '{s}'", .{S.name})
+            else
+                std.fmt.comptimePrint("does not support `{s}` for relation '{s}'", .{ method, S.name });
+            @compileError(std.fmt.comptimePrint("zom: adapter '{s}' {s}: `{s}` needs the `{s}` capability ({s} has no `{s}`)", .{
+                name,
+                problem,
+                method,
+                @tagName(cap),
+                if (cap == .transaction) "gateway" else "dataset",
+                declFor(cap),
+            }));
         }
     };
 }

@@ -8,6 +8,8 @@
 //! The adapter contract is checked at compile time by `zom.Adapter` (see
 //! adapter.zig). `create`, `update` and `delete` need the matching dataset
 //! capability, and fail to compile, naming the adapter, when it is missing.
+//! Zig only analyses a function that is called, so a relation over a
+//! read-only adapter compiles fine as long as only its reads are used.
 
 const std = @import("std");
 const q = @import("query.zig");
@@ -109,11 +111,13 @@ pub fn Relation(comptime S: type, comptime Gateway: type) type {
 
         /// ROM's `users.changeset(:create, data)`.
         pub fn create(self: Self, tuple: Tuple) changeset.Create(Self) {
+            comptime Adapter.require(S, .writable, "create");
             return .{ .relation = self, .tuple = tuple };
         }
 
         /// ROM's `users.by_pk(1).changeset(:update, data)`, built with `.set`.
         pub fn update(self: Self) changeset.Update(Self) {
+            comptime Adapter.require(S, .updatable, "update");
             return .{ .relation = self };
         }
 

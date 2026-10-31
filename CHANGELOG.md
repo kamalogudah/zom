@@ -27,6 +27,8 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 - `zom.adapter.Error` names the errors every adapter must use for the same
   condition: `DuplicatePrimaryKey`, `ValueOutOfRange`, `NotFound`,
   `ReadOnly` and `ConnectionFailed`. ([#13])
+- `Adapter(G).readOnly(S)` is true when the dataset has no `insert`,
+  `insertMany`, `update` or `delete`. ([#14])
 
 ### Changed (breaking)
 
@@ -38,6 +40,11 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
   `create(...).commit()`, `update().commit()` or `delete()` is a compile error
   naming the adapter, instead of a missing-declaration error from
   `zom.Relation`. ([#12])
+- `Relation.create` and `Relation.update` check the capability themselves,
+  so the error points at the call, not at `commit`. `commit` still checks
+  for a changeset built by hand. The message now names the relation and the
+  capability: ``zom: adapter 'csv' is read-only for relation 'users': `create`
+  needs the `writable` capability (dataset has no `insert`)``. ([#14])
 
 ## [0.2.0] - 2026-10-30
 
@@ -105,3 +112,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#11]: https://github.com/kamalogudah/zom/issues/11
 [#12]: https://github.com/kamalogudah/zom/issues/12
 [#13]: https://github.com/kamalogudah/zom/issues/13
+[#14]: https://github.com/kamalogudah/zom/issues/14
