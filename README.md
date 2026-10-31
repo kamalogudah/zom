@@ -132,7 +132,7 @@ breaking change needs a minor version bump and an entry in
 |---|---|
 | `zom.Schema(T, name, pk)` | Returns a schema type with `Tuple = T`, `name` (the dataset name) and `primary_key` (a field of `T`, as an enum literal). |
 | `zom.Relation(S, Gateway)` | Returns an immutable relation type over schema `S` and an adapter's `Gateway`. Checks the [adapter contract](#the-adapter-contract) at compile time through `zom.Adapter(Gateway)`, which it exposes as `Relation.Adapter`. |
-| `zom.Adapter(G)` | Checks gateway `G` against the [adapter contract](#the-adapter-contract), reporting every problem in one compile error. Has `Gateway`, `name` (`G.adapter_name`), `Dataset(S)` (checks the dataset for schema `S`), `capabilities(S) Capabilities`, `has(S, cap) bool` and `require(S, cap, method)`. |
+| `zom.Adapter(G)` | Checks gateway `G` against the [adapter contract](#the-adapter-contract), reporting every problem in one compile error. Has `Gateway`, `name` (`G.adapter_name`), `Dataset(S)` (checks the dataset for schema `S`), `capabilities(S) Capabilities`, `has(S, cap) bool`, `readOnly(S) bool` and `require(S, cap, method)`. |
 | `zom.Capability` | `writable`, `batch_insert`, `updatable`, `deletable`, `transaction`. |
 | `zom.Capabilities` | A struct with one `bool` per `Capability`, all `false` by default. |
 | `zom.adapter` | The module behind `Adapter`, `Capability` and `Capabilities`. |
@@ -266,12 +266,17 @@ In full, with `Q = zom.Query(S.Tuple)`:
 A method may take `self` by value, `*Self` or `*const Self`. Every dataset
 call is fallible, so an adapter's own errors (I/O, connection loss) flow
 through `try`. Without `.writable`, `.updatable` or `.deletable`, the matching
-`create(...).commit()`, `update().commit()` or `delete()` is a compile error
-naming the adapter:
+`create`, `update` or `delete` is a compile error naming the adapter and the
+relation. Zig only analyses a function that is called, so the relation still
+compiles, and reads work, as long as those methods are not used:
 
 ```
-zom: adapter 'csv' is not .writable, so `create` is not available on users (its dataset has no `insert`)
+zom: adapter 'csv' is read-only for relation 'users': `create` needs the `writable` capability (dataset has no `insert`)
 ```
+
+An adapter with some writes but not this one says ``does not support `delete`
+for relation 'users'`` instead. `commit` checks again, for a changeset built
+by hand.
 
 ### Errors
 

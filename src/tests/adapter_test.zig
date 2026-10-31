@@ -186,4 +186,20 @@ test "a read-only adapter still reads through a relation" {
     const items = try Rel.init(&gw);
     try testing.expectEqual(0, try items.count());
     try testing.expectEqual(null, try items.first(testing.allocator));
+    try testing.expectEqual(null, try items.byPk(1).one(testing.allocator));
+
+    // Chained queries compile and run too; only create/update/delete are
+    // compile errors (tests/compile_errors/read_only_*.zig).
+    const rows = try items.where(.name, .eq, "x").order(.id, .desc).limit(5).offset(1).toSlice(testing.allocator);
+    defer testing.allocator.free(rows);
+    try testing.expectEqual(0, rows.len);
+    const mapped = try items.mapTo(struct { id: u32 }, testing.allocator);
+    defer testing.allocator.free(mapped);
+    try testing.expectEqual(0, mapped.len);
+}
+
+test "readOnly is true only without every write capability" {
+    try testing.expect(zom.Adapter(FakeGateway(ReadOnlyDataset)).readOnly(Items));
+    try testing.expect(!zom.Adapter(FakeGateway(AppendOnlyDataset)).readOnly(Items));
+    try testing.expect(!zom.Adapter(zom.memory.Gateway).readOnly(Items));
 }

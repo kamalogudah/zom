@@ -3,6 +3,9 @@
 //! A changeset holds the data for one write plus the relation it targets,
 //! and only touches the dataset on `commit`. `Create.map` plays the role of
 //! ROM's `map { ... }` transformation pipeline.
+//!
+//! `Relation.create` and `Relation.update` check the adapter's capabilities;
+//! `commit` checks them again for a changeset built by hand.
 
 const std = @import("std");
 const q = @import("query.zig");
