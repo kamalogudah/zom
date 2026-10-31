@@ -1,12 +1,13 @@
 //! zom-csv = rom's `rom-csv`: a gateway over a directory of CSV files.
 //!
-//! This is the package skeleton. `Gateway` satisfies the adapter contract
-//! with empty, read-only datasets so the build layout can be checked now; the
-//! CSV reader and writer, and a `zom.memory.Store(S)` per dataset, come in
-//! later tickets.
+//! `csv` is the RFC 4180 reader and writer. `Gateway` is still a skeleton: it
+//! satisfies the adapter contract with empty, read-only datasets; file I/O and
+//! a `zom.memory.Store(S)` per dataset come in later tickets.
 
 const std = @import("std");
 const zom = @import("zom");
+
+pub const csv = @import("csv.zig");
 
 pub const Gateway = struct {
     pub const adapter_name = "csv";
@@ -62,4 +63,8 @@ test "Gateway satisfies the zom adapter contract and reads through zom.Relation"
     defer gw.deinit();
     const users = try zom.Relation(Users, Gateway).init(&gw);
     try std.testing.expectEqual(0, try users.count());
+}
+
+test {
+    _ = csv;
 }

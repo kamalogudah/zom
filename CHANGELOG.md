@@ -9,6 +9,18 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- `zom-csv`: `csv.Reader` and `csv.writeRow`, an RFC 4180 CSV reader and
+  writer. The reader takes the whole file as `[]const u8` and yields rows
+  (`while (try reader.next()) |row|`). It handles a configurable separator,
+  `\n` and `\r\n` line endings, an optional final line break, and quoted
+  cells holding separators, line breaks and `""` escapes. A blank line is a
+  zero-cell row. Cells are sub-slices of the input, except cells with `""`
+  escapes, which are unescaped into an arena reset on every `next()`. A row
+  of up to 64 cells with no escapes makes no allocation. Errors are
+  `error.UnterminatedQuote` and `error.UnexpectedQuote`, with the line and
+  column in a `csv.Diagnostic` (`3:7: unterminated quote`). `writeRow`
+  quotes a cell only when it holds the separator, `"`, `\r` or `\n` (or is
+  the only cell and is empty), and doubles inner quotes. ([#23])
 - `zom.codec.encodeField(writer, value, opts)` and `encodeRow(writer, T,
   row, opts, sep)`, the inverse of `decodeField`/`decodeRow`, for CSV sync
   and YAML writing. They write integers as `{d}`, floats as the shortest text
@@ -188,3 +200,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#20]: https://github.com/kamalogudah/zom/issues/20
 [#21]: https://github.com/kamalogudah/zom/issues/21
 [#22]: https://github.com/kamalogudah/zom/issues/22
+[#23]: https://github.com/kamalogudah/zom/issues/23
