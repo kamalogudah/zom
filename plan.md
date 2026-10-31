@@ -57,7 +57,7 @@ Zig has no runtime class registry, and it doesn't need one:
 zom (core package)
 ├── schema      attributes, primary key, associations, attribute metadata
 ├── query       query AST (filters, boolean groups, IN, projection, order, page)
-├── value       Value union (adds u64/u128, bytes, timestamp)
+├── value       Value union (adds uint64, uint128, timestamp, bytes; see 3.3)
 ├── relation    immutable relation, views, combine, materializers
 ├── command     create/update/delete commands (batch-aware)
 ├── changeset   changesets + map pipes + associated changesets
@@ -71,7 +71,7 @@ zom (core package)
 
 zom-sql          dialect-agnostic SQL compiler (SELECT/INSERT/UPDATE/DELETE, joins)
 ├── zom-pg       driver binding on karlseguin/pg.zig
-└── zom-sqlite   driver binding on a SQLite Zig wrapper (later)
+└── zom-sqlite   translate-c binding over the SQLite amalgamation (post-v1)
 zom-csv          file gateway over memory.Store, read-only by default, optional sync
 zom-yaml         same pattern as csv, nested values
 zom-tigerbeetle  accounts/transfers over the native Zig client; immutable, batched
@@ -108,7 +108,19 @@ A dataset implements everything it can:
 **Query support.** When a relation uses a feature the adapter's `supports`
 leaves out, zom does one of two things, chosen per relation:
 - `.strict` (the default): compile error, e.g. `zom-tigerbeetle cannot filter transfers on 'amount'`.
-- `.fallback`: the adapter evaluates the parts it supports, and zom filters the rest in memory with the existing `Query.matches`.
+- `.fallback` (opt-in, per relation): the adapter evaluates the parts it supports, and zom filters the rest in memory with the existing `Query.matches`.
+
+Fallback rules:
+- A relation must turn on `.fallback` explicitly, so every place a scan can
+  happen is visible in the code.
+- Every fallback read reports itself through a scan hook set once on the
+  `Container`, e.g. `on_scan(adapter_name, relation_name, rows_fetched,
+  rows_returned)`. Tests assert on it, and apps log it.
+- Once any filter runs in memory, `limit`, `offset` and (if it isn't pushed
+  down) `order` run in memory too, after the filter. Otherwise pages come
+  back short. `count` follows the same rule. The lint suite checks this.
+- Fallback is a relation-level feature, so it doesn't change the adapter
+  contract. It ships in Phase 3 as its own ticket, after strict mode.
 
 **Errors.** The contract uses inferred error sets (`!T`), so each adapter's
 errors flow through. The core defines the shared names every adapter must use
@@ -121,12 +133,43 @@ checks these.
 - The core stays in this repo as the `zom` package. Adapters start life in
   `adapters/<name>/`, each with its own `build.zig.zon` depending on zom
   through `.path = "../.."`, so they can be split into their own repos later
-  without code changes.
+  without code changes (swap `.path` for `.url` + `.hash`).
+- An adapter moves to its own repo only when it needs CI services the core
+  doesn't (a Postgres container, a TigerBeetle cluster) and those jobs slow
+  down or break core PRs, or when it needs its own release schedule. Until
+  then zom-pg and zom-tigerbeetle live here too, with their service-backed
+  CI jobs in separate workflows so they don't block core PRs.
 - An application depends on `zom` plus the adapters it needs. `@import("zom")`
   and `@import("zom_csv")` are the only imports it needs.
 - `zom.memory` stays in core, like `ROM::Memory`, because tests, the lint
   suite and the file adapters all build on it.
 - `zom.sql.compileSelect` moves out to `zom-sql`, so core has no SQL in it.
+- `zom-sqlite` (post-v1) uses no third-party Zig wrapper. It fetches the
+  SQLite amalgamation as a `build.zig.zon` URL dependency, compiles it with
+  `addCSourceFile`, and binds `sqlite3.h` with `b.addTranslateC`. zom only
+  needs about 15 functions (`open_v2`, `prepare_v3`, `bind_*`, `step`,
+  `column_*`, `finalize`, `extended_errcode`, `close_v2`), since binding goes
+  through `Value` and decoding through `zom.codec`. zig-sqlite's typed
+  statement API would go unused, and on 2026-10-31 its Zig 0.16 support was
+  incomplete (Windows CI failing, compatibility PRs unmerged). SQLite needs
+  no CI container, so if Postgres in CI proves painful, zom-sqlite can become
+  the first SQL driver instead.
+
+### 3.3 Values
+
+The core `Value` grows, instead of each adapter bringing its own value type:
+filters and changes stay adapter-agnostic, which is what lets the same
+relation code run on memory and Postgres.
+
+| Tag | Payload | Schema field type | Notes |
+|---|---|---|---|
+| `uint` | `u64` | `u64` (and `usize` on 64-bit) | Added in 0.2 (#2). |
+| `uint128` | `u128` | unsigned ints of 65 to 128 bits | `order` compares across int kinds by widening to `i129`. |
+| `timestamp` | `i64` nanoseconds since the Unix epoch, UTC | marker type `zom.Timestamp{ .ns: i64 }` | Covers 1677 to 2262. Not `std.time.Instant`, which is a monotonic, platform-specific clock reading with no fixed epoch. A bare `i64` field still maps to `.int`. |
+| `bytes` | `[]const u8` | marker type `zom.Bytes` | A separate tag from `string`, because `[]const u8` means string. Orders against `bytes` only. Text adapters encode it as base64 (details in the codec ticket). |
+
+`u128` raises `Value`'s alignment to 16, so it grows from 24 to 32 bytes.
+Fixed-capacity filter and change arrays grow by the same ratio.
 
 ## 4. Phases
 
@@ -305,13 +348,11 @@ them.
 - **One rulebook for adapters.** Every adapter must pass `zom.lint` before
   release. That suite is what defines the contract, more than any prose.
 
-## 7. Open questions
+## 7. Decisions
 
-1. Should the adapter packages live in this repo under `adapters/`, or in
-   separate repos from the start? This plan assumes they start in this repo.
-2. Should `.fallback` (in-memory filtering of unsupported features) exist at
-   all, or should zom be strict only? It's convenient, but it can hide full
-   scans.
-3. Should `Value` grow (`u128`, timestamps, bytes), or should each adapter
-   bring its own value type? This plan grows the core `Value`.
-4. Which SQLite wrapper should `zom-sqlite` use, and is it needed for v1?
+The four open questions were decided in #29:
+
+1. Adapter packages live in this repo under `adapters/` (split criteria in 3.2).
+2. `.fallback` exists, opt-in per relation, with a scan hook (3.1).
+3. The core `Value` grows: `uint128`, `timestamp`, `bytes` (3.3).
+4. `zom-sqlite` is post-v1 and uses a translate-c binding (3.2).
