@@ -159,7 +159,7 @@ lint suite covering the new contract surface.
       .relations = .{ .users = .{ UserSchema, .default }, .imports = .{ ImportSchema, .files } },
   });
   var app: App = undefined; // init fills it in place: relations point into it
-  try app.init(allocator, .{ .files = .{ .path = "data/" } });
+  try app.init(allocator, .{ .files = .{ .io = io, .path = "data/" } });
   defer app.deinit();
   const users = app.relations.users;
   ```
@@ -176,9 +176,17 @@ for rom.
   Encoding goes the other way.
 - `zom-csv`: the gateway is a file or a directory (one dataset per `*.csv`,
   named after the file, as in rom-csv). Each dataset wraps `memory.Store(S)`.
-  It's read-only by default, and `Config.writable = true` turns on writes
+  `zom_csv.Gateway` is read-only; `zom_csv.WritableGateway` adds writes
   plus `sync()`, which writes back atomically (temp file, then rename).
-  The header row is checked against the schema's fields when the file loads.
+  Writability is a second type rather than a `Config.writable` flag, because
+  capabilities are the declarations a dataset type has, fixed at compile
+  time. `Config` is `{ io, path, dir = .cwd(), separator = ',',
+  null_text = "", unknown_columns = .reject, max_file_bytes = 64 MiB }`:
+  the caller passes its `std.Io`, as with an allocator.
+  The header row is checked against the schema's fields when the file loads
+  (any column order; missing required, unknown or repeated columns are
+  `error.SchemaMismatch`), and load errors leave a `file:row:col` message
+  in `gateway.diagnostic`.
 - `zom-yaml`: the same structure, a top-level list of mappings per dataset.
   Nested values wait for Phase 4 (associations) or use flat schemas.
 - **Done when** both pass the lint suite (write tests are skipped when

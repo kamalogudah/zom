@@ -9,7 +9,7 @@
 //!   });
 //!
 //!   var app: App = undefined;
-//!   try app.init(allocator, .{ .files = .{ .path = "data/" } });
+//!   try app.init(allocator, .{ .files = .{ .io = io, .path = "data/" } });
 //!   defer app.deinit();
 //!   const users = app.relations.users;
 //!

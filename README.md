@@ -208,7 +208,7 @@ _ = try users.create(.{ .id = 1, .name = "Achieng", .age = 31 }).commit();
 (one `Gateway.Config` per gateway). A `Config` field defaults to `.{}` when
 every field of that gateway's `Config` has a default, so `.{}` is enough for
 memory gateways; any other gateway's settings must be passed, e.g.
-`.{ .files = .{ .path = "data/" } }`.
+`.{ .files = .{ .io = io, .path = "data/" } }`.
 
 `init` initialises the gateways in declaration order, then builds each
 relation. If a gateway or a relation fails, the gateways already initialised
