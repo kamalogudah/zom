@@ -1,9 +1,9 @@
 //! In-memory adapter = rom-core's `ROM::Memory`.
 //!
-//! The gateway owns one dataset per relation name. Datasets copy string
-//! attributes into their own arena on insert/update, so callers never have
-//! to keep input buffers alive. Like a database table, a dataset rejects
-//! writes that would duplicate the schema's primary key.
+//! `Store(S)` is the row engine: rows, string arena, filtering, sorting and
+//! primary-key checks. It needs no gateway, so file adapters (CSV, YAML)
+//! wrap it to hold the rows they load. `Gateway` owns one `Store` per
+//! relation name and hands it out as its dataset.
 
 const std = @import("std");
 const q = @import("../query.zig");
@@ -17,6 +17,8 @@ pub const Gateway = struct {
     allocator: Allocator,
     datasets: std.StringHashMapUnmanaged(Entry) = .empty,
 
+    /// A type-erased `*Store(S)`, so stores of different schemas share
+    /// one map. `type_name` catches two schemas with the same name.
     const Entry = struct {
         ptr: *anyopaque,
         deinit_fn: *const fn (*anyopaque, Allocator) void,
@@ -35,11 +37,11 @@ pub const Gateway = struct {
     }
 
     pub fn Dataset(comptime S: type) type {
-        return MemoryDataset(S);
+        return Store(S);
     }
 
-    pub fn dataset(self: *Gateway, comptime S: type) !*MemoryDataset(S) {
-        const D = MemoryDataset(S);
+    pub fn dataset(self: *Gateway, comptime S: type) !*Store(S) {
+        const D = Store(S);
         const gop = try self.datasets.getOrPut(self.allocator, S.name);
         if (gop.found_existing) {
             if (!std.mem.eql(u8, gop.value_ptr.type_name, @typeName(S)))
@@ -49,12 +51,36 @@ pub const Gateway = struct {
         errdefer self.datasets.removeByPtr(gop.key_ptr);
         const d = try self.allocator.create(D);
         d.* = D.init(self.allocator);
-        gop.value_ptr.* = .{ .ptr = d, .deinit_fn = D.deinitOpaque, .type_name = @typeName(S) };
+        gop.value_ptr.* = .{ .ptr = d, .deinit_fn = destroyFn(D), .type_name = @typeName(S) };
         return d;
+    }
+
+    fn destroyFn(comptime D: type) *const fn (*anyopaque, Allocator) void {
+        return struct {
+            fn destroy(ptr: *anyopaque, allocator: Allocator) void {
+                const d: *D = @ptrCast(@alignCast(ptr));
+                d.deinit();
+                allocator.destroy(d);
+            }
+        }.destroy;
     }
 };
 
-pub fn MemoryDataset(comptime S: type) type {
+/// The in-memory row engine for schema `S`, and the memory gateway's dataset.
+///
+/// Like a database table it rejects an `insert`, `insertMany` or `update`
+/// that would duplicate the primary key. `load` and `loadMany` skip that
+/// check for rows the caller already trusts, such as a file being read.
+///
+/// String lifetime: every string attribute is copied into the store's arena
+/// on the way in, so callers never have to keep input buffers alive. Rows
+/// handed back by `read` and `rows` point into that arena and stay valid
+/// until `clear` or `deinit`. Strings replaced by `update` or dropped by
+/// `delete` are not freed before then either.
+///
+/// Rows are kept in insertion order. Treat the fields as private and use
+/// the methods.
+pub fn Store(comptime S: type) type {
     return struct {
         const Self = @This();
         const T = S.Tuple;
@@ -66,60 +92,89 @@ pub fn MemoryDataset(comptime S: type) type {
 
         allocator: Allocator,
         arena: std.heap.ArenaAllocator,
-        rows: std.ArrayList(T) = .empty,
+        list: std.ArrayList(T) = .empty,
 
         pub fn init(allocator: Allocator) Self {
             return .{ .allocator = allocator, .arena = std.heap.ArenaAllocator.init(allocator) };
         }
 
         pub fn deinit(self: *Self) void {
-            self.rows.deinit(self.allocator);
+            self.list.deinit(self.allocator);
             self.arena.deinit();
+            self.* = undefined;
         }
 
-        fn deinitOpaque(ptr: *anyopaque, allocator: Allocator) void {
-            const self: *Self = @ptrCast(@alignCast(ptr));
-            self.deinit();
-            allocator.destroy(self);
+        /// Every stored row, in insertion order, for adapters that write the
+        /// whole table out (CSV sync). The slice is invalidated by the next
+        /// write; its strings live until `clear` or `deinit`.
+        pub fn rows(self: *const Self) []const T {
+            return self.list.items;
         }
 
+        /// Drops every row and frees every copied string, keeping the
+        /// memory for reuse. Rows read earlier must not be used afterwards.
+        pub fn clear(self: *Self) void {
+            self.list.clearRetainingCapacity();
+            _ = self.arena.reset(.retain_capacity);
+        }
+
+        /// Stores `row`, copying its strings, and returns the stored copy.
+        /// `error.DuplicatePrimaryKey` if its key is taken.
         pub fn insert(self: *Self, row: T) !T {
-            const key = Q.fieldValue(row, pk);
-            for (self.rows.items) |existing| {
-                if (Q.fieldValue(existing, pk).eql(key)) return error.DuplicatePrimaryKey;
-            }
+            if (self.hasKey(Q.fieldValue(row, pk))) return error.DuplicatePrimaryKey;
+            return self.load(row);
+        }
+
+        /// `insert` without the primary-key check, for bulk loads from a
+        /// source that is already unique. Loading a duplicate key is not
+        /// detected, and later key lookups may then see either row.
+        pub fn load(self: *Self, row: T) !T {
+            try self.list.ensureUnusedCapacity(self.allocator, 1);
             const owned = try self.dupeStrings(row);
-            try self.rows.append(self.allocator, owned);
+            self.list.appendAssumeCapacity(owned);
             return owned;
+        }
+
+        /// `insertMany` without the primary-key checks. All or nothing on
+        /// running out of memory, like `insertMany`.
+        pub fn loadMany(self: *Self, batch: []const T) !usize {
+            try self.list.ensureUnusedCapacity(self.allocator, batch.len);
+            const old_len = self.list.items.len;
+            errdefer self.list.shrinkRetainingCapacity(old_len);
+            for (batch) |row| self.list.appendAssumeCapacity(try self.dupeStrings(row));
+            return batch.len;
         }
 
         /// All or nothing: every key is checked, against the stored rows and
         /// against the rest of the batch, and the row capacity is reserved
         /// before anything is stored. If copying a string then runs out of
         /// memory, the rows appended so far are dropped again. Strings
-        /// already copied stay in the arena until the gateway is freed, as
+        /// already copied stay in the arena until `clear` or `deinit`, as
         /// with `update`, so there is nothing else to undo.
         pub fn insertMany(self: *Self, batch: []const T) !usize {
             for (batch, 0..) |row, i| {
                 const key = Q.fieldValue(row, pk);
-                for (self.rows.items) |existing| {
-                    if (Q.fieldValue(existing, pk).eql(key)) return error.DuplicatePrimaryKey;
-                }
+                if (self.hasKey(key)) return error.DuplicatePrimaryKey;
                 for (batch[0..i]) |earlier| {
                     if (Q.fieldValue(earlier, pk).eql(key)) return error.DuplicatePrimaryKey;
                 }
             }
-            try self.rows.ensureUnusedCapacity(self.allocator, batch.len);
-            const old_len = self.rows.items.len;
-            errdefer self.rows.shrinkRetainingCapacity(old_len);
-            for (batch) |row| self.rows.appendAssumeCapacity(try self.dupeStrings(row));
-            return batch.len;
+            return self.loadMany(batch);
         }
 
+        fn hasKey(self: *const Self, key: q.Value) bool {
+            for (self.list.items) |existing| {
+                if (Q.fieldValue(existing, pk).eql(key)) return true;
+            }
+            return false;
+        }
+
+        /// The matching rows, sorted and paged, in a slice the caller frees
+        /// with `allocator`. Their strings still belong to the store.
         pub fn read(self: *Self, query: Q, allocator: Allocator) ![]T {
             var hits: std.ArrayList(T) = .empty;
             defer hits.deinit(allocator);
-            for (self.rows.items) |row| {
+            for (self.list.items) |row| {
                 if (query.matches(row)) try hits.append(allocator, row);
             }
             if (query.order) |o| std.mem.sort(T, hits.items, o, Q.lessThan);
@@ -130,7 +185,7 @@ pub fn MemoryDataset(comptime S: type) type {
 
         pub fn count(self: *Self, query: Q) !usize {
             var n: usize = 0;
-            for (self.rows.items) |row| {
+            for (self.list.items) |row| {
                 if (query.matches(row)) n += 1;
             }
             return n;
@@ -138,7 +193,7 @@ pub fn MemoryDataset(comptime S: type) type {
 
         /// Converts every change (copying strings once) into `patch` before
         /// touching a row, so a bad value, a key clash or running out of
-        /// memory leaves the dataset unchanged. Applying cannot fail.
+        /// memory leaves the store unchanged. Applying cannot fail.
         pub fn update(self: *Self, query: Q, changes: []const Q.Change) !usize {
             var patch: T = undefined;
             for (changes) |c| try self.prepare(&patch, c);
@@ -146,7 +201,7 @@ pub fn MemoryDataset(comptime S: type) type {
                 if (c.field == pk) try self.checkKeyChange(query, c.value);
             }
             var n: usize = 0;
-            for (self.rows.items) |*row| {
+            for (self.list.items) |*row| {
                 if (!query.matches(row.*)) continue;
                 for (changes) |c| apply(row, &patch, c.field);
                 n += 1;
@@ -156,14 +211,14 @@ pub fn MemoryDataset(comptime S: type) type {
 
         pub fn delete(self: *Self, query: Q) !usize {
             var kept: usize = 0;
-            for (self.rows.items) |row| {
+            for (self.list.items) |row| {
                 if (!query.matches(row)) {
-                    self.rows.items[kept] = row;
+                    self.list.items[kept] = row;
                     kept += 1;
                 }
             }
-            const removed = self.rows.items.len - kept;
-            self.rows.shrinkRetainingCapacity(kept);
+            const removed = self.list.items.len - kept;
+            self.list.shrinkRetainingCapacity(kept);
             return removed;
         }
 
@@ -183,7 +238,7 @@ pub fn MemoryDataset(comptime S: type) type {
         /// key must not belong to any row outside the update.
         fn checkKeyChange(self: *Self, query: Q, key: q.Value) !void {
             var matched: usize = 0;
-            for (self.rows.items) |row| {
+            for (self.list.items) |row| {
                 if (query.matches(row)) {
                     matched += 1;
                 } else if (Q.fieldValue(row, pk).eql(key)) {

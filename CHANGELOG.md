@@ -38,6 +38,12 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 - `zom.memory` datasets have `insertMany` (`.batch_insert`), which stores
   all or nothing: a duplicate key, against the table or inside the batch, or
   running out of memory stores no rows. ([#15])
+- `zom.memory.Store(S)` is the memory adapter's row engine, usable without
+  a gateway so file adapters can wrap it. Besides the dataset methods it has
+  `rows()` (every row, for writing a file back), `load(row)` and
+  `loadMany(rows)` (insert without the primary-key check, for trusted bulk
+  loads) and `clear()` (drops every row and resets the string arena).
+  `memory.Gateway.Dataset(S)` is `Store(S)`. ([#16])
 
 ### Changed (breaking)
 
@@ -54,6 +60,7 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
   for a changeset built by hand. The message now names the relation and the
   capability: ``zom: adapter 'csv' is read-only for relation 'users': `create`
   needs the `writable` capability (dataset has no `insert`)``. ([#14])
+- `zom.memory.MemoryDataset(S)` is renamed `zom.memory.Store(S)`. ([#16])
 
 ## [0.2.0] - 2026-10-30
 
@@ -123,3 +130,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#13]: https://github.com/kamalogudah/zom/issues/13
 [#14]: https://github.com/kamalogudah/zom/issues/14
 [#15]: https://github.com/kamalogudah/zom/issues/15
+[#16]: https://github.com/kamalogudah/zom/issues/16

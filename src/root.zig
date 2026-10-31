@@ -39,5 +39,6 @@ test {
     _ = @import("tests/changeset_test.zig");
     _ = @import("tests/mapper_test.zig");
     _ = @import("tests/memory_test.zig");
+    _ = @import("tests/store_test.zig");
     _ = @import("tests/sql_test.zig");
 }
