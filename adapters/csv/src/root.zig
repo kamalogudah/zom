@@ -17,6 +17,7 @@ pub const SyncError = gateway.SyncError;
 pub const WriteError = gateway.WriteError;
 pub const Diagnostic = gateway.Diagnostic;
 pub const UnknownColumns = gateway.UnknownColumns;
+pub const Format = gateway.Format;
 pub const WriteOptions = gateway.WriteOptions;
 pub const writeTable = gateway.writeTable;
 

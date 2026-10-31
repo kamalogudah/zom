@@ -91,6 +91,14 @@ pub const Diagnostic = struct {
         try w.print("{d}", .{d.row});
         if (d.column != 0) try w.print(":{d}", .{d.column});
         try w.print(" ({s}): ", .{d.field});
+        try d.formatProblem(w);
+    }
+
+    /// Only what is wrong, without the position and field:
+    /// `"abc" is not an integer from 0 to 255`. For an adapter that names
+    /// the place its own way (YAML says `users[1].age`); use it as
+    /// `{f}` with `std.fmt.alt(d, .formatProblem)`.
+    pub fn formatProblem(d: Diagnostic, w: *std.Io.Writer) std.Io.Writer.Error!void {
         const err = d.err orelse return w.writeAll("no error");
         switch (err) {
             error.MissingField => try w.writeAll("missing value"),
