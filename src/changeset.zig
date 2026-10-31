@@ -4,7 +4,7 @@
 //! and only touches the dataset on `commit`. `Create.map` plays the role of
 //! ROM's `map { ... }` transformation pipeline.
 //!
-//! `Relation.create` and `Relation.update` check the adapter's capabilities;
+//! `Relation.create`, `createMany` and `update` check the adapter's capabilities;
 //! `commit` checks them again for a changeset built by hand.
 
 const std = @import("std");
@@ -28,6 +28,34 @@ pub fn Create(comptime Rel: type) type {
         pub fn commit(self: Self) !Rel.Tuple {
             comptime Rel.Adapter.require(Rel.schema, .writable, "create");
             return self.relation.dataset.insert(self.tuple);
+        }
+    };
+}
+
+/// Inserts every tuple in `tuples`, which the changeset borrows: the slice
+/// must stay alive until `commit`.
+///
+/// With `insertMany` (`.batch_insert`) the adapter decides what a failure
+/// leaves behind; the memory adapter inserts all or nothing. Without it,
+/// `commit` falls back to calling `insert` once per tuple, in order, and
+/// stops at the first error: the tuples before the failing one are already
+/// stored and stay stored, and the count is lost with the error. Use a
+/// transaction, or an adapter with `insertMany`, when that matters.
+pub fn CreateMany(comptime Rel: type) type {
+    return struct {
+        const Self = @This();
+
+        relation: Rel,
+        tuples: []const Rel.Tuple,
+
+        /// Returns the number of tuples inserted.
+        pub fn commit(self: Self) !usize {
+            comptime Rel.Adapter.requireAny(Rel.schema, &.{ .batch_insert, .writable }, "createMany");
+            if (self.tuples.len == 0) return 0;
+            if (comptime Rel.Adapter.has(Rel.schema, .batch_insert))
+                return self.relation.dataset.insertMany(self.tuples);
+            for (self.tuples) |t| _ = try self.relation.dataset.insert(t);
+            return self.tuples.len;
         }
     };
 }

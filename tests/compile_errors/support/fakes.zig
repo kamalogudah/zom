@@ -11,6 +11,8 @@ pub const ItemSchema = zom.Schema(Item, "items", .id);
 pub const ReadOnlyGateway = Gateway("readonly", ReadOnlyDataset);
 /// `read`, `count` and `insert`, but no `update` or `delete`.
 pub const AppendOnlyGateway = Gateway("appendonly", AppendOnlyDataset);
+/// `read`, `count`, `update` and `delete`, but no `insert` or `insertMany`.
+pub const NoInsertGateway = Gateway("noinsert", NoInsertDataset);
 
 fn Gateway(comptime name: []const u8, comptime DatasetFn: fn (comptime type) type) type {
     return struct {
@@ -58,6 +60,24 @@ fn AppendOnlyDataset(comptime S: type) type {
         }
         pub fn insert(_: *@This(), t: S.Tuple) !S.Tuple {
             return t;
+        }
+    };
+}
+
+fn NoInsertDataset(comptime S: type) type {
+    const Q = zom.Query(S.Tuple);
+    return struct {
+        pub fn read(_: *@This(), _: Q, a: std.mem.Allocator) ![]S.Tuple {
+            return a.alloc(S.Tuple, 0);
+        }
+        pub fn count(_: *@This(), _: Q) !usize {
+            return 0;
+        }
+        pub fn update(_: *@This(), _: Q, _: []const Q.Change) !usize {
+            return 0;
+        }
+        pub fn delete(_: *@This(), _: Q) !usize {
+            return 0;
         }
     };
 }

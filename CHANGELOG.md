@@ -29,6 +29,15 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
   `ReadOnly` and `ConnectionFailed`. ([#13])
 - `Adapter(G).readOnly(S)` is true when the dataset has no `insert`,
   `insertMany`, `update` or `delete`. ([#14])
+- `Relation.createMany(tuples)` returns a `changeset.CreateMany`, whose
+  `commit()` returns `!usize`, the rows inserted. It calls the dataset's
+  `insertMany` when there is one, else loops over `insert`, stopping at the
+  first error with the earlier rows still stored; with neither it is a
+  compile error. `Adapter(G).requireAny(S, caps, method)` backs that
+  check. ([#15])
+- `zom.memory` datasets have `insertMany` (`.batch_insert`), which stores
+  all or nothing: a duplicate key, against the table or inside the batch, or
+  running out of memory stores no rows. ([#15])
 
 ### Changed (breaking)
 
@@ -113,3 +122,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#12]: https://github.com/kamalogudah/zom/issues/12
 [#13]: https://github.com/kamalogudah/zom/issues/13
 [#14]: https://github.com/kamalogudah/zom/issues/14
+[#15]: https://github.com/kamalogudah/zom/issues/15

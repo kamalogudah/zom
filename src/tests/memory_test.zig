@@ -136,3 +136,70 @@ fn updateUnderAllocationFailure(allocator: std.mem.Allocator) !void {
 test "an update that runs out of memory leaves the dataset unchanged" {
     try testing.checkAllAllocationFailures(testing.allocator, updateUnderAllocationFailure, .{});
 }
+
+test "insertMany with a duplicate key inserts nothing" {
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
+    defer gw.deinit();
+    const users = try Users.init(&gw);
+    try seed(users, try Posts.init(&gw));
+
+    const new: fixtures.UserTuple = .{ .id = 4, .name = "Kamau", .email = "kamau@example.com", .age = 29 };
+    const clash: fixtures.UserTuple = .{ .id = 2, .name = "Again", .email = "again@example.com", .age = 30 };
+
+    // Against a stored row, even when the clash comes after a new row.
+    try testing.expectError(error.DuplicatePrimaryKey, users.createMany(&.{ new, clash }).commit());
+    try testing.expectEqual(@as(usize, 3), try users.count());
+    try testing.expectEqual(@as(usize, 0), try users.byPk(4).count());
+
+    // Inside the batch.
+    var twin = new;
+    twin.name = "Twin";
+    try testing.expectError(error.DuplicatePrimaryKey, users.createMany(&.{ new, twin }).commit());
+    try testing.expectEqual(@as(usize, 3), try users.count());
+
+    // The memory adapter has insertMany, so this went through it, not the loop.
+    try testing.expect(comptime Users.Adapter.has(Users.schema, .batch_insert));
+}
+
+test "insertMany copies strings so the batch can be reused" {
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
+    defer gw.deinit();
+    const users = try Users.init(&gw);
+
+    var name = "Kamau".*;
+    var rows = [_]fixtures.UserTuple{
+        .{ .id = 1, .name = &name, .email = "a@example.com", .age = 1 },
+        .{ .id = 2, .name = &name, .email = "b@example.com", .age = 2 },
+    };
+    try testing.expectEqual(@as(usize, 2), try users.createMany(&rows).commit());
+    name[0] = 'X';
+    rows[0].id = 99;
+    try testing.expectEqualStrings("Kamau", (try users.byPk(1).one(testing.allocator)).?.name);
+    try testing.expectEqualStrings("Kamau", (try users.byPk(2).one(testing.allocator)).?.name);
+}
+
+fn insertManyUnderAllocationFailure(allocator: std.mem.Allocator) !void {
+    var gw = zom.memory.Gateway.init(allocator, .{});
+    defer gw.deinit();
+    const users = try Users.init(&gw);
+    try seed(users, try Posts.init(&gw));
+
+    // Long enough that every copy needs a fresh arena buffer.
+    const long = "n" ** 4096;
+    const batch = [_]fixtures.UserTuple{
+        .{ .id = 4, .name = long, .email = long, .age = 1 },
+        .{ .id = 5, .name = long, .email = long, .age = 2 },
+        .{ .id = 6, .name = long, .email = long, .age = 3 },
+    };
+    const n = users.createMany(&batch).commit() catch |err| {
+        try testing.expectEqual(@as(usize, 3), try users.count());
+        try testing.expectEqual(@as(usize, 0), try users.where(.id, .gt, 3).count());
+        return err;
+    };
+    try testing.expectEqual(@as(usize, 3), n);
+    try testing.expectEqual(@as(usize, 6), try users.count());
+}
+
+test "an insertMany that runs out of memory inserts nothing" {
+    try testing.checkAllAllocationFailures(testing.allocator, insertManyUnderAllocationFailure, .{});
+}

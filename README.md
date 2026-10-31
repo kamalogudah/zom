@@ -14,6 +14,7 @@ that each do one thing, and nothing is an "active record".
 | `users.where(...).order(...).limit(...)`   | `users.where(.age, .gt, 25).order(.name, .asc).limit(10)`      |
 | `users.by_pk(1).one`                       | `users.byPk(1).one(allocator)`                                 |
 | `users.changeset(:create, data).commit`    | `users.create(tuple).map(f).commit()`                          |
+| `users.changeset(:create, [a, b]).commit`  | `users.createMany(&.{ a, b }).commit()`                        |
 | `users.by_pk(1).changeset(:update, ...)`   | `users.byPk(1).update().set(.email, "...").commit()`           |
 | `command(:delete)`                         | `try users.where(...).delete()`                                |
 | `ROM::Mapper`, `map_with`, `map_to`        | `zom.Mapper(Tuple, Entity, .{ .renames = ... })`, `mapWith`, `mapTo` |
@@ -140,7 +141,7 @@ breaking change needs a minor version bump and an entry in
 | `zom.Value` | The runtime value carried by filters and changes. See [Value](#value). |
 | `zom.Op` | Filter operators: `eq`, `neq`, `lt`, `lte`, `gt`, `gte`. `op.sql()` returns the SQL spelling. |
 | `zom.Direction` | `asc`, `desc`. |
-| `zom.changeset` | `Create(Rel)` and `Update(Rel)`, the types returned by `relation.create` and `relation.update`. You don't name them yourself. |
+| `zom.changeset` | `Create(Rel)`, `CreateMany(Rel)` and `Update(Rel)`, the types returned by `relation.create`, `relation.createMany` and `relation.update`. You don't name them yourself. |
 | `zom.Mapper(Src, Dst, .{ .renames })` | A comptime mapper: `call(src) Dst` and `many(allocator, srcs) ![]Dst`. A `Dst` field takes the `Src` field of the same name (or its rename), else its default; neither is a compile error. |
 | `zom.combineMany(.{ .into, .parent_key, .child_key }, allocator, parents, children)` | Sets `parent.into` to the children whose `child_key` equals the parent's `parent_key`. O(n·m). |
 | `zom.mapper` | The module behind `Mapper` and `combineMany`, with their option types `Options`, `Rename` and `CombineOptions`. |
@@ -168,6 +169,7 @@ relation and never touch the dataset. `field` is always an enum literal, and
 | `mapTo(E, allocator)` | `![]E` | `mapWith(zom.Mapper(Tuple, E, .{}))`. |
 | `mapWith(M, allocator)` | `![]M.Output` | `M` is a `zom.Mapper`. |
 | `create(tuple)` | `Create` | `.map(f)` applies `f: fn (Tuple) Tuple`; `.commit()` returns `!Tuple`, the stored tuple. |
+| `createMany(tuples)` | `CreateMany` | `tuples: []const Tuple`, borrowed until commit. `.commit()` returns `!usize`, the rows inserted. Uses the dataset's `insertMany`, else loops over `insert` (see [the adapter contract](#the-adapter-contract)). |
 | `update()` | `Update` | `.set(field, value)` adds a change (at most `max_changes = 16`); `.commit()` returns `!usize`, the rows changed. |
 | `delete()` | `!usize` | The rows removed. |
 
@@ -259,7 +261,7 @@ In full, with `Q = zom.Query(S.Tuple)`:
 | `read` | `fn (*Dataset, Q, Allocator) ![]S.Tuple` | yes | Applies filters, then order, then offset and limit. The caller frees the slice. |
 | `count` | `fn (*Dataset, Q) !usize` | yes | Applies filters only. |
 | `insert` | `fn (*Dataset, S.Tuple) !S.Tuple` | no, `.writable` | Returns the tuple as stored. `error.DuplicatePrimaryKey` on a key clash. |
-| `insertMany` | `fn (*Dataset, []const S.Tuple) !usize` | no, `.batch_insert` | Returns the tuples stored. Not used by the core yet. |
+| `insertMany` | `fn (*Dataset, []const S.Tuple) !usize` | no, `.batch_insert` | Returns the tuples stored. `error.DuplicatePrimaryKey` on a key clash, with the stored rows or inside the batch. Used by `createMany`. |
 | `update` | `fn (*Dataset, Q, []const Q.Change) !usize` | no, `.updatable` | Returns the rows changed. A failed update changes nothing. |
 | `delete` | `fn (*Dataset, Q) !usize` | no, `.deletable` | Returns the rows removed. |
 
@@ -278,11 +280,18 @@ An adapter with some writes but not this one says ``does not support `delete`
 for relation 'users'`` instead. `commit` checks again, for a changeset built
 by hand.
 
+`createMany` needs `.batch_insert` or `.writable`. With `insertMany` it makes
+one call, and what a failed batch leaves behind is up to the adapter (the
+memory adapter stores all or nothing). With only `insert`, `commit` calls it
+once per tuple, in order, and stops at the first error: **the tuples before
+the failing one stay stored**, and the count is lost with the error. An empty
+slice returns 0 without calling the dataset.
+
 ### Errors
 
 | Error | Returned by |
 |---|---|
-| `error.DuplicatePrimaryKey` | `create(...).commit()`, or an update that sets the primary key to one already in use (or sets it on more than one row). |
+| `error.DuplicatePrimaryKey` | `create(...).commit()`, `createMany(...).commit()`, or an update that sets the primary key to one already in use (or sets it on more than one row). |
 | `error.ValueOutOfRange` | `update().set(...).commit()` with a runtime value that does not fit the attribute, e.g. a `u32` holding 300 set on a `u8`. |
 | `error.MoreThanOneTuple` | `one`. |
 | `error.DatasetTypeMismatch` | `memory.Gateway.dataset` (and so `Relation.init`), when two different schema types share a dataset name. |
@@ -311,6 +320,8 @@ bump and a changelog entry:
   so input buffers can be reused straight away. Strings you read back
   (including those in tuples from `one`, `first` and `create(...).commit()`)
   are valid for as long as the gateway lives.
+- `createMany` does not copy the slice you pass; keep it alive until
+  `commit`. The tuples' strings are copied on commit, as with `create`.
 - A relation does not copy the values you filter on. A string passed to
   `where` must stay alive until the relation is last used.
 - The gateway must outlive every relation made from it, and
@@ -323,6 +334,10 @@ bump and a changelog entry:
   `error.DuplicatePrimaryKey` instead of storing a second row with that key.
 - An update checks every change before writing, so a rejected update leaves
   every row as it was.
+- `insertMany` (and so `createMany`) is all or nothing: it checks every key,
+  against the stored rows and inside the batch, and reserves room for every
+  row before storing any, so a duplicate key or running out of memory stores
+  none of them.
 - `order` sorts nulls the way Postgres does: last on `.asc`, first on `.desc`.
 - `count` and `delete` return `!usize` like every other dataset call, because
   real adapters do I/O for them. The memory adapter never fails, but callers
@@ -375,7 +390,7 @@ links to the topics below.
 | `src/query.zig` | `Value` union, `Query(T)`, filter matching, compile-time type checks | Tagged unions, `@typeInfo`, `@compileError` |
 | `src/adapter.zig` | `Adapter(G)`: checks the adapter contract and finds a gateway's capabilities | `@hasDecl`, `@typeInfo(...).@"fn"`, building comptime strings |
 | `src/relation.zig` | `Relation(S, Gateway)`: immutable query builder | Comptime field enums, `anytype` |
-| `src/changeset.zig` | `Create` and `Update` changesets | Fixed-capacity arrays |
+| `src/changeset.zig` | `Create`, `CreateMany` and `Update` changesets | Fixed-capacity arrays, slices, comptime capability branching |
 | `src/mapper.zig` | Copies tuples into domain structs | `inline for` over struct fields |
 | `src/adapters/memory.zig` | In-memory gateway and dataset | Allocators, arenas, `ArrayList`, hash maps, type erasure with `*anyopaque` |
 | `src/adapters/sql.zig` | Compiles a query to a SQL string | Building strings with `ArrayList(u8)` |
