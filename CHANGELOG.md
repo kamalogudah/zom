@@ -9,6 +9,17 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- `zom.codec`, which decodes text cells (CSV, YAML scalars, SQL text
+  results) into tuple field types. `decodeField(F, text, opts)` handles
+  integers, floats, bools (`true`/`false`/`1`/`0`/`t`/`f`, any case), enums,
+  optionals and `[]const u8`, which borrows `text`. `decodeRow(T, cells,
+  opts, diag)` builds a whole tuple, with cells in field order or placed by
+  `Options.columns`. A missing cell takes the field's default, else `null`,
+  else fails with `error.MissingField`. `Options.null_text` (default `""`)
+  means null, and a non-optional field given it fails with
+  `error.UnexpectedNull`. Whitespace is never trimmed. On error, a
+  `Diagnostic` records row, column, field and text, and formats as
+  `14:3 (age): "abc" is not an integer from 0 to 255`. ([#21])
 - The `adapters/<name>/` package layout, with `adapters/csv` (`zom-csv`) as
   the first, still a stub gateway. Each adapter has its own `build.zig.zon`
   depending on zom through `.path = "../.."`. `zig build test-adapters` runs
@@ -167,3 +178,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#18]: https://github.com/kamalogudah/zom/issues/18
 [#19]: https://github.com/kamalogudah/zom/issues/19
 [#20]: https://github.com/kamalogudah/zom/issues/20
+[#21]: https://github.com/kamalogudah/zom/issues/21
