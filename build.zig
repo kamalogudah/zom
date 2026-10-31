@@ -28,11 +28,15 @@ pub fn build(b: *std.Build) void {
     const test_adapters = b.step("test-adapters", "Run each adapters/<name> package's tests");
     addAdapterTests(b, test_adapters, optimize);
 
+    const test_examples = b.step("test-examples", "Build and run each examples/<name> package, checking its output");
+    addExampleTests(b, test_examples, optimize);
+
     const test_step = b.step("test", "Run zom.zig tests");
     test_step.dependOn(&run_tests.step);
     test_step.dependOn(&run_readme.step);
     test_step.dependOn(compile_errors);
     test_step.dependOn(test_adapters);
+    test_step.dependOn(test_examples);
 }
 
 /// The packages under `adapters/`. Each has its own build.zig.zon depending
@@ -49,6 +53,23 @@ fn addAdapterTests(b: *std.Build, step: *std.Build.Step, optimize: std.builtin.O
         run.setName(b.fmt("test adapters/{s}", .{name}));
         run.setCwd(b.path(b.fmt("adapters/{s}", .{name})));
         // The adapter's build has its own cache; always hand it control.
+        run.has_side_effects = true;
+        step.dependOn(&run.step);
+    }
+}
+
+/// The example programs under `examples/`, each its own package depending
+/// on zom and the adapters it uses by path. Like the adapters, they are
+/// listed, and only exist in a checkout.
+const example_dirs = [_][]const u8{"csv_users"};
+
+/// Runs `zig build test` inside each example's directory: it builds the
+/// program, runs it, and compares its stdout with the expected output.
+fn addExampleTests(b: *std.Build, step: *std.Build.Step, optimize: std.builtin.OptimizeMode) void {
+    for (example_dirs) |name| {
+        const run = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test", b.fmt("-Doptimize={t}", .{optimize}) });
+        run.setName(b.fmt("test examples/{s}", .{name}));
+        run.setCwd(b.path(b.fmt("examples/{s}", .{name})));
         run.has_side_effects = true;
         step.dependOn(&run.step);
     }

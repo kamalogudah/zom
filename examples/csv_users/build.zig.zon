@@ -1,0 +1,11 @@
+.{
+    .name = .csv_users,
+    .version = "0.0.0",
+    .fingerprint = 0x1f9327b302e8e06,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .zom = .{ .path = "../.." },
+        .zom_csv = .{ .path = "../../adapters/csv" },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "data" },
+}
