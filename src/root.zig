@@ -26,6 +26,8 @@ pub const Supports = adapter.Supports;
 
 pub const changeset = @import("changeset.zig");
 
+pub const lint = @import("lint.zig");
+
 pub const mapper = @import("mapper.zig");
 pub const Mapper = mapper.Mapper;
 pub const combineMany = mapper.combineMany;
@@ -40,5 +42,6 @@ test {
     _ = @import("tests/mapper_test.zig");
     _ = @import("tests/memory_test.zig");
     _ = @import("tests/store_test.zig");
+    _ = @import("tests/lint_test.zig");
     _ = @import("tests/sql_test.zig");
 }

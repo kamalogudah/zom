@@ -183,12 +183,15 @@ pub fn Store(comptime S: type) type {
             return allocator.dupe(T, hits.items[start..end]);
         }
 
+        /// The number of rows `read` would return: `limit` and `offset`
+        /// apply, as with SQL's `count(*)` over a limited subquery.
         pub fn count(self: *Self, query: Q) !usize {
             var n: usize = 0;
             for (self.list.items) |row| {
                 if (query.matches(row)) n += 1;
             }
-            return n;
+            const rest = n - @min(query.offset, n);
+            return if (query.limit) |l| @min(l, rest) else rest;
         }
 
         /// Converts every change (copying strings once) into `patch` before

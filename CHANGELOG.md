@@ -9,6 +9,21 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- `zom.lint.run(G, Factory)`, the adapter conformance suite (like rom's
+  `ROM::Lint`). It seeds its own schema, `zom.lint.Users`, through the
+  factory's `seed` or the dataset's `insertMany`/`insert`, and checks reads,
+  every filter op, `null` semantics, ordering with nulls, `limit`/`offset`
+  edge cases, `one`, and that `count` matches the rows read. Failures name
+  the check and case; checks needing a missing capability or `zom.Supports`
+  feature are skipped with a message. The memory adapter passes it. ([#17])
+- `zom.lint` write checks: `insert`, `createMany` (with `insertMany` or the
+  `insert` fallback), `update` and `delete`, including
+  `error.DuplicatePrimaryKey`, `error.ValueOutOfRange`, failed writes changing
+  nothing, and strings being copied on every write. A factory can declare
+  `insert_many_on_duplicate: zom.lint.OnDuplicate` to say what a failed
+  batch leaves stored. `zom.lint.expectSharedError` checks that an adapter
+  uses the shared names from `zom.adapter.Error`. Each check is skipped when
+  the capability is missing. ([#18])
 - `zig build compile-errors` checks that each file in `tests/compile_errors/`
   fails to compile with the message on its `// expect:` line. `zig build test`
   runs it too. ([#11]) A case can start with several `// expect:` lines, and
@@ -61,6 +76,9 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
   capability: ``zom: adapter 'csv' is read-only for relation 'users': `create`
   needs the `writable` capability (dataset has no `insert`)``. ([#14])
 - `zom.memory.MemoryDataset(S)` is renamed `zom.memory.Store(S)`. ([#16])
+- A dataset's `count` returns the number of rows `read` would return, so
+  `limit` and `offset` now apply (they were ignored). `users.limit(2).count()`
+  is at most 2. ([#17])
 
 ## [0.2.0] - 2026-10-30
 
@@ -131,3 +149,5 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#14]: https://github.com/kamalogudah/zom/issues/14
 [#15]: https://github.com/kamalogudah/zom/issues/15
 [#16]: https://github.com/kamalogudah/zom/issues/16
+[#17]: https://github.com/kamalogudah/zom/issues/17
+[#18]: https://github.com/kamalogudah/zom/issues/18

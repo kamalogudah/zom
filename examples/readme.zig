@@ -123,3 +123,29 @@ test "README: The adapter contract" {
     try testing.expectEqual(null, try items.one(testing.allocator));
     try testing.expectEqual(zom.Capabilities{}, comptime zom.Adapter(EmptyGateway).capabilities(Items.schema));
 }
+
+// -- README: Checking an adapter with zom.lint ------------------------------
+// In a namespace, since the README's top-level `zom` would shadow the
+// local `zom` constants in the tests above.
+const lint_example = struct {
+    const zom = @import("zom");
+
+    const Factory = struct {
+        pub fn create(allocator: std.mem.Allocator) !zom.memory.Gateway {
+            return zom.memory.Gateway.init(allocator, .{});
+        }
+        pub fn destroy(g: *zom.memory.Gateway) void {
+            g.deinit();
+        }
+        // Only needed when the dataset has neither `insert` nor `insertMany`:
+        // pub fn seed(g: *G, comptime S: type, rows: []const S.Tuple) !void
+    };
+
+    test "zom.lint" {
+        try zom.lint.run(zom.memory.Gateway, Factory);
+    }
+};
+
+test {
+    _ = lint_example;
+}

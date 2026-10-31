@@ -51,7 +51,7 @@ Each row below says whether that part exists today or is planned (see
 | **Adapter registry** | `ROM.register_adapter(:csv, ROM::CSV)` puts the adapter in a global runtime table, and `ROM.container(:csv, path)` finds it there by symbol. | Zig has no runtime registry, and zom doesn't need one. An adapter is a Zig package that exports a `Gateway` type, and you pass that type in directly: `zom.Relation(Schema, zom_csv.Gateway)`. The contract is checked when the code compiles, not when it runs. *Today: `zom.Adapter` checks it, for `zom.memory` or any gateway you write. Planned: separate adapter packages.* |
 | **Adapter shape** | Adapters subclass `ROM::Gateway`, `ROM::Relation` and `ROM::Memory::Dataset`, then override methods. | No inheritance. A gateway is any type with the right declarations (see [the adapter contract](#the-adapter-contract)). File adapters *wrap* the memory engine, `zom.memory.Store(S)`, instead of subclassing it. |
 | **Optional features** | Whether an adapter supports a command is found out at runtime, when the command is built or run. | An adapter simply leaves out `insert`, `update` or `delete`, and `relation.create(...).commit()` fails to compile with a message naming the adapter. `zom.Adapter(G).capabilities(S)` says what it supports. |
-| **Checking an adapter** | `ROM::Lint` specs, run by each adapter gem. | `zom.lint`, a test suite each adapter runs in its own `zig build test`. *Planned.* |
+| **Checking an adapter** | `ROM::Lint` specs, run by each adapter gem. | `zom.lint.run(Gateway, Factory)`, a test suite each adapter runs in its own `zig build test`. *Today: read, filter, null, ordering, limit/offset, `one`, insert, `insertMany`, update and delete checks.* |
 | **Container** | `ROM.container` builds a runtime registry: `container.relations[:users]`. | Relations are types, so a container is a comptime struct with one field per relation: `app.relations.users`. A missing relation is a compile error, not a runtime lookup failure. *Planned: `zom.Container`.* |
 | **Schema inference** | rom-sql can read a table's columns from the database at boot. | A Zig struct has to exist when the code compiles, before any database is reachable, so you write the schema struct yourself. The plan adds a startup check against the database, and later a code generator. |
 | **Structs** | `ROM::Struct` builds result classes at runtime from the schema. | You declare the entity struct (or use the tuple), and `mapTo` copies fields by name. Narrowed types, like a future `select(.{ .id, .name })`, are built at compile time with `@Struct`. |
@@ -147,6 +147,7 @@ breaking change needs a minor version bump and an entry in
 | `zom.mapper` | The module behind `Mapper` and `combineMany`, with their option types `Options`, `Rename` and `CombineOptions`. |
 | `zom.memory` | The in-memory adapter: `Gateway` (`adapter_name = "memory"`, `Config = struct {}`, `init(allocator, Config)`, `deinit()`), whose dataset is `Store(S)`. Every capability except `transaction`. |
 | `zom.memory.Store(S)` | The in-memory row engine, usable without a gateway: `init(allocator)`, `deinit()`, `read`, `count`, `insert`, `insertMany`, `update`, `delete`, plus `rows() []const Tuple` (every row, in insertion order), `load(row)` and `loadMany(rows)` (insert without the primary-key check, for trusted bulk loads) and `clear()`. Strings are copied into the store's arena; rows it returns point into it until `clear` or `deinit`. |
+| `zom.lint` | The adapter conformance suite, see [Checking an adapter](#checking-an-adapter-with-zomlint). Also exports the schema it tests on, `Users` (`User`, `Role`), its seed rows, `users`, `OnDuplicate` and `expectSharedError`. |
 | `zom.sql` | `compileSelect(T, allocator, table, query) !Compiled`, returning `Compiled{ sql, params }` with Postgres placeholders (`$1`). `writeIdent` appends a quoted identifier. |
 | `zom.query` | The module behind `Query`, `Value`, `Op` and `Direction`. Adapters can use `toValue(x) Value` and `fromValue(F, value) !F` to convert between attribute values and `Value`. Its `assert*`, `isString` and `isComptimeOnly` helpers are used by the core and are not part of the frozen API. |
 
@@ -166,7 +167,7 @@ relation and never touch the dataset. `field` is always an enum literal, and
 | `toSlice(allocator)` | `![]Tuple` | Caller frees. |
 | `one(allocator)` | `!?Tuple` | `null` when empty, `error.MoreThanOneTuple` when ambiguous. |
 | `first(allocator)` | `!?Tuple` | |
-| `count()` | `!usize` | |
+| `count()` | `!usize` | The number of rows `toSlice` would return, so `limit` and `offset` apply. |
 | `mapTo(E, allocator)` | `![]E` | `mapWith(zom.Mapper(Tuple, E, .{}))`. |
 | `mapWith(M, allocator)` | `![]M.Output` | `M` is a `zom.Mapper`. |
 | `create(tuple)` | `Create` | `.map(f)` applies `f: fn (Tuple) Tuple`; `.commit()` returns `!Tuple`, the stored tuple. |
@@ -260,7 +261,7 @@ In full, with `Q = zom.Query(S.Tuple)`:
 | `Gateway.dataset` | `fn (*Gateway, comptime S: type) !*Dataset(S)` | yes | Returns the same dataset every time for the same `S`. |
 | `Gateway.transaction` | `fn (*Gateway, ...)` | no, `.transaction` | Not used by the core yet. |
 | `read` | `fn (*Dataset, Q, Allocator) ![]S.Tuple` | yes | Applies filters, then order, then offset and limit. The caller frees the slice. |
-| `count` | `fn (*Dataset, Q) !usize` | yes | Applies filters only. |
+| `count` | `fn (*Dataset, Q) !usize` | yes | The number of rows `read` would return: filters, offset and limit all apply. |
 | `insert` | `fn (*Dataset, S.Tuple) !S.Tuple` | no, `.writable` | Returns the tuple as stored. `error.DuplicatePrimaryKey` on a key clash. |
 | `insertMany` | `fn (*Dataset, []const S.Tuple) !usize` | no, `.batch_insert` | Returns the tuples stored. `error.DuplicatePrimaryKey` on a key clash, with the stored rows or inside the batch. Used by `createMany`. |
 | `update` | `fn (*Dataset, Q, []const Q.Change) !usize` | no, `.updatable` | Returns the rows changed. A failed update changes nothing. |
@@ -287,6 +288,57 @@ memory adapter stores all or nothing). With only `insert`, `commit` calls it
 once per tuple, in order, and stops at the first error: **the tuples before
 the failing one stay stored**, and the count is lost with the error. An empty
 slice returns 0 without calling the dataset.
+
+### Checking an adapter with zom.lint
+
+`zom.lint` is the conformance suite, like rom's `ROM::Lint`. An adapter runs
+it from its own tests, with a factory that says how to make a fresh gateway:
+
+```zig
+const Factory = struct {
+    pub fn create(allocator: std.mem.Allocator) !zom.memory.Gateway {
+        return zom.memory.Gateway.init(allocator, .{});
+    }
+    pub fn destroy(g: *zom.memory.Gateway) void {
+        g.deinit();
+    }
+    // Only needed when the dataset has neither `insert` nor `insertMany`:
+    // pub fn seed(g: *G, comptime S: type, rows: []const S.Tuple) !void
+    // Optional, what a `createMany` with a duplicate key leaves stored:
+    // pub const insert_many_on_duplicate: zom.lint.OnDuplicate = .stores_nothing;
+};
+
+test "zom.lint" {
+    try zom.lint.run(zom.memory.Gateway, Factory);
+}
+```
+
+Each check gets a new gateway seeded with the same six rows (`zom.lint.users`
+over `zom.lint.Users`). It reads them back, filters with every `Op` on
+integer, nullable, string and enum attributes, checks `null` semantics,
+ordering (nulls last on `.asc`, first on `.desc`), `limit` and `offset` edge
+cases, and `one`; every case also checks that `count` equals the rows read.
+The write checks cover `insert` (returns the stored tuple, a duplicate key
+fails with `error.DuplicatePrimaryKey`), `createMany` (the count, both kinds
+of duplicate key, and what a failure leaves stored: nothing by default with
+`insertMany`, the tuples before the failing one with the `insert` fallback,
+or whatever the factory's `insert_many_on_duplicate` says), `update` (the
+count, a key clash, `error.ValueOutOfRange` for a runtime value that does not
+fit, and that a failed update changes nothing) and `delete` (the count, the
+rows are gone, `count` agrees). Strings written by `insert`, `createMany` and
+`update` must be copied: the caller's buffer is overwritten afterwards. Error
+checks go through `zom.lint.expectSharedError(label, error.X, result)`, which
+fails when the call's error set has no `error.X` (found at compile time) or
+when it returns another name, so an adapter must use the shared names from
+`zom.adapter.Error`.
+All checks run; each failure prints the check's name and case, and `run`
+returns the first error. A check that needs a capability or a `zom.Supports`
+feature the dataset lacks is skipped with a `skipped:` line. Everything goes
+through `std.testing.allocator`, so leaks fail the test too.
+
+Note that `zig build test` shows any test's stderr under a `failed command:`
+header even when every test passes, so an adapter whose checks get skipped
+will see that header on a green run.
 
 ### Errors
 
@@ -343,6 +395,9 @@ bump and a changelog entry:
 - `count` and `delete` return `!usize` like every other dataset call, because
   real adapters do I/O for them. The memory adapter never fails, but callers
   still write `try users.count()`.
+- `count` applies `limit` and `offset`, so it always equals the length of
+  `toSlice`. `update` and `delete` ignore them for now.
+- It passes `zom.lint`.
 
 ## Roadmap
 
@@ -390,6 +445,7 @@ links to the topics below.
 | `src/schema.zig` | `Schema(T, name, pk)` returns a type | Functions that return types (generics) |
 | `src/query.zig` | `Value` union, `Query(T)`, filter matching, compile-time type checks | Tagged unions, `@typeInfo`, `@compileError` |
 | `src/adapter.zig` | `Adapter(G)`: checks the adapter contract and finds a gateway's capabilities | `@hasDecl`, `@typeInfo(...).@"fn"`, building comptime strings |
+| `src/lint.zig` | `lint.run(G, Factory)`: the conformance suite every adapter runs | Tests as library code, `inline for` over a tuple of generic functions |
 | `src/relation.zig` | `Relation(S, Gateway)`: immutable query builder | Comptime field enums, `anytype` |
 | `src/changeset.zig` | `Create`, `CreateMany` and `Update` changesets | Fixed-capacity arrays, slices, comptime capability branching |
 | `src/mapper.zig` | Copies tuples into domain structs | `inline for` over struct fields |
