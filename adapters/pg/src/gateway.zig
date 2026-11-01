@@ -20,9 +20,10 @@ const std = @import("std");
 const zom = @import("zom");
 const zom_sql = @import("zom_sql");
 const pg = @import("pg");
+const verify_mod = @import("verify.zig");
 
 const Allocator = std.mem.Allocator;
-const Value = zom.Value;
+pub const Value = zom.Value;
 const log = std.log.scoped(.zom_pg);
 const dialect = zom_sql.Dialect.postgres;
 
@@ -143,6 +144,23 @@ pub const Gateway = struct {
         return d;
     }
 
+    /// Checks the table `S.name` against `S` at startup: every field of
+    /// `S.Tuple` has a column of a type that holds it (see `pgTypesFor`
+    /// in verify.zig), optional fields are on nullable columns and the
+    /// others on `NOT NULL` ones, and the primary key is
+    /// `S.primary_key` alone. Columns the struct doesn't have are allowed.
+    ///
+    /// Every mismatch is reported at once: appended to `diagnostics`, or
+    /// logged at error level (scope `.zom_pg`) when it is null, and the
+    /// call returns `error.SchemaMismatch`. A missing table is one
+    /// mismatch (`.missing_table`), not `error.NotFound`.
+    pub fn verify(self: *Gateway, comptime S: type, diagnostics: ?*Diagnostics) !void {
+        return verify_mod.verify(self, S, diagnostics);
+    }
+
+    pub const Diagnostics = verify_mod.Diagnostics;
+    pub const Mismatch = verify_mod.Mismatch;
+
     /// Runs `sql` with no parameters and no rows, e.g. `CREATE TABLE`. zom
     /// has no migrations; this is for setup and tests.
     pub fn exec(self: *Gateway, sql: []const u8) Error!void {
@@ -215,7 +233,7 @@ const Source = union(enum) {
     /// outermost transaction and n for the n-th SAVEPOINT inside it.
     tx: struct { conn: *pg.Conn, depth: u32 },
 
-    fn acquire(self: Source) Gateway.Error!*pg.Conn {
+    pub fn acquire(self: Source) Gateway.Error!*pg.Conn {
         return switch (self) {
             .pool => |pool| pool.acquire() catch |err| {
                 log.debug("acquiring a connection failed: {t}", .{err});
@@ -229,7 +247,7 @@ const Source = union(enum) {
         };
     }
 
-    fn release(self: Source, conn: *pg.Conn) void {
+    pub fn release(self: Source, conn: *pg.Conn) void {
         // A connection that isn't idle (an error mid-result, a transaction
         // left open) is closed and replaced by the pool.
         if (self == .pool) self.pool.release(conn);
@@ -474,7 +492,7 @@ fn PgDataset(comptime S: type) type {
 
 /// Prepares `sql`, binds `params` and executes it. The caller deinits the
 /// result (and drains it if it stops reading early).
-fn run(conn: *pg.Conn, sql: []const u8, params: []const Value) !*pg.Result {
+pub fn run(conn: *pg.Conn, sql: []const u8, params: []const Value) !*pg.Result {
     var stmt = pg.Stmt.init(conn, .{ .column_names = true }) catch |err| return mapError(conn, err);
     errdefer stmt.deinit();
     stmt.prepare(sql, null) catch |err| return mapError(conn, err);
@@ -493,7 +511,7 @@ fn runCounting(conn: *pg.Conn, sql: []const u8, params: []const Value) !usize {
     return n;
 }
 
-fn next(conn: *pg.Conn, result: *pg.Result) !?pg.Row {
+pub fn next(conn: *pg.Conn, result: *pg.Result) !?pg.Row {
     return result.next() catch |err| mapError(conn, err);
 }
 
@@ -525,7 +543,7 @@ fn bindValue(stmt: *pg.Stmt, v: Value) !void {
 /// primary key's: telling them apart needs the constraint's name, which
 /// can be anything, or a catalog query, which an aborted transaction
 /// refuses. `lastError().constraint` names the one that was violated.
-fn mapError(conn: *pg.Conn, err: anyerror) Gateway.Error {
+pub fn mapError(conn: *pg.Conn, err: anyerror) Gateway.Error {
     switch (err) {
         error.PG => if (conn.err) |pge| {
             record(pge);

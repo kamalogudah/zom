@@ -57,6 +57,51 @@ column of the same name. zom has no migrations; create the tables yourself
 (`gateway.exec(sql)` runs a statement without parameters, which is handy in
 tests).
 
+## Checking the schema at startup
+
+Zig can't read the database at compile time, so a struct that has drifted
+from its table would otherwise only fail on the first query that touches
+the bad column. `gateway.verify(S, diagnostics)` checks it up front:
+
+```zig
+var diag: zom_pg.Diagnostics = .init(allocator);
+defer diag.deinit();
+gateway.verify(UserSchema, &diag) catch |err| switch (err) {
+    error.SchemaMismatch => {
+        std.log.err("the database doesn't match the schema:\n{f}", .{diag});
+        return err;
+    },
+    else => return err,
+};
+```
+
+It reads `information_schema` for the table `S.name` resolves to on the
+`search_path` (the one the gateway's statements use, `public` by default)
+and reports every mismatch at once, one per line:
+
+```
+users.age: Zig u8 vs pg text
+users.email: Zig []const u8 vs no column
+users.name: Zig []const u8 vs pg nullable column (make the field optional or the column NOT NULL)
+users: primary key is (email), expected (id)
+```
+
+- Every field needs a column whose type holds it: one from the table in
+  [Types](#types), and for integers one that holds every value of the
+  field (`u8` and `i16` take `smallint` and up, `u16` and `i32` `integer`
+  and up, wider ones `bigint`). `zom_pg.pgTypesFor(T)` lists them.
+- A non-optional field on a nullable column is a mismatch (reading a NULL
+  would fail), and so is a `?T` field on a `NOT NULL` column (writing null
+  would).
+- The primary key must be `S.primary_key` alone.
+- A missing table is one mismatch (`users: no such table`). Columns the
+  struct doesn't have are allowed.
+
+With `null` for `diagnostics`, the mismatches are logged at error level
+(scope `.zom_pg`) instead. One `Diagnostics` can collect several `verify`
+calls, so an application can check all its schemas and report them
+together. `verify` also works on the `tx` gateway inside `transaction`.
+
 ## Strings belong to the caller
 
 pg.zig's row data is only valid until the next row or the end of the result,
@@ -161,7 +206,8 @@ try gateway.transaction(Transfer{ .from = 1, .to = 2, .amount = 50 }, struct {
 | `error.ReadOnly` | A read-only transaction or replica (`25006`). |
 | `error.ConnectionFailed` | The pool can't connect or hand out a connection in time, a socket error, or SQLSTATE class `08`. |
 | `error.Database` | Any other Postgres or pg.zig error. |
-| `error.MissingColumn`, `error.ColumnTypeMismatch`, `error.UnexpectedNull` | The table doesn't match the schema. Each is logged with the column at debug level. |
+| `error.MissingColumn`, `error.ColumnTypeMismatch`, `error.UnexpectedNull` | The table doesn't match the schema. Each is logged with the column at debug level. `verify` finds these up front. |
+| `error.SchemaMismatch` | From `verify` only: the table doesn't match the schema; the `Diagnostics` say how. |
 
 All of them except the last row are in `zom_pg.Gateway.Error`.
 
@@ -194,8 +240,9 @@ createdb zom_test
 ZOM_PG_URL=postgres://postgres@127.0.0.1:5432/zom_test zig build test
 ```
 
-Every check drops and recreates a `lint_users` table, and the transaction
-and error tests a `tx_items` table, so use a database you can spare those
+Every check drops and recreates a `lint_users` table, the transaction
+and error tests a `tx_items` table, and the `verify` tests a `vf_users`
+table and a `vf_role` type, so use a database you can spare those
 tables in. Without `ZOM_PG_URL`, `zig build test` (here, or
 `zig build test-adapters` at the root) only checks that zom-pg compiles and
 satisfies the adapter contract.

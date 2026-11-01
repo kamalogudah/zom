@@ -35,6 +35,16 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
   connection, so relations over it run in the transaction. Nested calls
   are SAVEPOINTs, and so is `insertMany` inside a transaction. ([#38])
 
+- zom-pg schema check: `Gateway.verify(S, diagnostics)` compares the table
+  `S.name` resolves to with `S.Tuple` at startup, through
+  `information_schema`. Every field needs a column whose type holds it
+  (`zom_pg.pgTypesFor`: a `u32` needs `bigint`, an enum `text` or a
+  Postgres `ENUM`), optional fields need nullable columns and the others
+  `NOT NULL`, and the primary key must be `S.primary_key` alone. It
+  reports every mismatch at once (`users.age: Zig u8 vs pg text`) in a
+  `zom_pg.Diagnostics`, or logs them when that is null, and returns
+  `error.SchemaMismatch`. ([#39])
+
 - Caller-owned strings. A dataset can declare `pub const strings:
   zom.StringOwnership = .caller`: the strings it returns are allocated with
   the allocator passed to `read` / `readProjected` / `insert`, which then
@@ -455,3 +465,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#36]: https://github.com/kamalogudah/zom/issues/36
 [#37]: https://github.com/kamalogudah/zom/issues/37
 [#38]: https://github.com/kamalogudah/zom/issues/38
+[#39]: https://github.com/kamalogudah/zom/issues/39
