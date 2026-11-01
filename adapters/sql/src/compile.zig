@@ -1,5 +1,6 @@
-//! The SELECT compiler: turns a relation's query into a parameterized
-//! statement for one `Dialect`.
+//! The statement compiler: turns a relation's query into a parameterized
+//! `SELECT`, and tuples, changes and queries into `INSERT`, `UPDATE` and
+//! `DELETE`, for one `Dialect`.
 //!
 //! Rendering goes through a `*std.Io.Writer`, so the compiler does not care
 //! where the text ends up; `compileSelect` and friends render into an
@@ -46,6 +47,21 @@ pub const CompileError = Allocator.Error || error{
 /// `writeNode` recurses, and a recursive function can't infer its error set.
 pub const RenderError = CompileError || Writer.Error;
 
+/// What `compileUpdate` and `compileDelete` can fail with.
+pub const WriteError = CompileError || error{
+    /// An `UPDATE` or `DELETE` whose query has no filters, which would touch
+    /// every row. This is a safety rule: a forgotten `where` must not empty
+    /// or rewrite a table. Set `query.all = true` to mean it.
+    UnboundedWrite,
+    /// An `UPDATE` with no changes, which SQL can't express (`SET` needs at
+    /// least one column). Nothing would change; a gateway can skip the
+    /// statement, as `Update.commit` does.
+    EmptyUpdate,
+};
+
+/// `WriteError` for the `write*` functions, which render into a writer.
+pub const WriteRenderError = WriteError || Writer.Error;
+
 /// The bind parameters of a statement being rendered. `bind` appends a
 /// value and writes its placeholder.
 pub const Params = struct {
@@ -56,7 +72,7 @@ pub const Params = struct {
         self.list.deinit(self.allocator);
     }
 
-    pub fn bind(self: *Params, comptime dialect: Dialect, w: *Writer, v: Value) RenderError!void {
+    pub fn bind(self: *Params, comptime dialect: Dialect, w: *Writer, v: Value) (Allocator.Error || Writer.Error)!void {
         try self.list.append(self.allocator, v);
         switch (dialect.placeholder) {
             .dollar_n => try w.print("${d}", .{self.list.items.len}),
@@ -103,21 +119,39 @@ pub fn compileProjected(
     table: []const u8,
     query: zom.Query(T),
 ) CompileError!Compiled {
-    var out: Writer.Allocating = .init(allocator);
-    defer out.deinit();
-    var params: Params = .{ .allocator = allocator };
-    defer params.deinit();
-
-    writeSelect(dialect, T, Out, &out.writer, &params, table, &query) catch |err| switch (err) {
+    var b: Builder = .init(allocator);
+    defer b.deinit();
+    writeSelect(dialect, T, Out, &b.out.writer, &b.params, table, &query) catch |err| switch (err) {
         // The allocating writer only fails when it can't grow.
         error.WriteFailed => return error.OutOfMemory,
         else => |e| return e,
     };
-
-    const sql = try out.toOwnedSlice();
-    errdefer allocator.free(sql);
-    return .{ .sql = sql, .params = try params.list.toOwnedSlice(allocator) };
+    return b.finish();
 }
+
+/// A statement being rendered into memory: what each `compile*` function
+/// hands to its `write*` function, then turns into a `Compiled`. Not moved
+/// once rendering starts (the writer points into it).
+const Builder = struct {
+    out: Writer.Allocating,
+    params: Params,
+
+    fn init(allocator: Allocator) Builder {
+        return .{ .out = .init(allocator), .params = .{ .allocator = allocator } };
+    }
+
+    fn deinit(self: *Builder) void {
+        self.out.deinit();
+        self.params.deinit();
+    }
+
+    fn finish(self: *Builder) Allocator.Error!Compiled {
+        const allocator = self.params.allocator;
+        const sql = try self.out.toOwnedSlice();
+        errdefer allocator.free(sql);
+        return .{ .sql = sql, .params = try self.params.list.toOwnedSlice(allocator) };
+    }
+};
 
 /// `compileProjected` for a relation: its schema's dataset name is the
 /// table, and its `Output` (the tuple, or what `select` narrowed it to)
@@ -147,13 +181,7 @@ pub fn writeSelect(
     try w.writeAll(" FROM ");
     try writeIdent(dialect, w, table);
 
-    var it = query.topNodes();
-    var first = true;
-    while (it.next()) |i| {
-        try w.writeAll(if (first) " WHERE " else " AND ");
-        first = false;
-        try writeNode(dialect, T, w, params, query, @intCast(i));
-    }
+    try writeWhere(dialect, T, w, params, query);
 
     for (query.orderSlice(), 0..) |o, i| {
         try w.writeAll(if (i == 0) " ORDER BY " else ", ");
@@ -169,6 +197,236 @@ pub fn writeSelect(
         if (dialect.limit_all) |all| try w.print(" LIMIT {s}", .{all});
     }
     if (query.offset > 0) try w.print(" OFFSET {d}", .{@min(query.offset, max)});
+}
+
+/// ` WHERE a AND b ...` over the query's top-level nodes; nothing when it
+/// has none.
+fn writeWhere(
+    comptime dialect: Dialect,
+    comptime T: type,
+    w: *Writer,
+    params: *Params,
+    query: *const zom.Query(T),
+) RenderError!void {
+    var it = query.topNodes();
+    var first = true;
+    while (it.next()) |i| {
+        try w.writeAll(if (first) " WHERE " else " AND ");
+        first = false;
+        try writeNode(dialect, T, w, params, query, @intCast(i));
+    }
+}
+
+// -- writes -----------------------------------------------------------------
+//
+// String params of a write statement borrow from what was passed in: the
+// tuples for an insert, the changes and the query for an update.
+
+/// The statements `compileInsertMany` returns, one per chunk of at most
+/// `rowsPerStatement` rows, in the order of the rows. The caller owns them
+/// and frees them all with `deinit`.
+pub const Batch = struct {
+    statements: []Compiled,
+
+    pub fn deinit(self: Batch, allocator: Allocator) void {
+        for (self.statements) |s| s.deinit(allocator);
+        allocator.free(self.statements);
+    }
+};
+
+/// How many tuples of `T` fit one `INSERT` under `dialect.max_params`, each
+/// binding one parameter per field. A tuple too wide for a single row is a
+/// compile error.
+pub fn rowsPerStatement(comptime dialect: Dialect, comptime T: type) comptime_int {
+    const fields = @typeInfo(T).@"struct".fields.len;
+    if (fields == 0) @compileError("zom_sql: " ++ @typeName(T) ++ " has no fields to insert");
+    const n = @divFloor(dialect.max_params, fields);
+    if (n == 0) @compileError(std.fmt.comptimePrint(
+        "zom_sql: {s} has {d} fields, more than the dialect's {d} bind parameters",
+        .{ @typeName(T), fields, dialect.max_params },
+    ));
+    return n;
+}
+
+/// `INSERT INTO "table" ("a", ...) VALUES ($1, ...)` for every field of
+/// `row`, then ` RETURNING *` when the dialect has it. Optional fields set
+/// to null bind `.null`; enums bind their tag name.
+pub fn compileInsert(
+    comptime dialect: Dialect,
+    comptime T: type,
+    allocator: Allocator,
+    table: []const u8,
+    row: T,
+) Allocator.Error!Compiled {
+    return insertRows(dialect, T, allocator, table, (&row)[0..1]);
+}
+
+/// `compileInsert` for many tuples: one multi-row `INSERT ... VALUES (...),
+/// (...)` per `rowsPerStatement(dialect, T)` tuples, so no statement carries
+/// more than `dialect.max_params` parameters (65535 for Postgres). Each
+/// statement numbers its placeholders from `$1`. A gateway runs them in
+/// order, in one transaction if the batch must be all or nothing. No tuples
+/// is no statements.
+pub fn compileInsertMany(
+    comptime dialect: Dialect,
+    comptime T: type,
+    allocator: Allocator,
+    table: []const u8,
+    rows: []const T,
+) Allocator.Error!Batch {
+    const per = comptime rowsPerStatement(dialect, T);
+    const count = std.math.divCeil(usize, rows.len, per) catch unreachable;
+    const statements = try allocator.alloc(Compiled, count);
+    var done: usize = 0;
+    errdefer {
+        for (statements[0..done]) |s| s.deinit(allocator);
+        allocator.free(statements);
+    }
+    while (done < count) : (done += 1) {
+        const start = done * per;
+        statements[done] = try insertRows(dialect, T, allocator, table, rows[start..@min(start + per, rows.len)]);
+    }
+    return .{ .statements = statements };
+}
+
+fn insertRows(comptime dialect: Dialect, comptime T: type, allocator: Allocator, table: []const u8, rows: []const T) Allocator.Error!Compiled {
+    var b: Builder = .init(allocator);
+    defer b.deinit();
+    writeInsert(dialect, T, &b.out.writer, &b.params, table, rows) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+        else => |e| return e,
+    };
+    return b.finish();
+}
+
+/// Renders one `INSERT` of `rows` into `w`. Asserts there is at least one
+/// row and that they fit `dialect.max_params`; `compileInsertMany` splits a
+/// longer slice.
+pub fn writeInsert(
+    comptime dialect: Dialect,
+    comptime T: type,
+    w: *Writer,
+    params: *Params,
+    table: []const u8,
+    rows: []const T,
+) (Allocator.Error || Writer.Error)!void {
+    const fields = @typeInfo(T).@"struct".fields;
+    std.debug.assert(rows.len > 0 and rows.len <= rowsPerStatement(dialect, T));
+
+    try w.writeAll("INSERT INTO ");
+    try writeIdent(dialect, w, table);
+    try w.writeAll(" (");
+    inline for (fields, 0..) |f, i| {
+        if (i > 0) try w.writeAll(", ");
+        try writeIdent(dialect, w, f.name);
+    }
+    try w.writeAll(") VALUES ");
+    for (rows, 0..) |row, r| {
+        if (r > 0) try w.writeAll(", ");
+        try w.writeByte('(');
+        inline for (fields, 0..) |f, i| {
+            if (i > 0) try w.writeAll(", ");
+            try params.bind(dialect, w, zom.query.toValue(@field(row, f.name)));
+        }
+        try w.writeByte(')');
+    }
+    if (dialect.returning) try w.writeAll(" RETURNING *");
+}
+
+/// `UPDATE "table" SET "a" = $1, ... WHERE ...`. Placeholders run on from
+/// `SET` into `WHERE`. Only the query's filters are used: like the memory
+/// adapter, an update ignores `order`, `limit` and `offset`. A field set
+/// more than once takes its last value, as in memory, since SQL rejects a
+/// column assigned twice. See `WriteError` for the unfiltered and empty
+/// cases.
+pub fn compileUpdate(
+    comptime dialect: Dialect,
+    comptime T: type,
+    allocator: Allocator,
+    table: []const u8,
+    query: zom.Query(T),
+    changes: []const zom.Query(T).Change,
+) WriteError!Compiled {
+    var b: Builder = .init(allocator);
+    defer b.deinit();
+    writeUpdate(dialect, T, &b.out.writer, &b.params, table, &query, changes) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+        else => |e| return e,
+    };
+    return b.finish();
+}
+
+/// `DELETE FROM "table" WHERE ...`. Like `compileUpdate`, only the filters
+/// are used, and a query without any is `error.UnboundedWrite` unless
+/// `query.all` is set.
+pub fn compileDelete(
+    comptime dialect: Dialect,
+    comptime T: type,
+    allocator: Allocator,
+    table: []const u8,
+    query: zom.Query(T),
+) WriteError!Compiled {
+    var b: Builder = .init(allocator);
+    defer b.deinit();
+    writeDelete(dialect, T, &b.out.writer, &b.params, table, &query) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+        else => |e| return e,
+    };
+    return b.finish();
+}
+
+/// Renders `compileUpdate`'s statement into `w`. The checks run before
+/// anything is written.
+pub fn writeUpdate(
+    comptime dialect: Dialect,
+    comptime T: type,
+    w: *Writer,
+    params: *Params,
+    table: []const u8,
+    query: *const zom.Query(T),
+    changes: []const zom.Query(T).Change,
+) WriteRenderError!void {
+    if (changes.len == 0) return error.EmptyUpdate;
+    try checkBounded(T, query);
+
+    try w.writeAll("UPDATE ");
+    try writeIdent(dialect, w, table);
+    var first = true;
+    for (changes, 0..) |c, i| {
+        if (setLater(T, changes[i + 1 ..], c.field)) continue;
+        try w.writeAll(if (first) " SET " else ", ");
+        first = false;
+        try writeIdent(dialect, w, @tagName(c.field));
+        try w.writeAll(" = ");
+        try params.bind(dialect, w, c.value);
+    }
+    try writeWhere(dialect, T, w, params, query);
+}
+
+/// Renders `compileDelete`'s statement into `w`.
+pub fn writeDelete(
+    comptime dialect: Dialect,
+    comptime T: type,
+    w: *Writer,
+    params: *Params,
+    table: []const u8,
+    query: *const zom.Query(T),
+) WriteRenderError!void {
+    try checkBounded(T, query);
+    try w.writeAll("DELETE FROM ");
+    try writeIdent(dialect, w, table);
+    try writeWhere(dialect, T, w, params, query);
+}
+
+/// The safety rule: a write needs a filter, or `query.all`.
+fn checkBounded(comptime T: type, query: *const zom.Query(T)) error{UnboundedWrite}!void {
+    var it = query.topNodes();
+    if (it.next() == null and !query.all) return error.UnboundedWrite;
+}
+
+fn setLater(comptime T: type, rest: []const zom.Query(T).Change, field: zom.Query(T).Field) bool {
+    for (rest) |c| if (c.field == field) return true;
+    return false;
 }
 
 /// The column names `Out` reads, each checked to be a field of `T`.

@@ -9,8 +9,8 @@ pub const Dialect = struct {
     /// Wraps every identifier; a `quote` inside a name is doubled.
     /// `'"'` is standard SQL; MySQL uses `` '`' ``.
     quote: u8 = '"',
-    /// Supports `INSERT ... RETURNING *` (Postgres, SQLite 3.35+). Read by
-    /// the write statements, which come with the `zom-pg` gateway.
+    /// Supports `INSERT ... RETURNING *` (Postgres, SQLite 3.35+), which
+    /// `compileInsert` and `compileInsertMany` then append.
     returning: bool,
     /// Has `ILIKE`. Without it, `ilike` is rendered as
     /// `LOWER(x) LIKE LOWER(pattern)`.
@@ -22,6 +22,10 @@ pub const Dialect = struct {
     /// databases that reject a bare `OFFSET` (SQLite: `-1`). `null` when a
     /// bare `OFFSET` is valid.
     limit_all: ?[]const u8 = null,
+    /// Most bind parameters one statement may carry. `compileInsertMany`
+    /// splits its rows into as many statements as it takes to stay under
+    /// it. No default: a wrong guess fails only once a batch is big enough.
+    max_params: usize,
 
     pub const Placeholder = enum {
         /// `$1`, `$2`, ...: Postgres.
@@ -34,6 +38,8 @@ pub const Dialect = struct {
         .placeholder = .dollar_n,
         .returning = true,
         .ilike = true,
+        // The wire protocol counts parameters in an Int16 (read unsigned).
+        .max_params = 65535,
     };
 
     /// SQLite 3.35 or later (`RETURNING`; `NULLS FIRST` / `NULLS LAST`
@@ -44,5 +50,8 @@ pub const Dialect = struct {
         .returning = true,
         .ilike = false,
         .limit_all = "-1",
+        // SQLITE_MAX_VARIABLE_NUMBER since 3.32 (999 before), the compiled-in
+        // default; a build can lower it.
+        .max_params = 32766,
     };
 };

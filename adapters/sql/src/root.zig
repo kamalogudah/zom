@@ -1,5 +1,6 @@
 //! zom-sql = rom's `rom-sql`, minus the driver: compiles a relation's query
-//! into a parameterized statement for a `Dialect`. A gateway such as
+//! into a parameterized `SELECT`, and inserts, updates and deletes into
+//! `INSERT`, `UPDATE` and `DELETE`, for a `Dialect`. A gateway such as
 //! zom-pg pairs it with a driver: compile, bind `params`, decode rows.
 //!
 //!     const compiled = try zom_sql.compileRelation(.postgres, allocator, users.where(.age, .gte, 18));
@@ -17,9 +18,21 @@ pub const compileSelect = compile.compileSelect;
 pub const compileProjected = compile.compileProjected;
 pub const compileRelation = compile.compileRelation;
 pub const writeSelect = compile.writeSelect;
+pub const WriteError = compile.WriteError;
+pub const WriteRenderError = compile.WriteRenderError;
+pub const Batch = compile.Batch;
+pub const rowsPerStatement = compile.rowsPerStatement;
+pub const compileInsert = compile.compileInsert;
+pub const compileInsertMany = compile.compileInsertMany;
+pub const compileUpdate = compile.compileUpdate;
+pub const compileDelete = compile.compileDelete;
+pub const writeInsert = compile.writeInsert;
+pub const writeUpdate = compile.writeUpdate;
+pub const writeDelete = compile.writeDelete;
 pub const writeIdent = compile.writeIdent;
 
 test {
     _ = compile;
     _ = @import("compile_test.zig");
+    _ = @import("write_test.zig");
 }

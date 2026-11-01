@@ -282,6 +282,7 @@ const backtick: Dialect = .{
     .ilike = false,
     .nulls_order = false,
     .limit_all = "18446744073709551615",
+    .max_params = 65535,
 };
 
 test "a dialect's quote character, and nulls ordered without NULLS LAST" {

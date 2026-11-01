@@ -454,6 +454,12 @@ pub fn Query(comptime T: type) type {
         order_count: u8 = 0,
         limit: ?usize = null,
         offset: usize = 0,
+        /// Set to say an update or delete with no filters is meant to touch
+        /// every row. It changes nothing about which rows match; it only
+        /// lifts the safety check of compilers such as zom-sql, which
+        /// refuse an unfiltered `UPDATE` / `DELETE` (`error.UnboundedWrite`)
+        /// unless this is true. The memory adapter does not look at it.
+        all: bool = false,
 
         /// The filters of a query that has no `any` / `not` groups, which
         /// are then all AND-ed. An adapter that does not support `or` reads

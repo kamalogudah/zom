@@ -19,7 +19,7 @@ that each do one thing, and nothing is an "active record".
 | `command(:delete)`                         | `try users.where(...).delete()`                                |
 | `ROM::Mapper`, `map_with`, `map_to`        | `zom.Mapper(Tuple, Entity, .{ .renames = ... })`, `mapWith`, `mapTo` |
 | `users.combine(:posts)`                    | `zom.combineMany(.{ .into, .parent_key, .child_key }, ...)`    |
-| rom-sql (Sequel)                           | `zom_sql.compileRelation(.postgres, allocator, rel)` in [zom-sql](#zom-sql), a query-to-SQL compiler with no driver yet |
+| rom-sql (Sequel)                           | `zom_sql.compileRelation(.postgres, allocator, rel)` and `compileInsert` / `compileUpdate` / `compileDelete` in [zom-sql](#zom-sql), a SQL compiler with no driver yet |
 
 ## What Zig gives you for free
 
@@ -138,7 +138,7 @@ breaking change needs a minor version bump and an entry in
 | `zom.Capability` | `writable`, `batch_insert`, `updatable`, `deletable`, `transaction`. |
 | `zom.Capabilities` | A struct with one `bool` per `Capability`, all `false` by default. |
 | `zom.adapter` | The module behind `Adapter`, `Capability` and `Capabilities`. |
-| `zom.Query(T)` | The adapter-neutral query a relation builds: a filter tree, sort keys (`orders`, at most `max_orders = 4`, read through `orderSlice()`, most significant first), `limit: ?usize`, `offset: usize`. The tree is stored flat so a copy is a full copy: `filters` (at most `max_filters = 16`) and `nodes` (at most `max_nodes = 32`: filters plus `any` / `all` / `not` groups, which refer to children by index), AND-ed at the top level. An adapter without `or` support reads an AND-only query through `filterSlice()` (it asserts `isConjunction()`); one with it walks `nodeSlice()` from `topNodes()`. `matches(row)` and `truth(row) ?bool` evaluate the query in memory with SQL's three-valued logic, alongside `lessThan(orders, a, b)` (the comparator for `std.mem.sort(T, rows, query.orderSlice(), lessThan)`: key by key, the next key breaking ties), `orderBy(order, a, b)` (one key) and `fieldValue(row, field)`. Nested types: `Field` (enum of `T`'s fields), `Filter` (`field`, `op`, `operand`), `Node` (`filter`, `and_group`, `or_group`, `not`), `Children`, `Order`, `Change`. `max_in = 64` bounds one `in` list. The query also builds itself, with the same `where` / `whereIn` / `whereNotIn` / `whereAny` / `whereNot` / `order` / `reorder` as a relation (and `addOrder`), so adapters and tests can make one without a gateway. |
+| `zom.Query(T)` | The adapter-neutral query a relation builds: a filter tree, sort keys (`orders`, at most `max_orders = 4`, read through `orderSlice()`, most significant first), `limit: ?usize`, `offset: usize`, and `all: bool` (default false: set it to say an update or delete with no filters is meant to touch every row, which [zom-sql](#zom-sql) otherwise refuses; it changes nothing about which rows match). The tree is stored flat so a copy is a full copy: `filters` (at most `max_filters = 16`) and `nodes` (at most `max_nodes = 32`: filters plus `any` / `all` / `not` groups, which refer to children by index), AND-ed at the top level. An adapter without `or` support reads an AND-only query through `filterSlice()` (it asserts `isConjunction()`); one with it walks `nodeSlice()` from `topNodes()`. `matches(row)` and `truth(row) ?bool` evaluate the query in memory with SQL's three-valued logic, alongside `lessThan(orders, a, b)` (the comparator for `std.mem.sort(T, rows, query.orderSlice(), lessThan)`: key by key, the next key breaking ties), `orderBy(order, a, b)` (one key) and `fieldValue(row, field)`. Nested types: `Field` (enum of `T`'s fields), `Filter` (`field`, `op`, `operand`), `Node` (`filter`, `and_group`, `or_group`, `not`), `Children`, `Order`, `Change`. `max_in = 64` bounds one `in` list. The query also builds itself, with the same `where` / `whereIn` / `whereNotIn` / `whereAny` / `whereNot` / `order` / `reorder` as a relation (and `addOrder`), so adapters and tests can make one without a gateway. |
 | `zom.any(conds)`, `zom.all(conds)`, `zom.not(cond)` | Boolean groups to nest inside `whereAny` / `whereNot`. A condition is `.{ field, op, value }` or another group. |
 | `zom.Value` | The runtime value carried by filters and changes. See [Value](#value). |
 | `zom.Op` | Filter operators: `eq`, `neq`, `lt`, `lte`, `gt`, `gte`, `in`, `not_in`, `like`, `ilike`, `between`, `is_null`, `is_not_null`. `op.operand()` returns the `Operand` variant it takes. |
@@ -550,7 +550,8 @@ adapter never changes zom's package hash. Every adapter's tests should call
 ### zom-sql
 
 `adapters/sql` is the SQL half of rom-sql that needs no driver: it compiles a
-relation's query into a statement and its bind parameters, for a `Dialect`.
+relation's query into a `SELECT`, and inserts, updates and deletes into
+`INSERT`, `UPDATE` and `DELETE`, each with its bind parameters, for a `Dialect`.
 A gateway such as the planned zom-pg pairs it with a driver.
 
 ```zig
@@ -564,13 +565,32 @@ defer compiled.deinit(allocator);
 
 | Declaration | What it is |
 |---|---|
-| `Dialect` | `placeholder` (`.dollar_n` for `$1`, `.question` for `?`), `quote` (default `'"'`), `returning`, `ilike`, `nulls_order` (understands `NULLS LAST`, default true) and `limit_all` (what goes after `LIMIT` when there is only an offset; `null` when a bare `OFFSET` is valid). Presets: `Dialect.postgres` and `Dialect.sqlite`. Always a comptime argument, so each dialect gets its own compiler. |
+| `Dialect` | `placeholder` (`.dollar_n` for `$1`, `.question` for `?`), `quote` (default `'"'`), `returning`, `ilike`, `nulls_order` (understands `NULLS LAST`, default true) and `limit_all` (what goes after `LIMIT` when there is only an offset; `null` when a bare `OFFSET` is valid), and `max_params`, the most bind parameters one statement may carry (no default). `returning` adds `RETURNING *` to inserts. Presets: `Dialect.postgres` (65535 parameters) and `Dialect.sqlite` (32766, SQLite 3.32+). Always a comptime argument, so each dialect gets its own compiler. |
 | `compileRelation(dialect, allocator, relation) !Compiled` | The relation's schema name is the table and its `Output` (the tuple, or what `select` kept) the columns. |
 | `compileSelect(dialect, T, allocator, table, query) !Compiled` | Every field of `T`. |
 | `compileProjected(dialect, T, Out, allocator, table, query) !Compiled` | Only `Out`'s fields, e.g. `zom.Project(T, .{ .id })`. |
 | `Compiled` | `sql: []u8` and `params: []zom.Value`, one per placeholder, in order. Free with `deinit(allocator)`. String params borrow from the query. |
 | `writeSelect(dialect, T, Out, writer, *Params, table, *const query) RenderError!void` | Renders into any `*std.Io.Writer`; what the `compile*` functions use. |
 | `writeIdent(dialect, writer, name)` | Writes a quoted identifier, doubling any quote inside it. |
+| `compileInsert(dialect, T, allocator, table, row) !Compiled` | `INSERT INTO "t" ("a", "b") VALUES ($1, $2)`, every field of `T`, plus ` RETURNING *` when `dialect.returning`. |
+| `compileInsertMany(dialect, T, allocator, table, rows) !Batch` | Multi-row `VALUES (...), (...)`, split into as many statements as it takes to keep each under `dialect.max_params`: `rowsPerStatement(dialect, T)` rows each, `@divFloor(max_params, fields)` (a tuple too wide for one row is a compile error). Each statement numbers its placeholders from `$1`; run them in order, in a transaction if the batch must be all or nothing. No rows is no statements. |
+| `Batch` | `statements: []Compiled`, in row order. `deinit(allocator)` frees every statement and the slice. |
+| `compileUpdate(dialect, T, allocator, table, query, changes) WriteError!Compiled` | `UPDATE "t" SET "a" = $1 WHERE ...`, with `changes: []const Query(T).Change` (an `Update` changeset's `changes[0..change_count]`). Placeholders run on from `SET` into `WHERE`. A field set twice takes its last value, as in memory. |
+| `compileDelete(dialect, T, allocator, table, query) WriteError!Compiled` | `DELETE FROM "t" WHERE ...`. |
+| `writeInsert`, `writeUpdate`, `writeDelete` | The write statements rendered into any writer, like `writeSelect`. |
+
+String params borrow from what was passed in: the query for a `SELECT`, the
+tuples for an insert, the changes and the query for an update. Values go
+through `zom.query.toValue`: optional fields set to null bind `.null`, and
+enums bind their tag name.
+
+**Unfiltered writes are refused.** `compileUpdate` and `compileDelete` return
+`error.UnboundedWrite` for a query with no filters, so a forgotten `where`
+can't empty or rewrite a table. Set `query.all = true` to mean it. `order`,
+`limit` and `offset` don't count as filters, and the write statements ignore
+them, as the memory adapter does. An update with no changes is
+`error.EmptyUpdate`, since `SET` needs a column; nothing would change, and
+`update().commit()` already skips it.
 
 Every identifier is quoted. Every node of the query is rendered: `AND` / `OR`
 groups in parentheses, `NOT (...)`, `IN (...)`, `LIKE ... ESCAPE '\'`
@@ -603,6 +623,8 @@ against `null`. (`eq null` and `neq null` are `IS NULL` and `IS NOT NULL`.)
 | `error.ValueOutOfRange` | `update().set(...).commit()` with a runtime value that does not fit the attribute, e.g. a `u32` holding 300 set on a `u8`. |
 | `error.MoreThanOneTuple` | `one`. |
 | `error.DatasetTypeMismatch` | `memory.Gateway.dataset` (and so `Relation.init`), when two different schema types share a dataset name. |
+| `error.UnboundedWrite` | zom-sql's `compileUpdate` and `compileDelete`, for a query with no filters and `all` not set. |
+| `error.EmptyUpdate` | zom-sql's `compileUpdate`, with no changes. |
 | `error.UnsupportedFilter` | `update().commit()` and `delete()` on a `.fallback` relation with a filter its dataset can't evaluate. |
 | `error.OutOfMemory` | Anything that takes or uses an allocator. |
 

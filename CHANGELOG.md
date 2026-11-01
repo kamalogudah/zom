@@ -35,6 +35,18 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
   any `*std.Io.Writer`. SQLite gets `LIMIT -1` before a bare `OFFSET`.
   ([#35])
 
+- zom-sql compiles writes. `compileInsert` renders `INSERT INTO "t" (...)
+  VALUES (...)`, plus `RETURNING *` when the dialect has it.
+  `compileInsertMany` renders multi-row `VALUES (...), (...)` and returns a
+  `Batch` of statements, split so none carries more than the dialect's new
+  `max_params` (Postgres 65535, SQLite 32766) bind parameters.
+  `compileUpdate` renders `UPDATE "t" SET ... WHERE ...` with placeholders
+  numbered on from `SET` into `WHERE`, and `compileDelete` renders `DELETE
+  FROM "t" WHERE ...`. `writeInsert` / `writeUpdate` / `writeDelete` render
+  into any writer. As a safety rule, an `UPDATE` or `DELETE` with no filters
+  is `error.UnboundedWrite` unless the new `Query.all` is set; an update with
+  no changes is `error.EmptyUpdate`. ([#36])
+
 ### Fixed
 
 - `limit` and `offset` above the largest bigint are clamped to it in SQL;
@@ -400,3 +412,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#33]: https://github.com/kamalogudah/zom/issues/33
 [#34]: https://github.com/kamalogudah/zom/issues/34
 [#35]: https://github.com/kamalogudah/zom/issues/35
+[#36]: https://github.com/kamalogudah/zom/issues/36
