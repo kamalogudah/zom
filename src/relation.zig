@@ -64,6 +64,25 @@ pub fn Relation(comptime S: type, comptime Gateway: type) type {
             return next;
         }
 
+        /// AND `conds` OR-ed together, e.g.
+        /// `whereAny(.{ .{ .age, .gt, 30 }, .{ .role, .eq, .admin } })`.
+        /// Each condition is `.{ field, op, value }` as `where` takes it, or
+        /// a nested `zom.any`, `zom.all` or `zom.not`. See `Query.whereAny`.
+        pub fn whereAny(self: Self, conds: anytype) Self {
+            var next = self;
+            next.query = self.query.whereAny(conds);
+            return next;
+        }
+
+        /// AND NOT `cond`, e.g. `whereNot(.{ .age, .gt, 30 })`. Rows where
+        /// `cond` is unknown (a null attribute) match neither `cond` nor its
+        /// negation, as in SQL. See `Query.whereNot`.
+        pub fn whereNot(self: Self, cond: anytype) Self {
+            var next = self;
+            next.query = self.query.whereNot(cond);
+            return next;
+        }
+
         pub fn byPk(self: Self, value: anytype) Self {
             return self.where(S.primary_key, .eq, value);
         }

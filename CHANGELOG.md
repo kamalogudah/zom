@@ -9,6 +9,18 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- Boolean groups. `whereAny(.{ .{ .age, .gt, 30 }, .{ .role, .eq, .admin } })`
+  AND-s an OR group, `whereNot(cond)` a negation, and `zom.any`, `zom.all`
+  and `zom.not` nest inside either. Each condition is `.{ field, op, value }`,
+  type-checked like `where`. The filter tree is stored flat in the query
+  (`nodes`, at most `Query.max_nodes = 32`, indexing into `filters`), so
+  copying a relation copies the whole tree. `Query.matches` now uses SQL's
+  three-valued logic, exposed as `Query.truth(row) ?bool`: `NOT (age > 30)`
+  doesn't match a null age. `zom.sql.compileSelect` renders the groups with
+  parentheses. `zom.lint` checks them, and skips that check when
+  `supports.or` is false. A condition that can't fit an empty query is a
+  compile error, and running out of room at runtime panics, naming the
+  limit. ([#31])
 - Query ops `in`, `not_in`, `like`, `ilike`, `between`, `is_null` and
   `is_not_null`. `where(.id, .in, .{ 1, 2, 3 })` takes a tuple of
   comptime-known values (at most `Query.max_in = 64`, each type-checked),
@@ -296,3 +308,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#26]: https://github.com/kamalogudah/zom/issues/26
 [#27]: https://github.com/kamalogudah/zom/issues/27
 [#30]: https://github.com/kamalogudah/zom/issues/30
+[#31]: https://github.com/kamalogudah/zom/issues/31

@@ -41,6 +41,7 @@ const testing = std.testing;
 const adapter = @import("adapter.zig");
 const Schema = @import("schema.zig").Schema;
 const RelationOf = @import("relation.zig").Relation;
+const query = @import("query.zig");
 
 pub const Role = enum { a, b, c };
 
@@ -95,6 +96,7 @@ const checks = .{
     .{ Check{ .name = "filter: in / not_in, from a tuple and from a slice", .features = &.{"in"} }, checkIn },
     .{ Check{ .name = "filter: like / ilike", .features = &.{"like"} }, checkLike },
     .{ Check{ .name = "filter: between, inclusive" }, checkBetween },
+    .{ Check{ .name = "filter: or / not groups, with SQL's three-valued logic", .features = &.{"or"} }, checkBoolean },
     .{ Check{ .name = "order: on the primary key" }, checkOrderPk },
     .{ Check{ .name = "order: on other attributes, nulls last on asc", .features = &.{"order_on"} }, checkOrderOn },
     .{ Check{ .name = "limit" }, checkLimit },
@@ -460,6 +462,44 @@ fn checkBetween(comptime G: type, comptime F: type) !void {
     try expectIds(rel.where(.age, .between, .{ 17, 36 }), "age between 17 and 36 (nulls excluded)", .any, &.{ 1, 3, 6 });
     try expectIds(rel.where(.name, .between, .{ "b", "d" }), "name between \"b\" and \"d\"", .any, &.{ 4, 6 });
     try expectIds(rel.where(.role, .between, .{ .a, .b }), "role between .a and .b (declaration order)", .any, &.{ 1, 2, 4, 5 });
+}
+
+fn checkBoolean(comptime G: type, comptime F: type) !void {
+    var fx: Fixture(G, F) = undefined;
+    const rel = try fx.init();
+    defer fx.deinit();
+
+    const any = query.any;
+    const all = query.all;
+    const not = query.not;
+
+    try expectIds(rel.whereAny(.{ .{ .age, .gt, 40 }, .{ .role, .eq, .b } }), "age gt 40 or role eq .b", .any, &.{ 2, 4, 5 });
+    try expectIds(rel.whereAny(.{ .{ .age, .gt, 40 }, .{ .role, .eq, .b } }).where(.id, .neq, 5), "(age gt 40 or role eq .b) and id neq 5", .any, &.{ 2, 4 });
+    try expectIds(rel.whereAny(.{.{ .id, .eq, 3 }}), "any with one condition", .any, &.{3});
+    try expectIds(
+        rel.whereAny(.{ all(.{ .{ .role, .eq, .a }, .{ .age, .lt, 40 } }), .{ .id, .eq, 2 } }),
+        "(role eq .a and age lt 40) or id eq 2",
+        .any,
+        &.{ 1, 2 },
+    );
+
+    // NOT of an unknown is unknown, so a null age matches neither
+    // `age gt 30` nor its negation.
+    try expectIds(rel.whereNot(.{ .age, .gt, 30 }), "not age gt 30 (nulls excluded)", .any, &.{ 3, 6 });
+    try expectIds(rel.whereNot(.{ .age, .is_null, {} }), "not age is_null", .any, &.{ 1, 3, 4, 6 });
+    try expectIds(rel.whereNot(not(.{ .age, .gt, 30 })), "not not age gt 30", .any, &.{ 1, 4 });
+    // Unknown OR false is unknown (ids 2, 5); unknown OR true is true.
+    try expectIds(rel.whereNot(any(.{ .{ .age, .gt, 30 }, .{ .role, .eq, .a } })), "not (age gt 30 or role eq .a)", .any, &.{ 3, 6 });
+    try expectIds(rel.whereNot(any(.{ .{ .age, .gt, 30 }, .{ .role, .eq, .b } })), "not (age gt 30 or role eq .b)", .any, &.{ 3, 6 });
+    // Unknown AND false is false (id 2, 5 are role .b), so NOT is true.
+    try expectIds(rel.whereNot(all(.{ .{ .age, .gt, 30 }, .{ .role, .eq, .a } })), "not (age gt 30 and role eq .a)", .any, &.{ 2, 3, 5, 6 });
+
+    try expectIds(
+        rel.whereAny(.{ .{ .age, .gt, 40 }, .{ .role, .eq, .b } }).order(.id, .desc).limit(2),
+        "(age gt 40 or role eq .b), order id desc, limit 2",
+        .as_read,
+        &.{ 5, 4 },
+    );
 }
 
 fn checkOrderPk(comptime G: type, comptime F: type) !void {

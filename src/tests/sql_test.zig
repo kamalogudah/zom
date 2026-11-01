@@ -88,3 +88,28 @@ test "sql compiler renders is_null / is_not_null, and rejects ops that wait for 
     try testing.expectError(error.UnsupportedFilter, zom.sql.compileSelect(UserTuple, a, name, users.where(.name, .like, "A%").query));
     try testing.expectError(error.UnsupportedFilter, zom.sql.compileSelect(UserTuple, a, name, users.where(.age, .between, .{ 18, 30 }).query));
 }
+
+test "sql compiler renders any / all / not groups with parentheses" {
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
+    defer gw.deinit();
+    const users = try Users.init(&gw);
+
+    const rel = users.whereAny(.{ .{ .age, .gt, 30 }, .{ .role, .eq, .admin } })
+        .where(.deleted_at, .is_null, {})
+        .whereNot(.{ .name, .eq, "x" })
+        .whereNot(zom.any(.{ .{ .id, .eq, 1 }, zom.all(.{ .{ .id, .gt, 5 }, .{ .id, .lt, 9 } }) }));
+    const compiled = try zom.sql.compileSelect(UserTuple, testing.allocator, Users.schema.name, rel.query);
+    defer compiled.deinit(testing.allocator);
+    try testing.expectEqualStrings(
+        "SELECT \"id\", \"name\", \"email\", \"age\", \"role\", \"deleted_at\" FROM \"users\" WHERE " ++
+            "(\"age\" > $1 OR \"role\" = $2) AND \"deleted_at\" IS NULL AND NOT (\"name\" = $3) AND " ++
+            "NOT (\"id\" = $4 OR (\"id\" > $5 AND \"id\" < $6))",
+        compiled.sql,
+    );
+    try testing.expectEqual(@as(usize, 6), compiled.params.len);
+    try testing.expectEqual(@as(i64, 30), compiled.params[0].int);
+    try testing.expectEqualStrings("x", compiled.params[2].string);
+    try testing.expectEqual(@as(i64, 9), compiled.params[5].int);
+
+    try testing.expectError(error.UnsupportedFilter, zom.sql.compileSelect(UserTuple, testing.allocator, Users.schema.name, users.whereNot(.{ .id, .in, .{1} }).query));
+}

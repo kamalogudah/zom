@@ -223,3 +223,124 @@ test "every op has an operand shape and a SQL spelling" {
         _ = op.operand();
     }
 }
+
+test "whereAny ORs its conditions, and ANDs the group with the rest" {
+    const q: Q = .{};
+    // age > 30 OR role = guest: Achieng (31), Wanjiru and 50% Kim (guests).
+    const any = q.whereAny(.{ .{ .age, .gt, 30 }, .{ .role, .eq, .guest } });
+    try expectIds(any, &.{ 1, 3, 5 });
+    try expectIds(any.where(.age, .is_not_null, {}), &.{ 1, 5 });
+    try expectIds(q.where(.id, .gt, 1).whereAny(.{ .{ .name, .like, "A%" }, .{ .id, .eq, 4 } }), &.{4});
+
+    // Nesting: (role = admin) OR (role = member AND age < 20).
+    try expectIds(q.whereAny(.{
+        .{ .role, .eq, .admin },
+        zom.all(.{ .{ .role, .eq, .member }, .{ .age, .lt, 20 } }),
+    }), &.{ 1, 4 });
+
+    // A runtime value, and a runtime slice for `in`, work inside a group.
+    var min: u8 = 30;
+    _ = &min;
+    const keys = [_]u32{ 2, 4 };
+    try expectIds(q.whereAny(.{ .{ .age, .gt, min }, .{ .id, .in, @as([]const u32, &keys) } }), &.{ 1, 2, 4 });
+    try expectIds(q.whereAny(.{ .{ .age, .gte, min }, .{ .id, .in, .{3} } }), &.{ 1, 3, 5 });
+}
+
+test "NOT follows SQL's three-valued logic: NOT (NULL > 30) is not true" {
+    const q: Q = .{};
+    // Wanjiru's age is null: age > 30 is unknown for her, and so is its
+    // negation, so she matches neither.
+    try expectIds(q.where(.age, .gt, 30), &.{1});
+    try expectIds(q.whereNot(.{ .age, .gt, 30 }), &.{ 2, 4, 5 });
+    const wanjiru = rows[2];
+    try testing.expectEqual(@as(?bool, null), q.whereNot(.{ .age, .gt, 30 }).truth(wanjiru));
+    // NOT of something that is never unknown is plain negation.
+    try expectIds(q.whereNot(.{ .age, .is_null, {} }), &.{ 1, 2, 4, 5 });
+    // Double negation gives the original back, unknowns still excluded.
+    try expectIds(q.whereNot(zom.not(.{ .age, .gt, 30 })), &.{1});
+
+    // Unknown OR true is true; unknown OR false stays unknown.
+    try expectIds(q.whereNot(zom.any(.{ .{ .age, .gt, 30 }, .{ .role, .eq, .guest } })), &.{ 2, 4 });
+    try expectIds(q.whereNot(zom.any(.{ .{ .age, .gt, 30 }, .{ .role, .eq, .admin } })), &.{ 2, 4, 5 });
+    // Unknown AND false is false, so its negation is true.
+    try expectIds(q.whereNot(zom.all(.{ .{ .age, .gt, 30 }, .{ .role, .eq, .admin } })), &.{ 2, 3, 4, 5 });
+}
+
+test "NOT of in, not_in and between with nulls in the operand" {
+    const q: Q = .{};
+    // age IN (24, NULL): true for 24, unknown for every other age.
+    try expectIds(q.whereNot(.{ .age, .in, .{ 24, null } }), &.{});
+    // age NOT IN (24, NULL): false for 24, unknown otherwise. Its NOT is
+    // true for 24 only.
+    try expectIds(q.whereNot(.{ .age, .not_in, .{ 24, null } }), &.{2});
+    // age BETWEEN NULL AND 25 = age >= NULL AND age <= 25: false above 25,
+    // unknown at or below, so its NOT is true above 25 only.
+    try expectIds(q.whereNot(.{ .age, .between, .{ null, 25 } }), &.{ 1, 5 });
+    try expectIds(q.whereNot(.{ .id, .in, .{} }), &.{ 1, 2, 3, 4, 5 });
+}
+
+test "three-valued AND / OR / NOT tables" {
+    const and3 = zom.query.and3;
+    const or3 = zom.query.or3;
+    const not3 = zom.query.not3;
+    const values = [_]?bool{ true, false, null };
+    // Rows: a; columns: b. In SQL order TRUE, FALSE, UNKNOWN.
+    const and_table = [3][3]?bool{ .{ true, false, null }, .{ false, false, false }, .{ null, false, null } };
+    const or_table = [3][3]?bool{ .{ true, true, true }, .{ true, false, null }, .{ true, null, null } };
+    for (values, 0..) |a, i| for (values, 0..) |b, j| {
+        try testing.expectEqual(and_table[i][j], and3(a, b));
+        try testing.expectEqual(or_table[i][j], or3(a, b));
+    };
+    try testing.expectEqual(@as(?bool, false), not3(true));
+    try testing.expectEqual(@as(?bool, true), not3(false));
+    try testing.expectEqual(@as(?bool, null), not3(null));
+}
+
+test "the filter tree is flat: groups index their children, filters stay in filters" {
+    const q: Q = .{};
+    const tree = q.where(.id, .gt, 0).whereNot(zom.any(.{ .{ .age, .gt, 30 }, zom.all(.{ .{ .role, .eq, .guest }, .{ .id, .eq, 3 } }) }));
+    try testing.expect(!tree.isConjunction());
+    try testing.expectEqual(@as(usize, 4), tree.filter_count);
+    // 0: id > 0, 1: NOT 2, 2: OR 3..4, 3: age > 30, 4: AND 5..6, 5, 6: filters.
+    try testing.expectEqual(@as(u8, 7), tree.node_count);
+    const nodes = tree.nodeSlice();
+    try testing.expectEqual(@as(u8, 2), nodes[1].not);
+    try testing.expectEqual(Q.Children{ .first = 3, .len = 2 }, nodes[2].or_group);
+    try testing.expectEqual(Q.Children{ .first = 5, .len = 2 }, nodes[4].and_group);
+    var top = tree.topNodes();
+    try testing.expectEqual(@as(?usize, 0), top.next());
+    try testing.expectEqual(@as(?usize, 1), top.next());
+    try testing.expectEqual(@as(?usize, null), top.next());
+    // id > 0 AND NOT (age > 30 OR (guest AND id = 3)): Wanjiru (3) is out
+    // by the AND; Achieng by age; 50% Kim is a guest but not id 3.
+    try expectIds(tree, &.{ 2, 4, 5 });
+
+    // A query with only `where` stays a conjunction, for filterSlice.
+    const flat = q.where(.id, .gt, 0).where(.age, .lt, 30);
+    try testing.expect(flat.isConjunction());
+    try testing.expectEqual(@as(usize, 2), flat.filterSlice().len);
+}
+
+test "copying a query copies the tree" {
+    const q: Q = .{};
+    const a = q.whereAny(.{ .{ .age, .gt, 30 }, .{ .role, .eq, .guest } });
+    var b = a;
+    // Rewrite the copy's OR group in place: a points at none of it.
+    const children = b.nodes[0].or_group;
+    b.nodes[0] = .{ .and_group = children };
+    b.filters[0].operand = .{ .one = .{ .int = 0 } };
+    // age > 0 AND role = guest: Wanjiru's null age is out.
+    try expectIds(b, &.{5});
+    try expectIds(a, &.{ 1, 3, 5 });
+    // Chaining from the copy leaves the original alone too.
+    try expectIds(a.where(.id, .neq, 1), &.{ 3, 5 });
+    try expectIds(a, &.{ 1, 3, 5 });
+}
+
+test "a query fills up to max_filters through groups" {
+    var q: Q = .{};
+    for (0..Q.max_filters / 2) |_| q = q.whereAny(.{ .{ .id, .eq, 1 }, .{ .id, .eq, 2 } });
+    try testing.expectEqual(@as(usize, Q.max_filters), q.filter_count);
+    try testing.expectEqual(@as(u8, Q.max_filters / 2 * 3), q.node_count);
+    try expectIds(q, &.{ 1, 2 });
+}
