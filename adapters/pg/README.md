@@ -241,8 +241,17 @@ ZOM_PG_URL=postgres://postgres@127.0.0.1:5432/zom_test zig build test
 ```
 
 Every check drops and recreates a `lint_users` table, the transaction
-and error tests a `tx_items` table, and the `verify` tests a `vf_users`
-table and a `vf_role` type, so use a database you can spare those
+and error tests a `tx_items` table, the `verify` tests a `vf_users`
+table and a `vf_role` type, and the shared scenario a `sc_books` table, so use a database you can spare those
 tables in. Without `ZOM_PG_URL`, `zig build test` (here, or
 `zig build test-adapters` at the root) only checks that zom-pg compiles and
 satisfies the adapter contract.
+
+`src/scenario_test.zig` writes one sequence of relation calls (create,
+filter, page, project, update, delete) as `scenario(comptime G: type, gw: *G)`
+and runs it on `zom.memory.Gateway` and on `zom_pg.Gateway`, so code written
+against zom runs unchanged on both. The memory run needs no database.
+
+CI (`.github/workflows/ci.yml`) runs this package's tests against a
+Postgres service container with `ZOM_PG_URL` set, and fails if any test is
+skipped.

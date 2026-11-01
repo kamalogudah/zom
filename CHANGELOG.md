@@ -45,6 +45,13 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
   `zom_pg.Diagnostics`, or logs them when that is null, and returns
   `error.SchemaMismatch`. ([#39])
 
+- CI (`.github/workflows/ci.yml`): `zig fmt --check`, then `zig build test`
+  for the core and every adapter and example, then zom-pg's tests against a
+  Postgres 17 service container, failing if any of them is skipped. A
+  shared scenario (`adapters/pg/src/scenario_test.zig`) runs the same
+  relation code, written once as `scenario(comptime G: type, gw: *G)`, on
+  the memory gateway and on zom-pg. ([#40])
+
 - Caller-owned strings. A dataset can declare `pub const strings:
   zom.StringOwnership = .caller`: the strings it returns are allocated with
   the allocator passed to `read` / `readProjected` / `insert`, which then
@@ -466,3 +473,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#37]: https://github.com/kamalogudah/zom/issues/37
 [#38]: https://github.com/kamalogudah/zom/issues/38
 [#39]: https://github.com/kamalogudah/zom/issues/39
+[#40]: https://github.com/kamalogudah/zom/issues/40

@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: zom_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d zom_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: 0.16.0
+          # Cached below instead: the adapters and examples are separate
+          # builds, each with its own .zig-cache.
+          use-cache: false
+
+      - name: Cache Zig
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/zig
+            .zig-cache
+            adapters/*/.zig-cache
+            examples/*/.zig-cache
+          key: zig-0.16.0-${{ runner.os }}-${{ hashFiles('**/build.zig.zon') }}-${{ github.sha }}
+          restore-keys: |
+            zig-0.16.0-${{ runner.os }}-${{ hashFiles('**/build.zig.zon') }}-
+            zig-0.16.0-${{ runner.os }}-
+
+      # The vendored packages under zig-pkg are not ours to format.
+      - name: zig fmt --check
+        run: zig fmt --check --exclude adapters/pg/zig-pkg .
+
+      # Core, compile-error cases, every adapter and the examples. ZOM_PG_URL
+      # is unset here, so zom-pg only compiles and checks its contract; its
+      # database tests run in the next step.
+      - name: zig build test
+        run: zig build test --summary all
+
+      - name: zig build test (adapters/pg, against Postgres)
+        working-directory: adapters/pg
+        env:
+          ZOM_PG_URL: postgres://postgres:postgres@127.0.0.1:5432/zom_test
+        # A database test that can't see ZOM_PG_URL is skipped, not failed;
+        # here, a skip means the suite didn't run, so fail on it.
+        run: |
+          zig build test --summary all 2>&1 | tee "$RUNNER_TEMP/pg-test.log"
+          if grep -q 'skip' "$RUNNER_TEMP/pg-test.log"; then
+            echo "::error::zom-pg tests were skipped; is ZOM_PG_URL reaching them?"
+            exit 1
+          fi
