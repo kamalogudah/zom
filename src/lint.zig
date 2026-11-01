@@ -98,7 +98,7 @@ const checks = .{
     .{ Check{ .name = "filter: between, inclusive" }, checkBetween },
     .{ Check{ .name = "filter: or / not groups, with SQL's three-valued logic", .features = &.{"or"} }, checkBoolean },
     .{ Check{ .name = "order: on the primary key" }, checkOrderPk },
-    .{ Check{ .name = "order: on other attributes, nulls last on asc", .features = &.{"order_on"} }, checkOrderOn },
+    .{ Check{ .name = "order: on other attributes and on several, nulls last on asc", .features = &.{"order_on"} }, checkOrderOn },
     .{ Check{ .name = "limit" }, checkLimit },
     .{ Check{ .name = "offset", .features = &.{"offset"} }, checkOffset },
     .{ Check{ .name = "one: null, one tuple, or error.MoreThanOneTuple" }, checkOne },
@@ -521,6 +521,14 @@ fn checkOrderOn(comptime G: type, comptime F: type) !void {
     try expectIds(rel.order(.name, .desc), "order name desc", .as_read, &.{ 3, 5, 1, 6, 4, 2 });
     try expectAges(rel.order(.age, .asc), "order age asc (nulls last)", &.{ 17, 25, 36, 52, null, null });
     try expectAges(rel.order(.age, .desc), "order age desc (nulls first)", &.{ null, null, 52, 36, 25, 17 });
+
+    // Several keys: each breaks the ties left by the ones before it, with
+    // nulls in the first key (ids 2, 5) and ties on it (role).
+    try expectIds(rel.order(.role, .asc).order(.age, .asc), "order role asc, age asc", .as_read, &.{ 1, 4, 2, 5, 3, 6 });
+    try expectIds(rel.order(.role, .desc).order(.age, .desc).order(.id, .desc), "order role desc, age desc, id desc", .as_read, &.{ 6, 3, 5, 2, 4, 1 });
+    try expectIds(rel.order(.age, .asc).order(.id, .desc), "order age asc, id desc (nulls last)", .as_read, &.{ 3, 6, 1, 4, 5, 2 });
+    try expectIds(rel.order(.age, .desc).order(.id, .asc), "order age desc, id asc (nulls first)", .as_read, &.{ 2, 5, 4, 1, 6, 3 });
+    try expectIds(rel.order(.id, .desc).reorder(.{ .{ .role, .asc }, .{ .name, .desc } }), "reorder role asc, name desc", .as_read, &.{ 1, 4, 5, 2, 3, 6 });
 }
 
 fn checkLimit(comptime G: type, comptime F: type) !void {

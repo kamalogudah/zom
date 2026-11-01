@@ -87,9 +87,20 @@ pub fn Relation(comptime S: type, comptime Gateway: type) type {
             return self.where(S.primary_key, .eq, value);
         }
 
+        /// Adds a sort key after the ones already set: `.order(.a, .asc)
+        /// .order(.b, .desc)` is `ORDER BY a ASC, b DESC`. At most
+        /// `Query.max_orders` keys; past that, panics.
         pub fn order(self: Self, comptime field: Field, direction: q.Direction) Self {
             var next = self;
-            next.query.order = .{ .field = field, .direction = direction };
+            next.query = self.query.order(field, direction);
+            return next;
+        }
+
+        /// Replaces every sort key: `reorder(.{ .{ .role, .asc }, .{ .age,
+        /// .desc } })`, or `reorder(.{})` for none. See `Query.reorder`.
+        pub fn reorder(self: Self, keys: anytype) Self {
+            var next = self;
+            next.query = self.query.reorder(keys);
             return next;
         }
 

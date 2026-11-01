@@ -46,7 +46,7 @@ test "sql compiler quotes reserved words and mixed case" {
     const Row = struct { id: u32, order: u32, createdAt: i64 };
     var query: zom.Query(Row) = .{};
     query.addFilter(.{ .field = .order, .op = .eq, .operand = .{ .one = .{ .int = 1 } } });
-    query.order = .{ .field = .createdAt, .direction = .asc };
+    query.addOrder(.{ .field = .createdAt, .direction = .asc });
     const compiled = try zom.sql.compileSelect(Row, testing.allocator, "user", query);
     defer compiled.deinit(testing.allocator);
 
@@ -112,4 +112,21 @@ test "sql compiler renders any / all / not groups with parentheses" {
     try testing.expectEqual(@as(i64, 9), compiled.params[5].int);
 
     try testing.expectError(error.UnsupportedFilter, zom.sql.compileSelect(UserTuple, testing.allocator, Users.schema.name, users.whereNot(.{ .id, .in, .{1} }).query));
+}
+
+test "sql compiler renders several sort keys in order" {
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
+    defer gw.deinit();
+    const users = try Users.init(&gw);
+
+    const compiled = try zom.sql.compileSelect(UserTuple, testing.allocator, Users.schema.name, users.order(.role, .asc).order(.age, .desc).order(.id, .asc).query);
+    defer compiled.deinit(testing.allocator);
+    try testing.expectEqualStrings(
+        "SELECT \"id\", \"name\", \"email\", \"age\", \"role\", \"deleted_at\" FROM \"users\" ORDER BY \"role\" ASC, \"age\" DESC, \"id\" ASC",
+        compiled.sql,
+    );
+
+    const none = try zom.sql.compileSelect(UserTuple, testing.allocator, Users.schema.name, users.order(.id, .asc).reorder(.{}).query);
+    defer none.deinit(testing.allocator);
+    try testing.expectEqualStrings("SELECT \"id\", \"name\", \"email\", \"age\", \"role\", \"deleted_at\" FROM \"users\"", none.sql);
 }

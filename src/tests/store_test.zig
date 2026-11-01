@@ -30,7 +30,7 @@ test "insert, read, count, update and delete without a gateway" {
 
     var query: Q = .{};
     query.addFilter(.{ .field = .age, .op = .gt, .operand = .{ .one = .{ .int = 20 } } });
-    query.order = .{ .field = .age, .direction = .desc };
+    query.addOrder(.{ .field = .age, .direction = .desc });
     const hits = try store.read(query, testing.allocator);
     defer testing.allocator.free(hits);
     try testing.expectEqual(@as(usize, 3), hits.len);
@@ -120,4 +120,72 @@ fn loadUnderAllocationFailure(allocator: std.mem.Allocator) !void {
 
 test "a load that runs out of memory stores nothing" {
     try testing.checkAllAllocationFailures(testing.allocator, loadUnderAllocationFailure, .{});
+}
+
+// Sort keys `a` then `b`, with ties on `a` (including on null) broken by
+// `b`, nulls on either side, and rows 1 and 8 equal on both keys.
+const Pair = struct { id: u32, a: ?u8, b: ?u8 };
+const PairStore = zom.memory.Store(zom.Schema(Pair, "pairs", .id));
+const PairQ = zom.Query(Pair);
+const pairs = [_]Pair{
+    .{ .id = 1, .a = 1, .b = null },
+    .{ .id = 2, .a = 1, .b = 5 },
+    .{ .id = 3, .a = null, .b = 2 },
+    .{ .id = 4, .a = 1, .b = 3 },
+    .{ .id = 5, .a = null, .b = null },
+    .{ .id = 6, .a = 2, .b = 3 },
+    .{ .id = 7, .a = null, .b = 1 },
+    .{ .id = 8, .a = 1, .b = null },
+};
+
+fn expectPairIds(store: *PairStore, query: PairQ, want: []const u32) !void {
+    const rows = try store.read(query, testing.allocator);
+    defer testing.allocator.free(rows);
+    var ids: [pairs.len]u32 = undefined;
+    for (rows, ids[0..rows.len]) |row, *id| id.* = row.id;
+    try testing.expectEqualSlices(u32, want, ids[0..rows.len]);
+}
+
+test "read orders by several keys, the next one breaking ties, nulls last on asc" {
+    var store = PairStore.init(testing.allocator);
+    defer store.deinit();
+    _ = try store.insertMany(&pairs);
+    const q: PairQ = .{};
+
+    // Nulls sort above every value: last on asc, first on desc, in either
+    // key. Rows 1 and 8 tie on both keys and keep insertion order.
+    try expectPairIds(&store, q.order(.a, .asc).order(.b, .asc), &.{ 4, 2, 1, 8, 6, 7, 3, 5 });
+    try expectPairIds(&store, q.order(.a, .asc).order(.b, .desc), &.{ 1, 8, 2, 4, 6, 5, 3, 7 });
+    try expectPairIds(&store, q.order(.a, .desc).order(.b, .asc), &.{ 7, 3, 5, 6, 4, 2, 1, 8 });
+    try expectPairIds(&store, q.order(.a, .desc).order(.b, .desc), &.{ 5, 3, 7, 6, 1, 8, 2, 4 });
+    // One key: ties keep insertion order (std.mem.sort is stable).
+    try expectPairIds(&store, q.order(.a, .asc), &.{ 1, 2, 4, 8, 6, 3, 5, 7 });
+    // A third key orders rows 1 and 8.
+    try expectPairIds(&store, q.order(.a, .asc).order(.b, .asc).order(.id, .desc), &.{ 4, 2, 8, 1, 6, 7, 3, 5 });
+    // No order: insertion order.
+    try expectPairIds(&store, q, &.{ 1, 2, 3, 4, 5, 6, 7, 8 });
+}
+
+test "reorder replaces every sort key; order appends up to max_orders" {
+    var store = PairStore.init(testing.allocator);
+    defer store.deinit();
+    _ = try store.insertMany(&pairs);
+    const q: PairQ = .{};
+
+    const by_id = q.order(.id, .desc);
+    const re = by_id.reorder(.{ .{ .a, .desc }, .{ .b, .desc } });
+    try testing.expectEqual(@as(usize, 2), re.orderSlice().len);
+    try expectPairIds(&store, re, &.{ 5, 3, 7, 6, 1, 8, 2, 4 });
+    // A runtime direction works.
+    var dir: zom.Direction = .asc;
+    _ = &dir;
+    var by_b = by_id.reorder(.{.{ .b, dir }});
+    by_b.limit = 3;
+    try expectPairIds(&store, by_b, &.{ 7, 3, 4 });
+    try expectPairIds(&store, by_id.reorder(.{}), &.{ 1, 2, 3, 4, 5, 6, 7, 8 });
+    // The original is a value: reorder did not touch it.
+    try testing.expectEqual(@as(usize, 1), by_id.orderSlice().len);
+
+    const full = q.order(.a, .asc).order(.b, .asc).order(.id, .asc).order(.a, .desc);
+    try testing.expectEqual(@as(usize, PairQ.max_orders), full.orderSlice().len);
 }

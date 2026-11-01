@@ -137,7 +137,7 @@ breaking change needs a minor version bump and an entry in
 | `zom.Capability` | `writable`, `batch_insert`, `updatable`, `deletable`, `transaction`. |
 | `zom.Capabilities` | A struct with one `bool` per `Capability`, all `false` by default. |
 | `zom.adapter` | The module behind `Adapter`, `Capability` and `Capabilities`. |
-| `zom.Query(T)` | The adapter-neutral query a relation builds: a filter tree, `order: ?Order`, `limit: ?usize`, `offset: usize`. The tree is stored flat so a copy is a full copy: `filters` (at most `max_filters = 16`) and `nodes` (at most `max_nodes = 32`: filters plus `any` / `all` / `not` groups, which refer to children by index), AND-ed at the top level. An adapter without `or` support reads an AND-only query through `filterSlice()` (it asserts `isConjunction()`); one with it walks `nodeSlice()` from `topNodes()`. `matches(row)` and `truth(row) ?bool` evaluate the query in memory with SQL's three-valued logic, alongside `lessThan(order, a, b)` and `fieldValue(row, field)`. Nested types: `Field` (enum of `T`'s fields), `Filter` (`field`, `op`, `operand`), `Node` (`filter`, `and_group`, `or_group`, `not`), `Children`, `Order`, `Change`. `max_in = 64` bounds one `in` list. The query also builds itself, with the same `where` / `whereIn` / `whereNotIn` / `whereAny` / `whereNot` as a relation, so adapters and tests can make one without a gateway. |
+| `zom.Query(T)` | The adapter-neutral query a relation builds: a filter tree, sort keys (`orders`, at most `max_orders = 4`, read through `orderSlice()`, most significant first), `limit: ?usize`, `offset: usize`. The tree is stored flat so a copy is a full copy: `filters` (at most `max_filters = 16`) and `nodes` (at most `max_nodes = 32`: filters plus `any` / `all` / `not` groups, which refer to children by index), AND-ed at the top level. An adapter without `or` support reads an AND-only query through `filterSlice()` (it asserts `isConjunction()`); one with it walks `nodeSlice()` from `topNodes()`. `matches(row)` and `truth(row) ?bool` evaluate the query in memory with SQL's three-valued logic, alongside `lessThan(orders, a, b)` (the comparator for `std.mem.sort(T, rows, query.orderSlice(), lessThan)`: key by key, the next key breaking ties), `orderBy(order, a, b)` (one key) and `fieldValue(row, field)`. Nested types: `Field` (enum of `T`'s fields), `Filter` (`field`, `op`, `operand`), `Node` (`filter`, `and_group`, `or_group`, `not`), `Children`, `Order`, `Change`. `max_in = 64` bounds one `in` list. The query also builds itself, with the same `where` / `whereIn` / `whereNotIn` / `whereAny` / `whereNot` / `order` / `reorder` as a relation (and `addOrder`), so adapters and tests can make one without a gateway. |
 | `zom.any(conds)`, `zom.all(conds)`, `zom.not(cond)` | Boolean groups to nest inside `whereAny` / `whereNot`. A condition is `.{ field, op, value }` or another group. |
 | `zom.Value` | The runtime value carried by filters and changes. See [Value](#value). |
 | `zom.Op` | Filter operators: `eq`, `neq`, `lt`, `lte`, `gt`, `gte`, `in`, `not_in`, `like`, `ilike`, `between`, `is_null`, `is_not_null`. `op.sql()` returns the SQL spelling, `op.operand()` the `Operand` variant it takes. |
@@ -168,7 +168,8 @@ relation and never touch the dataset. `field` is always an enum literal, and
 | `whereAny(.{ cond, ... })` | `Relation` | AND-s the conditions OR-ed together: `whereAny(.{ .{ .age, .gt, 30 }, .{ .role, .eq, .admin } })`. A condition is `.{ field, op, value }`, checked like `where` (a runtime slice works for `in`), or a nested `zom.any`, `zom.all` or `zom.not`. A condition too big for `max_filters` / `max_nodes` is a compile error; running out of room at runtime panics. |
 | `whereNot(cond)` | `Relation` | AND-s NOT `cond`. SQL's three-valued logic: where `cond` is unknown (`NULL > 30`), so is its negation, and the row matches neither. |
 | `byPk(value)` | `Relation` | `where(primary_key, .eq, value)`. |
-| `order(field, direction)` | `Relation` | One order; a second call replaces it. |
+| `order(field, direction)` | `Relation` | Adds a sort key after those already set: `.order(.role, .asc).order(.age, .desc)` is `ORDER BY role ASC, age DESC`. At most `Query.max_orders = 4` keys; a fifth panics. |
+| `reorder(.{ .{ field, direction }, ... })` | `Relation` | Replaces every sort key; `reorder(.{})` removes the order. More than `max_orders` keys is a compile error. |
 | `limit(n)`, `offset(n)` | `Relation` | `n: usize`. |
 | `toSlice(allocator)` | `![]Tuple` | Caller frees. |
 | `one(allocator)` | `!?Tuple` | `null` when empty, `error.MoreThanOneTuple` when ambiguous. |
@@ -396,7 +397,7 @@ over `zom.lint.Users`). It reads them back, filters with every `Op` on
 integer, nullable, string and enum attributes (`in`/`not_in` only when the
 dataset's `supports.in` is set, `like`/`ilike` only with `supports.like`),
 checks `null` semantics,
-ordering (nulls last on `.asc`, first on `.desc`), `limit` and `offset` edge
+ordering on one key and on several (nulls last on `.asc`, first on `.desc`), `limit` and `offset` edge
 cases, and `one`; every case also checks that `count` equals the rows read.
 The write checks cover `insert` (returns the stored tuple, a duplicate key
 fails with `error.DuplicatePrimaryKey`), `createMany` (the count, both kinds
@@ -517,6 +518,11 @@ bump and a changelog entry:
   row before storing any, so a duplicate key or running out of memory stores
   none of them.
 - `order` sorts nulls the way Postgres does: last on `.asc`, first on `.desc`.
+  With several keys, each later key only orders rows tied on the earlier ones.
+  The memory adapter sorts with `std.mem.sort`, which is stable, so rows equal
+  on every key (or every row, with no order) keep their insertion order. Other
+  adapters need not: as in SQL, add a unique key such as the primary key last
+  when the order of ties matters.
 - `count` and `delete` return `!usize` like every other dataset call, because
   real adapters do I/O for them. The memory adapter never fails, but callers
   still write `try users.count()`.
