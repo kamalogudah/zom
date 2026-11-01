@@ -13,6 +13,13 @@ pub const ReadOnlyGateway = Gateway("readonly", ReadOnlyDataset);
 pub const AppendOnlyGateway = Gateway("appendonly", AppendOnlyDataset);
 /// `read`, `count`, `update` and `delete`, but no `insert` or `insertMany`.
 pub const NoInsertGateway = Gateway("noinsert", NoInsertDataset);
+/// Reads, with limited query support: `in` but not `like` or `or`, no
+/// `offset`, ordering by the key only, and filters on `id` only.
+pub const LimitedGateway = Gateway("limited", LimitedDataset);
+/// Reads, supporting boolean groups but not `in`.
+pub const OrOnlyGateway = Gateway("oronly", OrOnlyDataset);
+/// `filterable` with the wrong signature.
+pub const BadFilterableGateway = Gateway("badfilterable", BadFilterableDataset);
 
 fn Gateway(comptime name: []const u8, comptime DatasetFn: fn (comptime type) type) type {
     return struct {
@@ -77,6 +84,53 @@ fn NoInsertDataset(comptime S: type) type {
             return 0;
         }
         pub fn delete(_: *@This(), _: Q) !usize {
+            return 0;
+        }
+    };
+}
+
+fn LimitedDataset(comptime S: type) type {
+    const Q = zom.Query(S.Tuple);
+    return struct {
+        pub const supports: zom.Supports = .{ .in = true, .order_on = false, .offset = false };
+
+        pub fn filterable(comptime field: []const u8, comptime op: zom.Op) bool {
+            _ = op;
+            return std.mem.eql(u8, field, "id");
+        }
+        pub fn read(_: *@This(), _: Q, a: std.mem.Allocator) ![]S.Tuple {
+            return a.alloc(S.Tuple, 0);
+        }
+        pub fn count(_: *@This(), _: Q) !usize {
+            return 0;
+        }
+    };
+}
+
+fn BadFilterableDataset(comptime S: type) type {
+    const Q = zom.Query(S.Tuple);
+    return struct {
+        pub fn filterable(field: []const u8) bool {
+            return field.len > 0;
+        }
+        pub fn read(_: *@This(), _: Q, a: std.mem.Allocator) ![]S.Tuple {
+            return a.alloc(S.Tuple, 0);
+        }
+        pub fn count(_: *@This(), _: Q) !usize {
+            return 0;
+        }
+    };
+}
+
+fn OrOnlyDataset(comptime S: type) type {
+    const Q = zom.Query(S.Tuple);
+    return struct {
+        pub const supports: zom.Supports = .{ .@"or" = true };
+
+        pub fn read(_: *@This(), _: Q, a: std.mem.Allocator) ![]S.Tuple {
+            return a.alloc(S.Tuple, 0);
+        }
+        pub fn count(_: *@This(), _: Q) !usize {
             return 0;
         }
     };

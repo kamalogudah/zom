@@ -121,6 +121,10 @@ Fallback rules:
   back short. `count` follows the same rule. The lint suite checks this.
 - Fallback is a relation-level feature, so it doesn't change the adapter
   contract. It ships in Phase 3 as its own ticket, after strict mode.
+- Writes never fall back: `update` and `delete` on a fallback relation
+  return `error.UnsupportedFilter` when the dataset can't evaluate every
+  filter. (Built in #34, with the optional `filterable(field, op)` hook on
+  datasets for per-attribute support.)
 
 **Errors.** The contract uses inferred error sets (`!T`), so each adapter's
 errors flow through. The core defines the shared names every adapter must use

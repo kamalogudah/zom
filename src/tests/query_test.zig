@@ -344,3 +344,35 @@ test "a query fills up to max_filters through groups" {
     try testing.expectEqual(@as(u8, Q.max_filters / 2 * 3), q.node_count);
     try expectIds(q, &.{ 1, 2 });
 }
+
+test "addNodeFrom splits a query into two that AND back to it" {
+    const q = (Q{})
+        .where(.age, .gt, 20)
+        .whereAny(.{ .{ .role, .eq, .admin }, zom.all(.{ .{ .id, .gte, 4 }, zom.not(.{ .name, .like, "%z%" }) }) })
+        .whereNot(.{ .id, .eq, 5 })
+        .where(.name, .neq, "Otieno");
+
+    // Groups to one side, plain filters to the other.
+    var groups: Q = .{};
+    var plain: Q = .{};
+    var it = q.topNodes();
+    while (it.next()) |i| {
+        const index: u8 = @intCast(i);
+        if (q.nodes[index] == .filter) plain.addNodeFrom(&q, index) else groups.addNodeFrom(&q, index);
+    }
+    try testing.expect(plain.isConjunction());
+    try testing.expectEqual(2, plain.filter_count);
+    try testing.expectEqual(q.node_count, groups.node_count + plain.node_count);
+    try testing.expectEqual(q.filter_count, groups.filter_count + plain.filter_count);
+
+    for (rows) |row| {
+        try testing.expectEqual(q.truth(row), zom.query.and3(groups.truth(row), plain.truth(row)));
+    }
+
+    // Copying every top node into an empty query gives the same query.
+    var whole: Q = .{};
+    it = q.topNodes();
+    while (it.next()) |i| whole.addNodeFrom(&q, @intCast(i));
+    for (rows) |row| try testing.expectEqual(q.truth(row), whole.truth(row));
+    try testing.expectEqual(q.node_count, whole.node_count);
+}

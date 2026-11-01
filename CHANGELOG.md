@@ -9,6 +9,29 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- Query support is enforced. A relation is `.strict` by default: a filter,
+  sort key or `offset` its dataset's `supports` leaves out is a compile error
+  naming the adapter, the relation, the call and the missing feature (`in`
+  for `in`/`not_in`/`whereIn`, `like` for `like`/`ilike`, `or` for
+  `whereAny`/`whereNot` and every condition inside them, `order_on` for
+  ordering by anything but the primary key, `offset`). Datasets may declare
+  `pub fn filterable(comptime field: []const u8, comptime op: zom.Op) bool`
+  to narrow support per attribute; `zom.Adapter` checks its signature, and
+  `Adapter.filterGap` / `orderGap` say why something is unsupported.
+  `users.allowFallback()` switches to `.fallback`: the dataset reads the
+  supported top-level conditions, and zom filters the rest in memory with
+  `Query.matches`, then sorts (when the dataset can't), offsets and limits,
+  so pages are never short. That means reading every row the supported part
+  matches, so each such read calls a scan hook with `zom.Scan{ adapter,
+  relation, rows_fetched, rows_returned }`, set with `Container(.{ ...,
+  .on_scan = hook })` or `relation.onScan(hook)`. A fallback relation's
+  `count` takes an allocator, and its `update`/`delete` return
+  `error.UnsupportedFilter` rather than writing through an in-memory filter.
+  New exports: `RelationWith(S, G, Output, mode)` (`RelationOf` is its
+  `.strict` form), `Mode`, `Scan` and `ScanHook`. `Query.addNodeFrom(src, index)` copies one
+  top-level condition from another query, which is how a query is split
+  without allocating. ([#34])
+
 - Projections. `users.select(.{ .id, .name })` returns a relation whose
   reads (`toSlice`, `one`, `first`, `mapTo`) give `zom.Project(Tuple, .{ .id,
   .name })`, a struct built with `@Struct` that has only those fields, in that
@@ -344,3 +367,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#31]: https://github.com/kamalogudah/zom/issues/31
 [#32]: https://github.com/kamalogudah/zom/issues/32
 [#33]: https://github.com/kamalogudah/zom/issues/33
+[#34]: https://github.com/kamalogudah/zom/issues/34

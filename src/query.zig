@@ -667,6 +667,63 @@ pub fn Query(comptime T: type) type {
             self.writeCond(slot, cond);
         }
 
+        /// Appends node `index` of `src`, with everything under it, as a
+        /// top-level (AND-ed) node of this query. Splitting a query into two
+        /// is a loop over `src.topNodes()` calling this on one or the other;
+        /// nothing is allocated. Panics, like `addCond`, if it does not fit.
+        pub fn addNodeFrom(self: *Self, src: *const Self, index: u8) void {
+            const size = src.nodeSize(index);
+            self.reserve(size.nodes, size.filters);
+            const slot = self.node_count;
+            self.node_count += 1;
+            self.top.set(slot);
+            self.copyNode(slot, src, index);
+        }
+
+        /// The nodes and filters in the subtree at `index`, itself included.
+        fn nodeSize(self: *const Self, index: u8) Size {
+            return switch (self.nodes[index]) {
+                .filter => .{ .nodes = 1, .filters = 1 },
+                .not => |child| blk: {
+                    const s = self.nodeSize(child);
+                    break :blk .{ .nodes = 1 + s.nodes, .filters = s.filters };
+                },
+                .and_group, .or_group => |g| blk: {
+                    var size: Size = .{ .nodes = 1, .filters = 0 };
+                    for (g.first..g.first + g.len) |c| {
+                        const s = self.nodeSize(@intCast(c));
+                        size.nodes += s.nodes;
+                        size.filters += s.filters;
+                    }
+                    break :blk size;
+                },
+            };
+        }
+
+        /// `writeCond` for a node of another query: writes `src.nodes[index]`
+        /// into `nodes[slot]`, which the caller reserved, re-indexing its
+        /// children the same way.
+        fn copyNode(self: *Self, slot: u8, src: *const Self, index: u8) void {
+            switch (src.nodes[index]) {
+                .filter => |f| self.nodes[slot] = .{ .filter = self.pushFilter(src.filters[f]) },
+                .not => |child| {
+                    const copy = self.node_count;
+                    self.node_count += 1;
+                    self.nodes[slot] = .{ .not = copy };
+                    self.copyNode(copy, src, child);
+                },
+                .and_group, .or_group => |g| {
+                    const children: Children = .{ .first = self.node_count, .len = g.len };
+                    self.node_count += g.len;
+                    self.nodes[slot] = if (src.nodes[index] == .and_group)
+                        .{ .and_group = children }
+                    else
+                        .{ .or_group = children };
+                    for (0..g.len) |k| self.copyNode(@intCast(children.first + k), src, @intCast(g.first + k));
+                },
+            }
+        }
+
         const Size = struct { nodes: usize, filters: usize };
 
         fn condSize(comptime C: type) Size {

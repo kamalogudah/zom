@@ -89,6 +89,26 @@ test "README: Projections" {
     try testing.expectEqualStrings("Achieng", names[0].name);
 }
 
+test "README: Query support" {
+    const allocator = testing.allocator;
+    const zom = @import("zom");
+
+    const User = struct { id: u32, name: []const u8, age: u8 };
+    const Users = zom.Relation(zom.Schema(User, "users", .id), zom.memory.Gateway);
+
+    var gw = zom.memory.Gateway.init(allocator, .{});
+    defer gw.deinit();
+    const users = try Users.init(&gw);
+    _ = try users.create(.{ .id = 1, .name = "Achieng", .age = 24 }).commit();
+
+    // -- README: Query support --------------------------------------------
+    const young = try users.allowFallback().where(.age, .lt, 30).limit(10).toSlice(allocator);
+    defer allocator.free(young);
+
+    // ---------------------------------------------------------------------
+    try testing.expectEqual(1, young.len);
+}
+
 test "README: Value" {
     const zom = @import("zom");
 

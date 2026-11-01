@@ -30,11 +30,22 @@
 //!   delete(*Self, Q) !usize                          // .deletable
 //!   pub const supports: zom.Supports                 // query features
 //!   readProjected(*Self, Q, comptime P: type, std.mem.Allocator) ![]P
+//!   pub fn filterable(comptime field: []const u8, comptime op: zom.Op) bool
 //!
 //! `readProjected` is required when `supports.projection` is true: it reads
 //! the rows `read` would, as `P`, a `zom.Project(S.Tuple, ...)` struct with
 //! some of the tuple's fields (copy them by name, e.g. with `zom.Mapper`).
 //! Without it, `select` reads whole tuples and zom maps them down.
+//!
+//! `filterable` narrows `supports` per attribute, for a backend that can only
+//! filter on some of them (TigerBeetle's `query_transfers` filters on
+//! `ledger` and `code`, not on `amount`). zom calls it at compile time with
+//! a field name and an op that `supports` already allows; returning false
+//! makes that filter unsupported. Without it, every attribute is filterable.
+//!
+//! A relation that uses a feature the dataset does not support is a compile
+//! error in `.strict` mode (the default), or evaluated in memory after the
+//! supported part in `.fallback` mode (see relation.zig).
 //!
 //! `self` may be taken by value, `*Self` or `*const Self`.
 
@@ -43,17 +54,23 @@ const q = @import("query.zig");
 
 /// The query features a dataset can evaluate itself. A dataset declares
 /// `pub const supports: zom.Supports = ...;`, setting only what it handles;
-/// one that declares nothing gets the defaults. Relations only use
-/// `projection` so far (plan.md Phase 3); `zom.lint` skips the checks for
-/// the features a dataset does not support.
+/// one that declares nothing gets the defaults. A strict relation refuses to
+/// compile a query that uses a feature left out here, and a fallback
+/// relation evaluates it in memory; `zom.lint` skips the checks for the
+/// features a dataset does not support. Filters with ops that have no flag
+/// (`eq` .. `gte`, `between`, `is_null`, `is_not_null`) are always
+/// supported, unless the dataset's `filterable` says otherwise.
 pub const Supports = struct {
-    /// Filters combined with `or`.
+    /// Boolean groups: `whereAny`, `whereNot`, and `zom.any` / `zom.all` /
+    /// `zom.not` inside them. Without it, a dataset only gets queries whose
+    /// filters are all AND-ed, which it reads through `filterSlice()`.
     @"or": bool = false,
-    /// `.in` filters: the attribute is one of a list of values.
+    /// `.in` and `.not_in` filters: the attribute is (not) one of a list of
+    /// values. Also `whereIn` and `whereNotIn`.
     in: bool = false,
-    /// `.like` filters: pattern matching on strings.
+    /// `.like` and `.ilike` filters: pattern matching on strings.
     like: bool = false,
-    /// Ordering by any attribute, not only the primary key.
+    /// Ordering by any attribute. Without it, only the primary key.
     order_on: bool = true,
     /// Skipping rows with `offset`.
     offset: bool = true,
@@ -147,6 +164,27 @@ pub fn Adapter(comptime G: type) type {
         pub fn supports(comptime S: type) Supports {
             const D = Dataset(S);
             return if (@hasDecl(D, "supports")) D.supports else .{};
+        }
+
+        /// Null when the dataset for `S` can evaluate a `field op ...`
+        /// filter itself, else why not, for an error message.
+        pub fn filterGap(comptime S: type, comptime field: []const u8, comptime op: q.Op) ?[]const u8 {
+            const s = supports(S);
+            switch (op) {
+                .in, .not_in => if (!s.in) return "`.in` and `.not_in` filters need `supports.in`",
+                .like, .ilike => if (!s.like) return "`.like` and `.ilike` filters need `supports.like`",
+                else => {},
+            }
+            const D = Dataset(S);
+            if (@hasDecl(D, "filterable") and !D.filterable(field, op))
+                return "its dataset's `filterable` rejects `." ++ @tagName(op) ++ "` on '" ++ field ++ "'";
+            return null;
+        }
+
+        /// Null when the dataset for `S` can order by `field`, else why not.
+        pub fn orderGap(comptime S: type, comptime field: []const u8) ?[]const u8 {
+            if (supports(S).order_on or std.mem.eql(u8, field, @tagName(S.primary_key))) return null;
+            return "`supports.order_on` is false, so it only orders by the primary key '" ++ @tagName(S.primary_key) ++ "'";
         }
 
         pub fn has(comptime S: type, comptime cap: Capability) bool {
@@ -312,6 +350,13 @@ fn checkDataset(comptime G: type, comptime S: type) void {
             .text = "fn (*Self, zom.Query(Tuple), comptime P: type, std.mem.Allocator) ![]P",
         });
     }
+
+    problems = problems ++ checkMethod(D, "filterable", false, .{
+        .self = false,
+        .params = &.{ []const u8, q.Op },
+        .returns = .{ .exactly = bool },
+        .text = "fn (comptime field: []const u8, comptime op: zom.Op) bool",
+    });
 
     if (problems.len > 0) @compileError(header ++ problems);
 }

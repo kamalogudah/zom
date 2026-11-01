@@ -23,6 +23,14 @@ pub const Schema = @import("schema.zig").Schema;
 pub const Relation = @import("relation.zig").Relation;
 /// A relation whose reads return `Output`; see `Relation.select`.
 pub const RelationOf = @import("relation.zig").RelationOf;
+/// The relation type with every parameter: `RelationWith(S, G, Output, mode)`.
+pub const RelationWith = @import("relation.zig").RelationWith;
+/// `.strict` or `.fallback`: what a relation does with query features its
+/// adapter does not support. See `Relation.allowFallback`.
+pub const Mode = @import("relation.zig").Mode;
+/// What a `.fallback` read that ran in memory reports to its scan hook.
+pub const Scan = @import("relation.zig").Scan;
+pub const ScanHook = @import("relation.zig").ScanHook;
 /// The narrower struct `select` reads into: `Project(User, .{ .id, .name })`.
 pub const Project = @import("projection.zig").Project;
 
@@ -62,4 +70,5 @@ test {
     _ = file;
     _ = @import("tests/query_test.zig");
     _ = @import("tests/projection_test.zig");
+    _ = @import("tests/fallback_test.zig");
 }

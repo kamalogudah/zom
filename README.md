@@ -133,9 +133,13 @@ breaking change needs a minor version bump and an entry in
 |---|---|
 | `zom.Schema(T, name, pk)` | Returns a schema type with `Tuple = T`, `name` (the dataset name) and `primary_key` (a field of `T`, as an enum literal). |
 | `zom.Relation(S, Gateway)` | Returns an immutable relation type over schema `S` and an adapter's `Gateway`. Checks the [adapter contract](#the-adapter-contract) at compile time through `zom.Adapter(Gateway)`, which it exposes as `Relation.Adapter`. |
-| `zom.RelationOf(S, Gateway, Output)` | The relation type whose reads return `Output`. `Relation(S, G)` is `RelationOf(S, G, S.Tuple)`, and `select` returns `RelationOf(S, G, Project(S.Tuple, fields))`. Exposes `Tuple`, `Output` and `projected`. |
+| `zom.RelationOf(S, Gateway, Output)` | The strict relation type whose reads return `Output`. `Relation(S, G)` is `RelationOf(S, G, S.Tuple)`, and `select` returns `RelationOf(S, G, Project(S.Tuple, fields))`. Exposes `Tuple`, `Output`, `projected` and `mode`. |
+| `zom.RelationWith(S, Gateway, Output, mode)` | The relation type with every parameter. `RelationOf(S, G, Out)` is `RelationWith(S, G, Out, .strict)`, and `allowFallback()` returns `RelationWith(S, G, Out, .fallback)`. |
+| `zom.Mode` | `strict` or `fallback`: what a relation does with query features its dataset does not support. See [Query support](#query-support-strict-and-fallback). |
+| `zom.Scan`, `zom.ScanHook` | What a `.fallback` read that ran in memory reports (`adapter`, `relation`, `rows_fetched`, `rows_returned`), and the `*const fn (Scan) void` it reports to. |
 | `zom.Project(T, .{ fields })` | The struct `select` reads into: only `fields` of `T`, in the order given, with their types and defaults. An empty tuple, an unknown field or a repeated one is a compile error. Equal arguments return the same type. |
-| `zom.Adapter(G)` | Checks gateway `G` against the [adapter contract](#the-adapter-contract), reporting every problem in one compile error. Has `Gateway`, `name` (`G.adapter_name`), `Dataset(S)` (checks the dataset for schema `S`), `capabilities(S) Capabilities`, `has(S, cap) bool`, `readOnly(S) bool` and `require(S, cap, method)`. |
+| `zom.Adapter(G)` | Checks gateway `G` against the [adapter contract](#the-adapter-contract), reporting every problem in one compile error. Has `Gateway`, `name` (`G.adapter_name`), `Dataset(S)` (checks the dataset for schema `S`), `capabilities(S) Capabilities`, `has(S, cap) bool`, `readOnly(S) bool`, `require(S, cap, method)`, `supports(S) Supports`, and `filterGap(S, field, op)` / `orderGap(S, field)`, which return null when the dataset can evaluate that filter or sort key, else why not. |
+| `zom.Supports` | The query features a dataset evaluates itself: `or` (boolean groups), `in` (`in`, `not_in`), `like` (`like`, `ilike`), `order_on` (order by any attribute, not only the key), `offset`, `projection`, `join`. `Supports.all` sets them all. |
 | `zom.Capability` | `writable`, `batch_insert`, `updatable`, `deletable`, `transaction`. |
 | `zom.Capabilities` | A struct with one `bool` per `Capability`, all `false` by default. |
 | `zom.adapter` | The module behind `Adapter`, `Capability` and `Capabilities`. |
@@ -174,16 +178,22 @@ relation and never touch the dataset. `field` is always an enum literal, and
 | `reorder(.{ .{ field, direction }, ... })` | `Relation` | Replaces every sort key; `reorder(.{})` removes the order. More than `max_orders` keys is a compile error. |
 | `limit(n)`, `offset(n)` | `Relation` | `n: usize`. |
 | `select(.{ field, ... })` | a projected relation | Reads return `zom.Project(Tuple, fields)` instead of `Tuple`. See [Projections](#projections). |
+| `allowFallback()` | a `.fallback` relation | Query features the dataset does not support compile, and run in memory. See [Query support](#query-support-strict-and-fallback). |
+| `onScan(hook)` | `Relation` | The same relation, reporting in-memory reads to `hook` (a `zom.ScanHook`, or null). A `Container` sets it for you. |
 | `toSlice(allocator)` | `![]Output` | Caller frees. `Output` is `Tuple`, or the projected struct after `select`. |
 | `one(allocator)` | `!?Output` | `null` when empty, `error.MoreThanOneTuple` when ambiguous. |
 | `first(allocator)` | `!?Output` | |
-| `count()` | `!usize` | The number of rows `toSlice` would return, so `limit` and `offset` apply. |
+| `count()` | `!usize` | The number of rows `toSlice` would return, so `limit` and `offset` apply. On a `.fallback` relation it is `count(allocator)`, because it may have to read the rows to count them. |
 | `mapTo(E, allocator)` | `![]E` | `mapWith(zom.Mapper(Output, E, .{}))`. |
 | `mapWith(M, allocator)` | `![]M.Output` | `M` is a `zom.Mapper` whose `Input` is `Output`. |
 | `create(tuple)` | `Create` | `.map(f)` applies `f: fn (Tuple) Tuple`; `.commit()` returns `!Tuple`, the stored tuple. A compile error after `select`. |
 | `createMany(tuples)` | `CreateMany` | A compile error after `select`. `tuples: []const Tuple`, borrowed until commit. `.commit()` returns `!usize`, the rows inserted. Uses the dataset's `insertMany`, else loops over `insert` (see [the adapter contract](#the-adapter-contract)). |
 | `update()` | `Update` | `.set(field, value)` adds a change (at most `max_changes = 16`); `.commit()` returns `!usize`, the rows changed. |
 | `delete()` | `!usize` | The rows removed. |
+
+On a `.fallback` relation, `update().commit()` and `delete()` return
+`error.UnsupportedFilter` when the dataset can't evaluate every filter:
+writes never run in memory.
 
 What `where` takes for each op. Every value is type-checked against the
 attribute, and a comptime value (`.c`, `300`) must fit it.
@@ -236,6 +246,47 @@ defer allocator.free(names);
   `readProjected`. Any other dataset reads whole tuples, which zom maps down
   with `zom.Mapper` and frees, so `select` works with every adapter.
 
+#### Query support: strict and fallback
+
+A dataset says which query features it evaluates with `supports` and,
+optionally, per attribute with `filterable` (see [the adapter
+contract](#the-adapter-contract)). A relation is `.strict` by default:
+building a query the dataset can't run is a compile error, at the call that
+needs the missing feature, naming the adapter, the relation, the call and the
+feature:
+
+```
+zom: adapter 'limited' cannot evaluate `where(.name, .eq, ...)` on relation 'items': its dataset's `filterable` rejects `.eq` on 'name'; call `allowFallback()` on the relation to evaluate it in memory instead
+```
+
+`where`, `whereIn`, `whereNotIn` and `whereAny` / `whereNot` (every
+condition inside them too) check filters, `order` and `reorder` check sort
+keys, and `offset` checks `supports.offset`. `select` and `limit` work on
+every dataset.
+
+`users.allowFallback()` returns the same relation in `.fallback` mode, where
+those calls compile. Each read then splits the query: the top-level
+conditions the dataset supports go to `read`, and zom filters the rows it
+returns with the rest, through `Query.matches`. Once anything runs in
+memory, the sort (when the dataset can't do it), `offset` and `limit` run in
+memory too, after the filter, so pages are never short; `count` follows the
+same rule.
+
+**The cost is a hidden full scan.** A read whose filter or sort runs in
+memory fetches every row that matches the supported part, with no limit,
+however small the page. (When only `offset` is unsupported, the dataset reads
+the first `offset + limit` rows instead.) So fallback is opt-in per relation,
+which leaves a visible `allowFallback()` wherever a scan can happen, and
+every such read calls the relation's scan hook with `zom.Scan{ adapter,
+relation, rows_fetched, rows_returned }`. Set it once with the container's
+`.on_scan`, or with `relation.onScan(hook)`, then log it in an app or assert
+on it in a test. A read the dataset evaluates entirely is not reported.
+
+```zig
+const young = try users.allowFallback().where(.age, .lt, 30).limit(10).toSlice(allocator);
+defer allocator.free(young);
+```
+
 ### Container
 
 `zom.Container(spec)` declares the gateways and the relations over them in
@@ -277,6 +328,11 @@ pointer to its dataset, and the adapter contract lets a gateway keep its
 datasets inside its own struct, where a copy would leave that pointer stale.
 (The memory gateway heap-allocates its datasets, so it would survive a copy,
 but other adapters need not.)
+
+An optional `.on_scan = hook` in the spec, a `fn (zom.Scan) void`, is set on
+every relation, and kept by relations chained from them, so every
+`.fallback` read that runs in memory is reported in one place (see [Query
+support](#query-support-strict-and-fallback)).
 
 A relation that names a gateway the container doesn't have, a relation that
 isn't `.{ Schema, .gateway }`, and a gateway that fails `zom.Adapter` are all
@@ -376,7 +432,8 @@ In full, with `Q = zom.Query(S.Tuple)`:
 | `insertMany` | `fn (*Dataset, []const S.Tuple) !usize` | no, `.batch_insert` | Returns the tuples stored. `error.DuplicatePrimaryKey` on a key clash, with the stored rows or inside the batch. Used by `createMany`. |
 | `update` | `fn (*Dataset, Q, []const Q.Change) !usize` | no, `.updatable` | Returns the rows changed. A failed update changes nothing. |
 | `delete` | `fn (*Dataset, Q) !usize` | no, `.deletable` | Returns the rows removed. |
-| `supports` | `zom.Supports` | no | The query features the dataset handles; the defaults when missing. |
+| `supports` | `zom.Supports` | no | The query features the dataset handles; the defaults when missing. A strict relation that uses one left out does not compile; see [Query support](#query-support-strict-and-fallback). |
+| `filterable` | `fn (comptime field: []const u8, comptime op: zom.Op) bool` | no | Narrows `supports` per attribute, for a backend that only filters on some (TigerBeetle filters transfers on `ledger` and `code`, not `amount`). Called at compile time, only for ops `supports` allows; false makes that filter unsupported. Without it, every attribute is filterable. |
 | `readProjected` | `fn (*Dataset, Q, comptime P: type, Allocator) ![]P` | when `supports.projection` | The rows `read` would return, as `P`, a `zom.Project(S.Tuple, ...)` with some of the tuple's fields (copy them by name, e.g. with `zom.Mapper(S.Tuple, P, .{})`). Used by `select`. Without it, zom reads whole tuples and maps them down. |
 
 A method may take `self` by value, `*Self` or `*const Self`. Every dataset
@@ -505,7 +562,7 @@ adapter never changes zom's package hash. Every adapter's tests should call
 | `error.MoreThanOneTuple` | `one`. |
 | `error.DatasetTypeMismatch` | `memory.Gateway.dataset` (and so `Relation.init`), when two different schema types share a dataset name. |
 | `error.InvalidNullComparison` | `sql.compileSelect`, for `lt`/`lte`/`gt`/`gte` against `null`. |
-| `error.UnsupportedFilter` | `sql.compileSelect`, for `in`, `not_in`, `like`, `ilike` and `between`, which zom-sql will render with a `Dialect` (#35). |
+| `error.UnsupportedFilter` | `sql.compileSelect`, for `in`, `not_in`, `like`, `ilike` and `between`, which zom-sql will render with a `Dialect` (#35). Also `update().commit()` and `delete()` on a `.fallback` relation with a filter its dataset can't evaluate. |
 | `error.OutOfMemory` | Anything that takes or uses an allocator. |
 
 `zom.adapter.Error` reserves the names every adapter uses for the same

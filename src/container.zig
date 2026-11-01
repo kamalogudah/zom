@@ -18,6 +18,12 @@
 //! compile error rather than a runtime lookup failure. Every gateway is
 //! checked with `zom.Adapter`.
 //!
+//! An optional `.on_scan = hook` (a `fn (zom.Scan) void`) is set on every
+//! relation, so each `.fallback` read that runs part of its query in memory
+//! is reported in one place: tests can assert on it, and apps can log it.
+//! Relations chained from `app.relations.users`, including through
+//! `allowFallback()`, keep the hook.
+//!
 //! Pointer stability: a relation holds a `*Dataset`, and the adapter contract
 //! does not say where a dataset lives. The memory gateway heap-allocates its
 //! datasets, but another gateway may keep one inside its own struct, and
@@ -28,19 +34,23 @@
 
 const std = @import("std");
 const adapter = @import("adapter.zig");
-const Relation = @import("relation.zig").Relation;
+const rel = @import("relation.zig");
+const Relation = rel.Relation;
 const Allocator = std.mem.Allocator;
 
-/// `spec` is an anonymous struct literal with two fields:
+/// `spec` is an anonymous struct literal with two fields, and an optional
+/// third:
 ///
 ///   .gateways  = .{ .name = GatewayType, ... }
 ///   .relations = .{ .name = .{ Schema, .gateway_name }, ... }
+///   .on_scan   = hook, a `fn (zom.Scan) void`, set on every relation
 ///
 /// Gateways are initialised in declaration order and deinitialised in
 /// reverse.
 pub fn Container(comptime spec: anytype) type {
     const gateway_fields = specFields(spec, "gateways");
     const relation_fields = specFields(spec, "relations");
+    const scan_hook = scanHook(spec);
 
     var gateway_names: [gateway_fields.len][]const u8 = undefined;
     var gateway_types: [gateway_fields.len]type = undefined;
@@ -109,6 +119,7 @@ pub fn Container(comptime spec: anytype) type {
             }
             inline for (relation_names_final, relation_types_final, relation_gateways_final) |name, R, gateway| {
                 @field(self.relations, name) = try R.init(&@field(self.gateways, gateway));
+                @field(self.relations, name).on_scan = scan_hook;
             }
         }
 
@@ -127,6 +138,16 @@ pub fn Container(comptime spec: anytype) type {
             }
         }
     };
+}
+
+/// `spec.on_scan`, a function or a pointer to one, or null when absent.
+fn scanHook(comptime spec: anytype) ?rel.ScanHook {
+    if (!@hasField(@TypeOf(spec), "on_scan")) return null;
+    const hook = spec.on_scan;
+    const H = @TypeOf(hook);
+    if (H == fn (rel.Scan) void) return &hook;
+    if (H == rel.ScanHook or H == *const fn (rel.Scan) void) return hook;
+    @compileError("zom: Container `.on_scan` must be a `fn (zom.Scan) void`, found `" ++ @typeName(H) ++ "`");
 }
 
 /// `G.init` may return `G` or `!G`; this always returns `!G` so `init` can
