@@ -226,6 +226,12 @@ A relation that names a gateway the container doesn't have, a relation that
 isn't `.{ Schema, .gateway }`, and a gateway that fails `zom.Adapter` are all
 compile errors.
 
+[examples/csv_users](examples/csv_users/src/main.zig) puts two adapters in
+one container: users read from `data/users.csv` through `zom_csv.Gateway`,
+posts held in `zom.memory.Gateway`, joined with `zom.combineMany`. Run it
+with `cd examples/csv_users && zig build run`; `zig build test` at the root
+runs it too and checks its output.
+
 ### Value
 
 ```zig
@@ -544,6 +550,7 @@ links to the topics below.
 | `src/adapters/sql.zig` | Compiles a query to a SQL string | Building strings with `ArrayList(u8)` |
 | `src/tests/` | Tests, one file per layer, with shared `fixtures.zig` | `std.testing` |
 | `examples/readme.zig` | Every README code block, compiled by `zig build test` | Using zom as a package import |
+| `examples/csv_users/` | A program joining CSV users with in-memory posts through `zom.Container`, run and checked by `zig build test` | `b.addExecutable`, `pub fn main(init: std.process.Init)`, writing to stdout |
 | `tests/compile_errors/` | Code that must *not* compile, checked by `zig build compile-errors` | What `@compileError` messages users see |
 | `src/file.zig` | `zom.file`: the gateway and datasets file adapters share, over a `Format` (load and dump) | Comptime-parameterised generics, duck typing checked with `@hasDecl`/`@hasField`, atomic writes (temp file, fsync, rename) |
 | `adapters/csv/` | The `zom-csv` package, a CSV `Format` for `zom.file`, depending on zom by path | `build.zig.zon` dependencies, `b.dependency(...).module(...)` |
