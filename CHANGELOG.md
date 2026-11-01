@@ -45,6 +45,18 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
   `zom_pg.Diagnostics`, or logs them when that is null, and returns
   `error.SchemaMismatch`. ([#39])
 
+- Schema inference: `zom-pg-infer` writes a Zig struct and `zom.Schema`
+  for every table of a Postgres schema, and `addInferStep(b, .{ .out =
+  "src/schemas.zig" })` in zom-pg's build.zig wires it into an
+  application's `zig build infer`. `Gateway.introspect(allocator, schema)`
+  reads the tables through the same `information_schema` queries as
+  `verify` (now shared in `catalog.zig`), and `zom_sql.infer.render` turns
+  the catalog into source formatted by `std.zig.Ast`: names that aren't
+  valid identifiers are quoted with `@"..."`, Postgres enums become Zig
+  enums, nullable columns `?T = null`, and columns zom-pg can't decode
+  (`uuid`, timestamps) are left out with a comment. `verify` accepts every
+  struct it generates. ([#41])
+
 - CI (`.github/workflows/ci.yml`): `zig fmt --check`, then `zig build test`
   for the core and every adapter and example, then zom-pg's tests against a
   Postgres 17 service container, failing if any of them is skipped. A
@@ -474,3 +486,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#38]: https://github.com/kamalogudah/zom/issues/38
 [#39]: https://github.com/kamalogudah/zom/issues/39
 [#40]: https://github.com/kamalogudah/zom/issues/40
+[#41]: https://github.com/kamalogudah/zom/issues/41

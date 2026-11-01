@@ -12,10 +12,12 @@
 
 const std = @import("std");
 const gateway = @import("gateway.zig");
+const catalog = @import("catalog.zig");
 
 const Allocator = std.mem.Allocator;
 const Gateway = gateway.Gateway;
 const log = std.log.scoped(.zom_pg);
+const Column = catalog.Column;
 
 /// One way a table differs from its schema. Formatted with `{f}` it reads
 /// `users.age: Zig u8 vs pg text`.
@@ -96,56 +98,6 @@ pub const Diagnostics = struct {
     }
 };
 
-/// The columns `information_schema` reports for the table `$1` resolves
-/// to. `information_schema` names are domains over `name` and `varchar`,
-/// so they are cast to `text` for pg.zig.
-const columns_sql =
-    \\SELECT c.column_name::text,
-    \\       c.data_type::text,
-    \\       c.udt_name::text,
-    \\       c.is_nullable::text = 'YES',
-    \\       EXISTS (SELECT 1 FROM pg_catalog.pg_type t
-    \\               JOIN pg_catalog.pg_namespace tn ON tn.oid = t.typnamespace
-    \\               WHERE t.typname = c.udt_name::text AND tn.nspname = c.udt_schema::text AND t.typtype = 'e')
-    \\FROM information_schema.columns c
-    \\WHERE c.table_schema::text = $1 AND c.table_name::text = $2
-;
-
-/// The schema (namespace) holding the table an unqualified `$1` means.
-const namespace_sql =
-    \\SELECT n.nspname::text
-    \\FROM pg_catalog.pg_class cl
-    \\JOIN pg_catalog.pg_namespace n ON n.oid = cl.relnamespace
-    \\WHERE cl.oid = to_regclass(quote_ident($1))
-;
-
-const primary_key_sql =
-    \\SELECT k.column_name::text
-    \\FROM information_schema.table_constraints tc
-    \\JOIN information_schema.key_column_usage k
-    \\  ON k.constraint_schema = tc.constraint_schema
-    \\ AND k.constraint_name = tc.constraint_name
-    \\ AND k.table_schema = tc.table_schema
-    \\ AND k.table_name = tc.table_name
-    \\WHERE tc.constraint_type = 'PRIMARY KEY'
-    \\  AND tc.table_schema::text = $1 AND tc.table_name::text = $2
-    \\ORDER BY k.ordinal_position
-;
-
-const Column = struct {
-    name: []const u8,
-    data_type: []const u8,
-    udt_name: []const u8,
-    nullable: bool,
-    is_enum: bool,
-
-    /// How a mismatch names the type: an enum's or other user-defined
-    /// type's own name, else the SQL name (`character varying`).
-    fn typeName(c: Column) []const u8 {
-        return if (std.mem.eql(u8, c.data_type, "USER-DEFINED")) c.udt_name else c.data_type;
-    }
-};
-
 pub fn verify(self: *Gateway, comptime S: type, diagnostics: ?*Diagnostics) !void {
     var own: Diagnostics = .init(self.allocator);
     defer own.deinit();
@@ -171,14 +123,15 @@ fn check(self: *Gateway, comptime S: type, diag: *Diagnostics, scratch: Allocato
     const conn = try self.source.acquire();
     defer self.source.release(conn);
 
-    const namespace = (try queryStrings(conn, scratch, namespace_sql, &.{.{ .string = table }})).first() orelse
-        return diag.add(.{ .table = table, .problem = .missing_table });
+    const namespaces = try catalog.queryStrings(conn, scratch, catalog.namespace_sql, &.{.{ .string = table }});
+    if (namespaces.len == 0) return diag.add(.{ .table = table, .problem = .missing_table });
+    const namespace = namespaces[0];
 
-    const columns = try queryColumns(conn, scratch, namespace, table);
+    const columns = try catalog.queryColumns(conn, scratch, namespace, table);
     inline for (fields) |f| {
         const zig = @typeName(f.type);
         const optional = @typeInfo(f.type) == .optional;
-        if (find(columns, f.name)) |col| {
+        if (catalog.findColumn(columns, f.name)) |col| {
             if (!accepts(f.type, col)) {
                 try diag.add(.{ .table = table, .column = f.name, .problem = .{ .wrong_type = .{ .zig = zig, .pg = try diag.dupe(col.typeName()) } } });
             } else if (col.nullable and !optional) {
@@ -192,58 +145,13 @@ fn check(self: *Gateway, comptime S: type, diag: *Diagnostics, scratch: Allocato
     }
 
     const expected = @tagName(S.primary_key);
-    const pk = try queryStrings(conn, scratch, primary_key_sql, &.{ .{ .string = namespace }, .{ .string = table } });
-    if (pk.items.len == 0) {
+    const pk = try catalog.queryStrings(conn, scratch, catalog.primary_key_sql, &.{ .{ .string = namespace }, .{ .string = table } });
+    if (pk.len == 0) {
         try diag.add(.{ .table = table, .problem = .{ .no_primary_key = .{ .expected = expected } } });
-    } else if (pk.items.len != 1 or !std.mem.eql(u8, pk.items[0], expected)) {
-        const actual = try std.mem.join(diag.arena.allocator(), ", ", pk.items);
+    } else if (pk.len != 1 or !std.mem.eql(u8, pk[0], expected)) {
+        const actual = try std.mem.join(diag.arena.allocator(), ", ", pk);
         try diag.add(.{ .table = table, .problem = .{ .wrong_primary_key = .{ .expected = expected, .actual = actual } } });
     }
-}
-
-fn find(columns: []const Column, name: []const u8) ?Column {
-    for (columns) |c| if (std.mem.eql(u8, c.name, name)) return c;
-    return null;
-}
-
-const Strings = struct {
-    items: []const []const u8,
-    fn first(s: Strings) ?[]const u8 {
-        return if (s.items.len == 0) null else s.items[0];
-    }
-};
-
-/// The first column of every row, copied into `scratch`.
-fn queryStrings(conn: anytype, scratch: Allocator, sql: []const u8, params: []const gateway.Value) !Strings {
-    const result = try gateway.run(conn, sql, params);
-    defer result.deinit();
-    errdefer result.drain() catch {};
-    var out: std.ArrayList([]const u8) = .empty;
-    while (try gateway.next(conn, result)) |row| {
-        try out.append(scratch, try scratch.dupe(u8, try getText(conn, &row, 0)));
-    }
-    return .{ .items = out.items };
-}
-
-fn queryColumns(conn: anytype, scratch: Allocator, namespace: []const u8, table: []const u8) ![]const Column {
-    const result = try gateway.run(conn, columns_sql, &.{ .{ .string = namespace }, .{ .string = table } });
-    defer result.deinit();
-    errdefer result.drain() catch {};
-    var out: std.ArrayList(Column) = .empty;
-    while (try gateway.next(conn, result)) |row| {
-        try out.append(scratch, .{
-            .name = try scratch.dupe(u8, try getText(conn, &row, 0)),
-            .data_type = try scratch.dupe(u8, try getText(conn, &row, 1)),
-            .udt_name = try scratch.dupe(u8, try getText(conn, &row, 2)),
-            .nullable = row.get(bool, 3) catch |err| return gateway.mapError(conn, err),
-            .is_enum = row.get(bool, 4) catch |err| return gateway.mapError(conn, err),
-        });
-    }
-    return out.items;
-}
-
-fn getText(conn: anytype, row: anytype, col: usize) ![]const u8 {
-    return row.get([]const u8, col) catch |err| gateway.mapError(conn, err);
 }
 
 // -- types --------------------------------------------------------------------
@@ -290,6 +198,51 @@ pub fn pgTypesFor(comptime T: type) []const []const u8 {
         .pointer => text,
         else => @compileError("zom-pg: unsupported attribute type " ++ @typeName(T)),
     };
+}
+
+/// The Zig type `zom-pg-infer` gives a column of type `data_type` (an
+/// `information_schema.columns.data_type` name), or null when zom-pg can't
+/// decode it. The narrowest type `pgTypesFor` accepts in such a column.
+/// Enums are `.@"enum"` with the type's name, filled in by `introspect`.
+pub fn zigTypeFor(data_type: []const u8) ?ZigType {
+    for (zig_types) |entry| {
+        if (std.mem.eql(u8, entry[0], data_type)) return entry[1];
+    }
+    return null;
+}
+
+const zig_types = [_]struct { []const u8, ZigType }{
+    .{ "smallint", .{ .int = .{ .signedness = .signed, .bits = 16 } } },
+    .{ "integer", .{ .int = .{ .signedness = .signed, .bits = 32 } } },
+    .{ "bigint", .{ .int = .{ .signedness = .signed, .bits = 64 } } },
+    .{ "real", .{ .float = 32 } },
+    .{ "double precision", .{ .float = 64 } },
+    // Read as f64, so exact decimals are rounded.
+    .{ "numeric", .{ .float = 64 } },
+    .{ "boolean", .bool },
+    .{ "text", .string },
+    .{ "character varying", .string },
+    .{ "character", .string },
+};
+
+const ZigType = @import("zom_sql").infer.Type;
+
+test "zigTypeFor gives a type that pgTypesFor accepts back in the column" {
+    inline for (zig_types) |entry| {
+        const name = entry[0];
+        const T = comptime switch (entry[1]) {
+            .int => |i| @Int(i.signedness, i.bits),
+            .float => |bits| if (bits == 32) f32 else f64,
+            .bool => bool,
+            .string => []const u8,
+            .@"enum" => unreachable,
+        };
+        for (pgTypesFor(T)) |accepted| {
+            if (std.mem.eql(u8, accepted, name)) break;
+        } else return error.TestUnexpectedResult;
+    }
+    try std.testing.expectEqual(null, zigTypeFor("uuid"));
+    try std.testing.expectEqual(null, zigTypeFor("timestamp with time zone"));
 }
 
 test "pgTypesFor: integers need a column that holds every value" {

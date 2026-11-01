@@ -15,6 +15,8 @@ pub const ServerError = @import("gateway.zig").ServerError;
 pub const Diagnostics = @import("verify.zig").Diagnostics;
 pub const Mismatch = @import("verify.zig").Mismatch;
 pub const pgTypesFor = @import("verify.zig").pgTypesFor;
+pub const zigTypeFor = @import("verify.zig").zigTypeFor;
+pub const Introspection = @import("introspect.zig").Introspection;
 
 test {
     _ = @import("gateway.zig");
@@ -23,4 +25,5 @@ test {
     _ = @import("transaction_test.zig");
     _ = @import("verify.zig");
     _ = @import("verify_test.zig");
+    _ = @import("introspect_test.zig");
 }

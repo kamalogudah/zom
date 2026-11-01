@@ -31,8 +31,13 @@ pub const writeUpdate = compile.writeUpdate;
 pub const writeDelete = compile.writeDelete;
 pub const writeIdent = compile.writeIdent;
 
+/// Zig schema source from a database catalog; see infer.zig.
+pub const infer = @import("infer.zig");
+
 test {
     _ = compile;
     _ = @import("compile_test.zig");
     _ = @import("write_test.zig");
+    _ = infer;
+    _ = @import("infer_test.zig");
 }

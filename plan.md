@@ -259,7 +259,11 @@ for rom.
   - a startup check `Gateway.verify(S)`, which compares `information_schema`
     with the struct and fails fast on missing columns or wrong types
   - later, a `zom-sql infer` build step that generates Zig schema structs
-    from a live database
+    from a live database. (Built in #41: the generator is
+    `zom_sql.infer`, which needs no driver; the database side is zom-pg's
+    `Gateway.introspect`, the `zom-pg-infer` executable and
+    `addInferStep` in zom-pg's build.zig, since zom-sql can't depend on a
+    driver.)
 - Migrations are out of scope for v1. Users can run any migration tool.
 - **Done when** zom-pg passes the lint suite against a Postgres container in
   CI, and the same relation code runs unchanged on memory and Postgres.

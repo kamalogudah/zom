@@ -161,6 +161,16 @@ pub const Gateway = struct {
     pub const Diagnostics = verify_mod.Diagnostics;
     pub const Mismatch = verify_mod.Mismatch;
 
+    /// The base tables of `schema` and the enums they use, as a
+    /// `zom_sql.infer.Catalog`: what `zom-pg-infer` renders into schema
+    /// structs. Free it with `deinit`. `error.SchemaNotFound` when there
+    /// is no such schema. See introspect.zig.
+    pub fn introspect(self: *Gateway, allocator: Allocator, schema: []const u8) !Introspection {
+        return @import("introspect.zig").introspect(self, allocator, schema);
+    }
+
+    pub const Introspection = @import("introspect.zig").Introspection;
+
     /// Runs `sql` with no parameters and no rows, e.g. `CREATE TABLE`. zom
     /// has no migrations; this is for setup and tests.
     pub fn exec(self: *Gateway, sql: []const u8) Error!void {
