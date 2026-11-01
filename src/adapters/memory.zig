@@ -177,7 +177,10 @@ pub fn Store(comptime S: type) type {
             for (self.list.items) |row| {
                 if (query.matches(row)) try hits.append(allocator, row);
             }
-            if (query.order) |o| std.mem.sort(T, hits.items, o, Q.lessThan);
+            // std.mem.sort is stable (block sort; std.mem.sortUnstable is
+            // pdq), so rows equal on every sort key, or every row when there
+            // is no order, keep their insertion order.
+            std.mem.sort(T, hits.items, query.orderSlice(), Q.lessThan);
             const start = @min(query.offset, hits.items.len);
             const end = if (query.limit) |l| @min(start + l, hits.items.len) else hits.items.len;
             return allocator.dupe(T, hits.items[start..end]);

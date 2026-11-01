@@ -116,8 +116,8 @@ pub fn compileSelect(comptime T: type, allocator: Allocator, table: []const u8, 
         try writeNode(T, &sql, &params, allocator, &query, @intCast(i));
     }
 
-    if (query.order) |o| {
-        try sql.appendSlice(allocator, " ORDER BY ");
+    for (query.orderSlice(), 0..) |o, i| {
+        try sql.appendSlice(allocator, if (i == 0) " ORDER BY " else ", ");
         try writeIdent(&sql, allocator, @tagName(o.field));
         try sql.appendSlice(allocator, if (o.direction == .asc) " ASC" else " DESC");
     }

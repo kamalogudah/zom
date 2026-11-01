@@ -435,6 +435,9 @@ pub fn Query(comptime T: type) type {
         /// query. Every filter is a node, so this is at least `max_filters`.
         pub const max_nodes = 32;
 
+        /// Most sort keys in one query: `ORDER BY a, b, c, d`.
+        pub const max_orders = 4;
+
         pub const Filter = struct { field: Field, op: Op, operand: Operand };
         pub const Order = struct { field: Field, direction: Direction };
         pub const Change = struct { field: Field, value: Value };
@@ -463,7 +466,10 @@ pub fn Query(comptime T: type) type {
         node_count: u8 = 0,
         /// The nodes the query AND-s together; the others sit in a group.
         top: std.StaticBitSet(max_nodes) = .initEmpty(),
-        order: ?Order = null,
+        /// Sort keys, most significant first: `orders[1]` breaks ties on
+        /// `orders[0]`, and so on. Read through `orderSlice()`.
+        orders: [max_orders]Order = undefined,
+        order_count: u8 = 0,
         limit: ?usize = null,
         offset: usize = 0,
 
@@ -474,6 +480,57 @@ pub fn Query(comptime T: type) type {
         pub fn filterSlice(self: *const Self) []const Filter {
             std.debug.assert(self.isConjunction());
             return self.filters[0..self.filter_count];
+        }
+
+        /// The sort keys, most significant first. Empty: no order.
+        pub fn orderSlice(self: *const Self) []const Order {
+            return self.orders[0..self.order_count];
+        }
+
+        /// Appends `o` as the least significant sort key. Panics, naming the
+        /// limit, past `max_orders`.
+        pub fn addOrder(self: *Self, o: Order) void {
+            if (self.order_count >= max_orders)
+                std.debug.panic("zom: query has more than max_orders ({d}) orders", .{max_orders});
+            self.orders[self.order_count] = o;
+            self.order_count += 1;
+        }
+
+        /// A copy of this query also sorted by `field`, after the keys it
+        /// already has: `.order(.a, .asc).order(.b, .desc)` is `ORDER BY a
+        /// ASC, b DESC`. Past `max_orders` keys, panics.
+        pub fn order(self: Self, comptime field: Field, direction: Direction) Self {
+            var next = self;
+            next.addOrder(.{ .field = field, .direction = direction });
+            return next;
+        }
+
+        /// A copy of this query with its sort keys replaced by `keys`, a
+        /// tuple of `.{ field, direction }` pairs with `field`
+        /// comptime-known: `reorder(.{ .{ .role, .asc }, .{ .age, .desc } })`.
+        /// `reorder(.{})` removes the order. More than `max_orders` keys is
+        /// a compile error.
+        pub fn reorder(self: Self, keys: anytype) Self {
+            const K = @TypeOf(keys);
+            const info = @typeInfo(K);
+            if (info != .@"struct" or !info.@"struct".is_tuple)
+                @compileError("zom: reorder takes a tuple of .{ field, direction } pairs, e.g. .{ .{ .age, .desc } }, got " ++ @typeName(K));
+            const fields = info.@"struct".fields;
+            if (fields.len > max_orders)
+                @compileError(std.fmt.comptimePrint("zom: reorder has {d} keys, more than max_orders ({d})", .{ fields.len, max_orders }));
+            var next = self;
+            next.order_count = 0;
+            inline for (fields) |f| {
+                const key = @field(keys, f.name);
+                const P = @TypeOf(key);
+                const pinfo = @typeInfo(P);
+                if (pinfo != .@"struct" or !pinfo.@"struct".is_tuple or pinfo.@"struct".fields.len != 2)
+                    @compileError("zom: a reorder key is .{ field, direction }, e.g. .{ .age, .desc }, got " ++ @typeName(P));
+                if (!pinfo.@"struct".fields[0].is_comptime)
+                    @compileError("zom: a reorder key's field must be comptime-known, e.g. .{ .age, .desc }");
+                next.addOrder(.{ .field = comptime key[0], .direction = key[1] });
+            }
+            return next;
         }
 
         /// True when every node is a top-level filter (no groups), so the
@@ -935,19 +992,36 @@ pub fn Query(comptime T: type) type {
             return e.?;
         }
 
-        pub fn lessThan(o: Order, a: T, b: T) bool {
+        /// `a` against `b` on one sort key, direction applied. Nulls sort
+        /// as Postgres does by default, above every value: last on asc,
+        /// first on desc. Two nulls, or two values that do not compare, are
+        /// `.eq`, so the next key decides.
+        pub fn orderBy(o: Order, a: T, b: T) std.math.Order {
             const x = fieldValue(a, o.field);
             const y = fieldValue(b, o.field);
-            // Postgres default: null sorts above every value, so nulls come
-            // last on asc and first on desc.
             const ord = if (x == .null or y == .null)
                 std.math.order(@intFromBool(x == .null), @intFromBool(y == .null))
             else
-                compare(o.field, x, y) orelse return false;
+                compare(o.field, x, y) orelse .eq;
             return switch (o.direction) {
-                .asc => ord == .lt,
-                .desc => ord == .gt,
+                .asc => ord,
+                .desc => ord.invert(),
             };
+        }
+
+        /// The comparator for `std.mem.sort(T, rows, query.orderSlice(),
+        /// lessThan)`: compares key by key, moving to the next key on a tie.
+        /// Rows equal on every key are not less than each other, so a
+        /// stable sort keeps them in the order it was given them.
+        pub fn lessThan(orders: []const Order, a: T, b: T) bool {
+            for (orders) |o| {
+                switch (orderBy(o, a, b)) {
+                    .lt => return true,
+                    .gt => return false,
+                    .eq => {},
+                }
+            }
+            return false;
         }
     };
 }

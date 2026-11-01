@@ -9,6 +9,15 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- Order by several fields. `order(field, direction)` now appends a sort key,
+  so `.order(.role, .asc).order(.age, .desc)` is `ORDER BY role ASC, age
+  DESC`, and `reorder(.{ .{ .role, .asc }, .{ .age, .desc } })` replaces them
+  all (`reorder(.{})` clears them). At most `Query.max_orders = 4` keys: a
+  fifth `order` panics naming the limit, and a `reorder` tuple that is too
+  long is a compile error. The memory adapter sorts with the stable
+  `std.mem.sort`, so rows tied on every key keep their insertion order.
+  `zom.sql.compileSelect` renders every key. `zom.lint` checks multi-key
+  orders under `order_on`. ([#32])
 - Boolean groups. `whereAny(.{ .{ .age, .gt, 30 }, .{ .role, .eq, .admin } })`
   AND-s an OR group, `whereNot(cond)` a negation, and `zom.any`, `zom.all`
   and `zom.not` nest inside either. Each condition is `.{ field, op, value }`,
@@ -203,6 +212,12 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Changed (breaking)
 
+- `Relation.order` (and the new `Query.order`) appends a sort key instead of
+  replacing the order: use `reorder` to replace. `Query.order: ?Order` is now
+  `orders` / `order_count`, read through `orderSlice()` and written with
+  `addOrder`. `Query.lessThan` takes the order list (`[]const Order`), for
+  `std.mem.sort(T, rows, query.orderSlice(), Q.lessThan)`; `Query.orderBy`
+  compares on one key. ([#32])
 - `Query.Filter` is `{ field, op, operand }`, where `operand` is a
   `zom.query.Operand` (`none`, `one`, `many`, `range`), replacing `value`.
   A hand-built filter becomes `.operand = .{ .one = v }`. ([#30])
@@ -309,3 +324,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#27]: https://github.com/kamalogudah/zom/issues/27
 [#30]: https://github.com/kamalogudah/zom/issues/30
 [#31]: https://github.com/kamalogudah/zom/issues/31
+[#32]: https://github.com/kamalogudah/zom/issues/32
