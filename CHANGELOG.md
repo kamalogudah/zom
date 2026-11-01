@@ -21,6 +21,32 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- zom-pg, a PostgreSQL gateway in `adapters/pg` on pg.zig (pinned to the
+  `zig-0.16.0` branch, commit `1f2bf9e`). A `pg.Pool` from a URL or
+  separate fields, statements from zom-sql, `zom.Value` params bound
+  through `pg.Stmt`, rows decoded by column name, `count` over the compiled
+  `SELECT`, `insertMany` in one transaction, and Postgres errors mapped to
+  the shared names (`23505` is `error.DuplicatePrimaryKey`). It passes the
+  full lint suite, which runs when `ZOM_PG_URL` is set. ([#37])
+
+- Caller-owned strings. A dataset can declare `pub const strings:
+  zom.StringOwnership = .caller`: the strings it returns are allocated with
+  the allocator passed to `read` / `readProjected` / `insert`, which then
+  takes one (`insert(*Self, Tuple, Allocator)`). Relations gain
+  `free(allocator, rows)` and `freeOne(allocator, tuple)`, and `Create`
+  gains `commitAlloc(allocator)`; all three work on every adapter, so code
+  that frees through them runs unchanged on memory and Postgres. zom frees
+  the strings it drops itself: in `.fallback` reads, in `select` mapped down
+  by zom, in `one`'s extra row, in `count` on a fallback relation, and the
+  attributes a `mapWith` mapper leaves out. `zom.strings` has the helpers
+  (`freeFields`, `freeAll`, `dupeFields`), and `Mapper.sources` lists the
+  fields a mapper copies. ([#37])
+
+- zom.lint frees what it reads with `free` / `freeOne` and creates with
+  `commitAlloc`, so a caller-owned adapter is leak-checked too, and checks
+  that strings from one read survive later reads (pg.zig reuses its row
+  buffer). ([#37])
+
 - zom-sql, a dialect-aware SQL compiler. `zom_sql.Dialect` (`placeholder`,
   `quote`, `returning`, `ilike`, `nulls_order`, `limit_all`) is a comptime
   argument with `Dialect.postgres` and `Dialect.sqlite` presets. It renders
@@ -413,3 +439,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#34]: https://github.com/kamalogudah/zom/issues/34
 [#35]: https://github.com/kamalogudah/zom/issues/35
 [#36]: https://github.com/kamalogudah/zom/issues/36
+[#37]: https://github.com/kamalogudah/zom/issues/37

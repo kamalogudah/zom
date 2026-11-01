@@ -39,6 +39,9 @@ pub const Adapter = adapter.Adapter;
 pub const Capability = adapter.Capability;
 pub const Capabilities = adapter.Capabilities;
 pub const Supports = adapter.Supports;
+/// Who frees the strings a read returns; see strings.zig.
+pub const StringOwnership = adapter.StringOwnership;
+pub const strings = @import("strings.zig");
 
 pub const changeset = @import("changeset.zig");
 
@@ -66,7 +69,9 @@ test {
     _ = @import("tests/lint_test.zig");
     _ = @import("tests/codec_test.zig");
     _ = file;
+    _ = strings;
     _ = @import("tests/query_test.zig");
     _ = @import("tests/projection_test.zig");
     _ = @import("tests/fallback_test.zig");
+    _ = @import("tests/owned_test.zig");
 }

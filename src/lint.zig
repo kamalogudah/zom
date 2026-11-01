@@ -35,6 +35,11 @@
 //! first error. A check that needs a capability or query feature the adapter
 //! lacks is skipped with a line saying why. Everything allocates through
 //! `std.testing.allocator`, so the test that calls `run` also fails on leaks.
+//!
+//! Lint frees what it reads the portable way, with the relation's `free`
+//! and `freeOne`, and creates through `commitAlloc`, so a dataset with
+//! caller-owned strings (`strings = .caller`) is checked for leaks too: every
+//! string it returns must be allocated with the allocator it was given.
 
 const std = @import("std");
 const testing = std.testing;
@@ -42,6 +47,7 @@ const adapter = @import("adapter.zig");
 const Schema = @import("schema.zig").Schema;
 const RelationOf = @import("relation.zig").Relation;
 const query = @import("query.zig");
+const strings = @import("strings.zig");
 
 pub const Role = enum { a, b, c };
 
@@ -90,6 +96,7 @@ const Check = struct {
 
 const checks = .{
     .{ Check{ .name = "read: no filters returns every row" }, checkReadAll },
+    .{ Check{ .name = "read: strings stay valid after later reads" }, checkReadStrings },
     .{ Check{ .name = "filter: every op on an int attribute" }, checkIntOps },
     .{ Check{ .name = "filter: eq/neq on string and enum attributes" }, checkStringOps },
     .{ Check{ .name = "filter: null semantics" }, checkNulls },
@@ -203,6 +210,12 @@ fn Fixture(comptime G: type, comptime F: type) type {
             const d = try g.dataset(Users);
             if (comptime A.has(Users, .batch_insert)) {
                 try testing.expectEqual(rows.len, try d.insertMany(rows));
+            } else if (comptime A.insertTakesAllocator(Users)) {
+                for (rows) |row| {
+                    const stored = try d.insert(row, testing.allocator);
+                    if (comptime A.stringOwnership(Users) == .caller)
+                        strings.freeFields(User, testing.allocator, stored, &.{});
+                }
             } else {
                 for (rows) |row| _ = try d.insert(row);
             }
@@ -219,7 +232,7 @@ const Order = enum { any, as_read };
 fn expectIds(rel: anytype, label: []const u8, order: Order, want: []const u32) !void {
     errdefer std.debug.print("zom.lint:   case: {s}\n", .{label});
     const rows = try rel.toSlice(testing.allocator);
-    defer testing.allocator.free(rows);
+    defer rel.free(testing.allocator, rows);
 
     var buf: [users.len]u32 = undefined;
     if (rows.len > buf.len) {
@@ -247,7 +260,7 @@ fn expectCount(rel: anytype, want: usize) !void {
 fn expectAges(rel: anytype, label: []const u8, want: []const ?u8) !void {
     errdefer std.debug.print("zom.lint:   case: {s}\n", .{label});
     const rows = try rel.toSlice(testing.allocator);
-    defer testing.allocator.free(rows);
+    defer rel.free(testing.allocator, rows);
 
     var buf: [users.len]?u8 = undefined;
     if (rows.len != want.len) {
@@ -268,7 +281,7 @@ fn byId(_: void, a: User, b: User) bool {
 fn expectRows(rel: anytype, label: []const u8, want: []const User) !void {
     errdefer std.debug.print("zom.lint:   case: {s}\n", .{label});
     const rows = try rel.toSlice(testing.allocator);
-    defer testing.allocator.free(rows);
+    defer rel.free(testing.allocator, rows);
     std.mem.sort(User, rows, {}, byId);
 
     var buf: [users.len + 4]User = undefined;
@@ -332,7 +345,7 @@ fn checkReadAll(comptime G: type, comptime F: type) !void {
     defer fx.deinit();
 
     const rows = try rel.toSlice(testing.allocator);
-    defer testing.allocator.free(rows);
+    defer rel.free(testing.allocator, rows);
     std.mem.sort(User, rows, {}, struct {
         fn lessThan(_: void, a: User, b: User) bool {
             return a.id < b.id;
@@ -347,6 +360,29 @@ fn checkReadAll(comptime G: type, comptime F: type) !void {
     }.lessThan);
     try testing.expectEqualDeep(@as([]const User, &want), @as([]const User, rows));
     try expectCount(rel, users.len);
+}
+
+/// A driver may hand out rows that point into a buffer reused by the next
+/// row or the next query (pg.zig does). The strings a read returns must be
+/// copies that outlive both.
+fn checkReadStrings(comptime G: type, comptime F: type) !void {
+    var fx: Fixture(G, F) = undefined;
+    const rel = try fx.init();
+    defer fx.deinit();
+    const a = testing.allocator;
+
+    const by_id = rel.order(.id, .asc);
+    const first = try by_id.toSlice(a);
+    defer rel.free(a, first);
+    // Other reads in between, of other strings.
+    const desc = try rel.order(.id, .desc).toSlice(a);
+    rel.free(a, desc);
+    if (try rel.byPk(5).one(a)) |u| rel.freeOne(a, u);
+
+    errdefer std.debug.print("zom.lint:   case: names of a read, after two more reads\n", .{});
+    const want = [_][]const u8{ "dee", "ada", "fay", "bob", "eve", "cy" };
+    try testing.expectEqual(want.len, first.len);
+    for (first, want) |row, name| try testing.expectEqualStrings(name, row.name);
 }
 
 fn checkIntOps(comptime G: type, comptime F: type) !void {
@@ -546,7 +582,7 @@ fn checkLimit(comptime G: type, comptime F: type) !void {
 
     // Without an order the rows are unspecified, but not how many.
     const rows = try rel.limit(4).toSlice(testing.allocator);
-    defer testing.allocator.free(rows);
+    defer rel.free(testing.allocator, rows);
     try testing.expectEqual(@as(usize, 4), rows.len);
     try expectCount(rel.limit(4), 4);
 }
@@ -576,9 +612,15 @@ fn checkOne(comptime G: type, comptime F: type) !void {
     const a = testing.allocator;
 
     const found = (try rel.byPk(3).one(a)) orelse return error.TestExpectedOneTuple;
+    defer rel.freeOne(a, found);
     try testing.expectEqualDeep(User{ .id = 3, .name = "fay", .age = 17, .role = .c }, found);
     try testing.expectEqual(@as(?User, null), try rel.byPk(99).one(a));
-    try testing.expectEqual(@as(u32, 6), ((try rel.where(.id, .gt, 5).one(a)) orelse return error.TestExpectedOneTuple).id);
+    const six = (try rel.where(.id, .gt, 5).one(a)) orelse return error.TestExpectedOneTuple;
+    defer rel.freeOne(a, six);
+    try testing.expectEqual(@as(u32, 6), six.id);
+    const first = (try rel.order(.id, .asc).first(a)) orelse return error.TestExpectedOneTuple;
+    defer rel.freeOne(a, first);
+    try testing.expectEqualStrings("dee", first.name);
     try testing.expectError(error.MoreThanOneTuple, rel.where(.role, .eq, .a).one(a));
     try testing.expectError(error.MoreThanOneTuple, rel.one(a));
 }
@@ -599,7 +641,7 @@ fn checkProjection(comptime G: type, comptime F: type) !void {
 fn expectNames(rel: anytype, label: []const u8, want: []const []const u8) !void {
     errdefer std.debug.print("zom.lint:   case: {s}\n", .{label});
     const rows = try rel.toSlice(testing.allocator);
-    defer testing.allocator.free(rows);
+    defer rel.free(testing.allocator, rows);
     if (rows.len != want.len) {
         std.debug.print("zom.lint:   expected {d} rows, found {d}\n", .{ want.len, rows.len });
         return error.TestExpectedEqual;
@@ -614,12 +656,14 @@ fn checkInsert(comptime G: type, comptime F: type) !void {
     defer fx.deinit();
 
     const new: User = .{ .id = 7, .name = "gus", .age = null, .role = .b };
-    try testing.expectEqualDeep(new, try rel.create(new).commit());
+    const stored = try rel.create(new).commitAlloc(testing.allocator);
+    defer rel.freeOne(testing.allocator, stored);
+    try testing.expectEqualDeep(new, stored);
     var buf: [users.len + 4]User = undefined;
     try expectRows(rel, "after inserting id 7", seededPlus(&buf, &.{new}));
 
     const clash: User = .{ .id = 3, .name = "zed", .age = 1, .role = .a };
-    try expectSharedError("insert an existing key", error.DuplicatePrimaryKey, rel.create(clash).commit());
+    try expectSharedError("insert an existing key", error.DuplicatePrimaryKey, rel.create(clash).commitAlloc(testing.allocator));
     try expectRows(rel, "a failed insert changes nothing", seededPlus(&buf, &.{new}));
 }
 
@@ -636,12 +680,14 @@ fn checkInsertCopies(comptime G: type, comptime F: type) !void {
     // test binary instead of failing this check.
     const heap = try a.dupe(u8, "gus");
     defer a.free(heap);
-    const returned = try rel.create(.{ .id = 7, .name = heap, .age = 40, .role = .c }).commit();
+    const returned = try rel.create(.{ .id = 7, .name = heap, .age = 40, .role = .c }).commitAlloc(a);
+    defer rel.freeOne(a, returned);
     @memset(heap, '?');
 
     errdefer std.debug.print("zom.lint:   case: a string inserted from an overwritten buffer\n", .{});
     try testing.expectEqualStrings("gus", returned.name);
     const stored = (try rel.byPk(7).one(a)) orelse return error.TestExpectedOneTuple;
+    defer rel.freeOne(a, stored);
     try testing.expectEqualStrings("gus", stored.name);
 }
 
@@ -742,7 +788,10 @@ fn checkUpdate(comptime G: type, comptime F: type) !void {
     try testing.expectEqual(@as(usize, 1), try rel.byPk(1).update().set(.id, 10).commit());
     want[1].id = 10;
     try expectRows(rel, "set id 1 to 10", &want);
-    try testing.expectEqual(@as(?User, null), try rel.byPk(1).one(a));
+    if (try rel.byPk(1).one(a)) |u| {
+        rel.freeOne(a, u);
+        return error.TestExpectedNull;
+    }
 }
 
 fn checkDelete(comptime G: type, comptime F: type) !void {

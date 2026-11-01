@@ -43,6 +43,7 @@ const mapper = @import("mapper.zig");
 const changeset = @import("changeset.zig");
 const adapter = @import("adapter.zig");
 const projection = @import("projection.zig");
+const strings = @import("strings.zig");
 
 /// What a relation does with a query feature its dataset does not support.
 pub const Mode = enum {
@@ -99,6 +100,9 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
         pub const Adapter = adapter.Adapter(Gateway);
         pub const DatasetT = Adapter.Dataset(S);
         const supported = Adapter.supports(S);
+        /// The dataset allocates the strings it returns with the read's
+        /// allocator, so dropping a tuple means freeing them.
+        const caller_owns = Adapter.stringOwnership(S) == .caller;
 
         dataset: *DatasetT,
         query: Q = .{},
@@ -393,18 +397,33 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
             if (!p.in_memory) return rows;
             errdefer allocator.free(rows);
 
+            // Until the compaction below, `rows[0..kept]` and `rows[i..]`
+            // are the tuples whose strings are still owned here.
             var kept: usize = 0;
-            for (rows) |row| {
+            var i: usize = 0;
+            errdefer if (caller_owns) {
+                for (rows[0..kept]) |row| dropStrings(allocator, row);
+                for (rows[i..]) |row| dropStrings(allocator, row);
+            };
+            while (i < rows.len) : (i += 1) {
+                const row = rows[i];
                 if (p.rest.matches(row)) {
                     rows[kept] = row;
                     kept += 1;
+                } else if (caller_owns) {
+                    dropStrings(allocator, row);
                 }
             }
             // Stable, like the memory adapter, so ties keep the dataset's order.
             if (p.sort) std.mem.sort(Tuple, rows[0..kept], p.rest.orderSlice(), Q.lessThan);
             const start = @min(p.rest.offset, kept);
             const len = if (p.rest.limit) |l| @min(l, kept - start) else kept - start;
+            if (caller_owns) {
+                for (rows[0..start]) |row| dropStrings(allocator, row);
+                for (rows[start + len .. kept]) |row| dropStrings(allocator, row);
+            }
             std.mem.copyForwards(Tuple, rows[0..len], rows[start..][0..len]);
+            kept = len;
 
             const fetched = rows.len;
             const out = try allocator.realloc(rows, len);
@@ -431,8 +450,12 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
 
         // -- materializing -------------------------------------------------
 
-        /// Caller owns the returned slice. String attributes point into the
-        /// dataset and stay valid as long as the gateway lives.
+        /// Caller owns the returned slice: free it with `free(allocator,
+        /// rows)`, which also frees the strings when the dataset's are
+        /// caller-owned (see strings.zig). With a `.dataset` adapter (memory,
+        /// CSV, YAML) the strings point into the dataset and stay valid as
+        /// long as the gateway lives; with a `.caller` one (zom-pg) they
+        /// belong to `allocator`.
         ///
         /// After `select`, a dataset with `supports.projection` reads the
         /// selected attributes itself (`readProjected`); any other dataset
@@ -445,22 +468,58 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
                 if (!p.in_memory) return self.dataset.readProjected(p.pushed, Output, allocator);
             }
             const rows = try self.readTuples(p, allocator);
-            defer allocator.free(rows);
-            return mapper.Mapper(Tuple, Output, .{}).many(allocator, rows);
+            errdefer freeTuples(allocator, rows);
+            const out = try mapper.Mapper(Tuple, Output, .{}).many(allocator, rows);
+            // The selected strings moved to `out`; the others are dropped.
+            if (comptime caller_owns) {
+                for (rows) |row| strings.freeFields(Tuple, allocator, row, comptime strings.fieldNames(Output));
+            }
+            allocator.free(rows);
+            return out;
         }
 
         /// ROM's `relation.one`: null when empty, error when ambiguous.
+        /// Free the tuple with `freeOne(allocator, tuple)`.
         pub fn one(self: Self, allocator: std.mem.Allocator) !?Output {
             const rows = try self.limit(2).toSlice(allocator);
+            if (rows.len > 1) {
+                self.free(allocator, rows);
+                return error.MoreThanOneTuple;
+            }
             defer allocator.free(rows);
-            if (rows.len > 1) return error.MoreThanOneTuple;
             return if (rows.len == 1) rows[0] else null;
         }
 
+        /// Free the tuple with `freeOne(allocator, tuple)`.
         pub fn first(self: Self, allocator: std.mem.Allocator) !?Output {
             const rows = try self.limit(1).toSlice(allocator);
             defer allocator.free(rows);
             return if (rows.len == 1) rows[0] else null;
+        }
+
+        /// Frees what `toSlice` returned, with the allocator given to it:
+        /// the slice, and the strings in it when the dataset's strings are
+        /// caller-owned. Correct on every adapter, so code that should run
+        /// on memory and Postgres alike frees reads with it.
+        pub fn free(self: Self, allocator: std.mem.Allocator, rows: []const Output) void {
+            _ = self;
+            if (comptime caller_owns) strings.freeAll(Output, allocator, rows) else allocator.free(rows);
+        }
+
+        /// Frees the strings of a tuple from `one`, `first` or
+        /// `create(...).commitAlloc(allocator)`, when they are
+        /// caller-owned. Does nothing for a `.dataset` adapter.
+        pub fn freeOne(self: Self, allocator: std.mem.Allocator, row: Output) void {
+            _ = self;
+            if (comptime caller_owns) strings.freeFields(Output, allocator, row, &.{});
+        }
+
+        fn freeTuples(allocator: std.mem.Allocator, rows: []const Tuple) void {
+            if (comptime caller_owns) strings.freeAll(Tuple, allocator, rows) else allocator.free(rows);
+        }
+
+        fn dropStrings(allocator: std.mem.Allocator, row: Tuple) void {
+            strings.freeFields(Tuple, allocator, row, &.{});
         }
 
         /// The number of tuples `toSlice` would return. A `.fallback`
@@ -476,7 +535,7 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
             const p = self.plan();
             if (!p.in_memory) return try self.dataset.count(p.pushed);
             const rows = try self.readTuples(p, allocator);
-            defer allocator.free(rows);
+            defer freeTuples(allocator, rows);
             return rows.len;
         }
 
@@ -488,10 +547,20 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
         }
 
         /// ROM's `relation.map_with(:mapper)`. `M.Input` is `Output`.
+        ///
+        /// With caller-owned strings, the strings the mapper copies into
+        /// the entities move there (free them yourself, or read into an
+        /// arena), and the others are freed here. A mapper that copies one
+        /// string attribute into two fields gives two owners of one string.
         pub fn mapWith(self: Self, comptime M: type, allocator: std.mem.Allocator) ![]M.Output {
             const rows = try self.toSlice(allocator);
-            defer allocator.free(rows);
-            return M.many(allocator, rows);
+            errdefer self.free(allocator, rows);
+            const out = try M.many(allocator, rows);
+            if (comptime caller_owns) {
+                for (rows) |row| strings.freeFields(Output, allocator, row, M.sources);
+            }
+            allocator.free(rows);
+            return out;
         }
 
         // -- commands / changesets ----------------------------------------

@@ -25,12 +25,21 @@
 //! and may declare:
 //!
 //!   insert(*Self, S.Tuple) !S.Tuple                  // .writable
+//!     or insert(*Self, S.Tuple, std.mem.Allocator) !S.Tuple
 //!   insertMany(*Self, []const S.Tuple) !usize        // .batch_insert
 //!   update(*Self, Q, []const Q.Change) !usize        // .updatable
 //!   delete(*Self, Q) !usize                          // .deletable
 //!   pub const supports: zom.Supports                 // query features
 //!   readProjected(*Self, Q, comptime P: type, std.mem.Allocator) ![]P
 //!   pub fn filterable(comptime field: []const u8, comptime op: zom.Op) bool
+//!   pub const strings: zom.StringOwnership           // .dataset when left out
+//!
+//! `strings` says who owns the strings in the tuples `read`, `readProjected`
+//! and `insert` return (see strings.zig). With `.dataset` they point into
+//! the dataset and the caller frees only the slice. With `.caller` they are
+//! allocated with the allocator passed in, so `insert` must take one, and
+//! every string attribute must be a slice. Callers free either kind the same
+//! way, with the relation's `free` and `freeOne`.
 //!
 //! `readProjected` is required when `supports.projection` is true: it reads
 //! the rows `read` would, as `P`, a `zom.Project(S.Tuple, ...)` struct with
@@ -51,6 +60,8 @@
 
 const std = @import("std");
 const q = @import("query.zig");
+const strings = @import("strings.zig");
+pub const StringOwnership = strings.StringOwnership;
 
 /// The query features a dataset can evaluate itself. A dataset declares
 /// `pub const supports: zom.Supports = ...;`, setting only what it handles;
@@ -187,6 +198,20 @@ pub fn Adapter(comptime G: type) type {
             return "`supports.order_on` is false, so it only orders by the primary key '" ++ @tagName(S.primary_key) ++ "'";
         }
 
+        /// The dataset's `strings`, or `.dataset` when it declares none.
+        pub fn stringOwnership(comptime S: type) StringOwnership {
+            const D = Dataset(S);
+            return if (@hasDecl(D, "strings")) D.strings else .dataset;
+        }
+
+        /// True when the dataset's `insert` takes an allocator for the
+        /// strings of the tuple it returns.
+        pub fn insertTakesAllocator(comptime S: type) bool {
+            const D = Dataset(S);
+            if (!@hasDecl(D, "insert")) return false;
+            return @typeInfo(@TypeOf(D.insert)).@"fn".params.len == 3;
+        }
+
         pub fn has(comptime S: type, comptime cap: Capability) bool {
             return @field(capabilities(S), @tagName(cap));
         }
@@ -313,11 +338,42 @@ fn checkDataset(comptime G: type, comptime S: type) void {
         .returns = .{ .fallible = usize },
         .text = "fn (*Self, zom.Query(Tuple)) !usize",
     });
-    problems = problems ++ checkMethod(D, "insert", false, .{
+    var ownership: StringOwnership = .dataset;
+    if (@hasDecl(D, "strings")) {
+        if (@TypeOf(D.strings) != StringOwnership) {
+            problems = problems ++ "\n  - `strings` must be a `zom.StringOwnership`, found `" ++ @typeName(@TypeOf(D.strings)) ++ "`";
+        } else {
+            ownership = D.strings;
+        }
+    }
+    if (ownership == .caller) {
+        for (@typeInfo(T).@"struct".fields) |f| {
+            if (strings.isStringField(f.type) and !strings.isFreeableString(f.type))
+                problems = problems ++ "\n  - `strings` is `.caller`, so '" ++ f.name ++ "' must be a slice such as []const u8, found `" ++
+                    @typeName(f.type) ++ "`";
+        }
+    }
+    const insert_plain: Signature = .{
         .params = &.{T},
         .returns = .{ .fallible = T },
         .text = "fn (*Self, Tuple) !Tuple",
-    });
+    };
+    const insert_alloc: Signature = .{
+        .params = &.{ T, std.mem.Allocator },
+        .returns = .{ .fallible = T },
+        .text = "fn (*Self, Tuple, std.mem.Allocator) !Tuple",
+    };
+    if (@hasDecl(D, "insert")) {
+        const F = @TypeOf(D.insert);
+        if (ownership == .caller) {
+            if (!matches(D, F, insert_alloc))
+                problems = problems ++ "\n  - `strings` is `.caller`, so `insert` must be `" ++ insert_alloc.text ++
+                    "` (the allocator owns the returned strings), found `" ++ fnName(F) ++ "`";
+        } else if (!matches(D, F, insert_plain) and !matches(D, F, insert_alloc)) {
+            problems = problems ++ "\n  - `insert` must be `" ++ insert_plain.text ++ "` or `" ++ insert_alloc.text ++
+                "`, found `" ++ fnName(F) ++ "`";
+        }
+    }
     problems = problems ++ checkMethod(D, "insertMany", false, .{
         .params = &.{[]const T},
         .returns = .{ .fallible = usize },

@@ -24,9 +24,26 @@ pub fn Create(comptime Rel: type) type {
             return next;
         }
 
-        /// Returns the tuple as stored by the adapter.
+        /// Returns the tuple as stored by the adapter. On an adapter whose
+        /// strings are caller-owned (zom-pg) the returned strings need an
+        /// allocator, so use `commitAlloc` there.
         pub fn commit(self: Self) !Rel.Tuple {
             comptime Rel.Adapter.require(Rel.schema, .writable, "create");
+            if (comptime Rel.Adapter.insertTakesAllocator(Rel.schema))
+                @compileError("zom: adapter '" ++ Rel.Adapter.name ++ "' returns the stored tuple of relation '" ++
+                    Rel.schema.name ++ "' with strings in an allocator; use `commitAlloc(allocator)` and free " ++
+                    "the result with the relation's `freeOne(allocator, tuple)`");
+            return self.relation.dataset.insert(self.tuple);
+        }
+
+        /// `commit` on any adapter: the returned tuple's strings are
+        /// allocated with `allocator` when the adapter's strings are
+        /// caller-owned. Free it with the relation's `freeOne(allocator,
+        /// tuple)`, which is a no-op elsewhere.
+        pub fn commitAlloc(self: Self, allocator: std.mem.Allocator) !Rel.Tuple {
+            comptime Rel.Adapter.require(Rel.schema, .writable, "create");
+            if (comptime Rel.Adapter.insertTakesAllocator(Rel.schema))
+                return self.relation.dataset.insert(self.tuple, allocator);
             return self.relation.dataset.insert(self.tuple);
         }
     };
@@ -54,6 +71,9 @@ pub fn CreateMany(comptime Rel: type) type {
             if (self.tuples.len == 0) return 0;
             if (comptime Rel.Adapter.has(Rel.schema, .batch_insert))
                 return self.relation.dataset.insertMany(self.tuples);
+            if (comptime Rel.Adapter.insertTakesAllocator(Rel.schema))
+                @compileError("zom: `createMany` on relation '" ++ Rel.schema.name ++ "' would loop over adapter '" ++
+                    Rel.Adapter.name ++ "'s `insert`, which allocates the tuple it returns; the dataset needs `insertMany`");
             for (self.tuples) |t| _ = try self.relation.dataset.insert(t);
             return self.tuples.len;
         }

@@ -20,6 +20,10 @@ pub const LimitedGateway = Gateway("limited", LimitedDataset);
 pub const OrOnlyGateway = Gateway("oronly", OrOnlyDataset);
 /// `filterable` with the wrong signature.
 pub const BadFilterableGateway = Gateway("badfilterable", BadFilterableDataset);
+/// Caller-owned strings, with `insert` taking the allocator (like zom-pg).
+pub const OwnedGateway = Gateway("owned", OwnedDataset(true));
+/// Caller-owned strings, but `insert` takes no allocator: a contract error.
+pub const OwnedNoAllocGateway = Gateway("ownednoalloc", OwnedDataset(false));
 
 fn Gateway(comptime name: []const u8, comptime DatasetFn: fn (comptime type) type) type {
     return struct {
@@ -134,4 +138,28 @@ fn OrOnlyDataset(comptime S: type) type {
             return 0;
         }
     };
+}
+
+fn OwnedDataset(comptime insert_takes_allocator: bool) fn (comptime type) type {
+    return struct {
+        fn D(comptime S: type) type {
+            const Q = zom.Query(S.Tuple);
+            return struct {
+                pub const strings: zom.StringOwnership = .caller;
+                pub fn read(_: *@This(), _: Q, a: std.mem.Allocator) ![]S.Tuple {
+                    return a.alloc(S.Tuple, 0);
+                }
+                pub fn count(_: *@This(), _: Q) !usize {
+                    return 0;
+                }
+                pub const insert = if (insert_takes_allocator) insertAlloc else insertPlain;
+                fn insertAlloc(_: *@This(), t: S.Tuple, _: std.mem.Allocator) !S.Tuple {
+                    return t;
+                }
+                fn insertPlain(_: *@This(), t: S.Tuple) !S.Tuple {
+                    return t;
+                }
+            };
+        }
+    }.D;
 }

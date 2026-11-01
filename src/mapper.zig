@@ -16,6 +16,17 @@ pub fn Mapper(comptime Src: type, comptime Dst: type, comptime opts: Options) ty
         pub const Input = Src;
         pub const Output = Dst;
 
+        /// The `Src` fields copied into `Dst`, e.g. to know which strings
+        /// the output now shares with the input.
+        pub const sources: []const []const u8 = blk: {
+            var names: []const []const u8 = &.{};
+            for (@typeInfo(Dst).@"struct".fields) |f| {
+                const src_name = sourceName(f.name);
+                if (@hasField(Src, src_name)) names = names ++ .{src_name};
+            }
+            break :blk names;
+        };
+
         fn sourceName(comptime name: []const u8) []const u8 {
             for (opts.renames) |r| {
                 if (std.mem.eql(u8, r.to, name)) return r.from;

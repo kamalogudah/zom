@@ -136,6 +136,8 @@ breaking change needs a minor version bump and an entry in
 | `zom.Adapter(G)` | Checks gateway `G` against the [adapter contract](#the-adapter-contract), reporting every problem in one compile error. Has `Gateway`, `name` (`G.adapter_name`), `Dataset(S)` (checks the dataset for schema `S`), `capabilities(S) Capabilities`, `has(S, cap) bool`, `readOnly(S) bool`, `require(S, cap, method)`, `supports(S) Supports`, and `filterGap(S, field, op)` / `orderGap(S, field)`, which return null when the dataset can evaluate that filter or sort key, else why not. |
 | `zom.Supports` | The query features a dataset evaluates itself: `or` (boolean groups), `in` (`in`, `not_in`), `like` (`like`, `ilike`), `order_on` (order by any attribute, not only the key), `offset`, `projection`, `join`. `Supports.all` sets them all. |
 | `zom.Capability` | `writable`, `batch_insert`, `updatable`, `deletable`, `transaction`. |
+| `zom.StringOwnership` | `dataset` or `caller`: who frees the strings in the tuples a dataset returns. See [Memory rules](#memory-rules). |
+| `zom.strings` | Helpers for caller-owned strings: `freeFields(T, allocator, item, keep)` frees an item's string attributes except those named in `keep`, `freeAll(T, allocator, items)` frees every item's strings and the slice, and `dupeFields(T, allocator, item)` copies them (freeing its copies on error). |
 | `zom.Capabilities` | A struct with one `bool` per `Capability`, all `false` by default. |
 | `zom.adapter` | The module behind `Adapter`, `Capability` and `Capabilities`. |
 | `zom.Query(T)` | The adapter-neutral query a relation builds: a filter tree, sort keys (`orders`, at most `max_orders = 4`, read through `orderSlice()`, most significant first), `limit: ?usize`, `offset: usize`, and `all: bool` (default false: set it to say an update or delete with no filters is meant to touch every row, which [zom-sql](#zom-sql) otherwise refuses; it changes nothing about which rows match). The tree is stored flat so a copy is a full copy: `filters` (at most `max_filters = 16`) and `nodes` (at most `max_nodes = 32`: filters plus `any` / `all` / `not` groups, which refer to children by index), AND-ed at the top level. An adapter without `or` support reads an AND-only query through `filterSlice()` (it asserts `isConjunction()`); one with it walks `nodeSlice()` from `topNodes()`. `matches(row)` and `truth(row) ?bool` evaluate the query in memory with SQL's three-valued logic, alongside `lessThan(orders, a, b)` (the comparator for `std.mem.sort(T, rows, query.orderSlice(), lessThan)`: key by key, the next key breaking ties), `orderBy(order, a, b)` (one key) and `fieldValue(row, field)`. Nested types: `Field` (enum of `T`'s fields), `Filter` (`field`, `op`, `operand`), `Node` (`filter`, `and_group`, `or_group`, `not`), `Children`, `Order`, `Change`. `max_in = 64` bounds one `in` list. The query also builds itself, with the same `where` / `whereIn` / `whereNotIn` / `whereAny` / `whereNot` / `order` / `reorder` as a relation (and `addOrder`), so adapters and tests can make one without a gateway. |
@@ -145,7 +147,7 @@ breaking change needs a minor version bump and an entry in
 | `zom.Direction` | `asc`, `desc`. |
 | `zom.Container(spec)` | Declares gateways and relations once; `init(self, allocator, Config)` / `deinit()` connect and disconnect them all. See [Container](#container). |
 | `zom.changeset` | `Create(Rel)`, `CreateMany(Rel)` and `Update(Rel)`, the types returned by `relation.create`, `relation.createMany` and `relation.update`. You don't name them yourself. |
-| `zom.Mapper(Src, Dst, .{ .renames })` | A comptime mapper: `call(src) Dst` and `many(allocator, srcs) ![]Dst`. A `Dst` field takes the `Src` field of the same name (or its rename), else its default; neither is a compile error. |
+| `zom.Mapper(Src, Dst, .{ .renames })` | A comptime mapper: `call(src) Dst` and `many(allocator, srcs) ![]Dst`. A `Dst` field takes the `Src` field of the same name (or its rename), else its default; neither is a compile error. `sources` lists the `Src` fields it copies. |
 | `zom.combineMany(.{ .into, .parent_key, .child_key }, allocator, parents, children)` | Sets `parent.into` to the children whose `child_key` equals the parent's `parent_key`. O(n·m). |
 | `zom.mapper` | The module behind `Mapper` and `combineMany`, with their option types `Options`, `Rename` and `CombineOptions`. |
 | `zom.codec` | Text cells to field values, for adapters whose rows arrive as strings. `decodeField(F, text, opts) !F` decodes one cell, and `decodeRow(T, cells, opts, ?*Diagnostic) !T` decodes a row, in field order or through `Options.columns`. `Options.null_text` (default `""`) means null. Strings borrow the cells. On error the `Diagnostic` has `row`, `column`, `field`, `text` and `err`, and formats with `{f}` as `14:3 (age): "abc" is not an integer from 0 to 255`. The other way, `encodeField(writer, value, opts)` and `encodeRow(writer, T, row, opts, sep)` write values back so they decode to the same thing: ints `{d}`, floats in their shortest round-trip form (decimal, or scientific outside `1e-6`..`1e21`), `true`/`false`, tag names, strings as they are, `null` as `null_text`. Nothing is quoted; that is the format writer's job. The accepted spellings are listed in `src/codec.zig`. |
@@ -174,13 +176,15 @@ relation and never touch the dataset. `field` is always an enum literal, and
 | `select(.{ field, ... })` | a projected relation | Reads return `zom.Project(Tuple, fields)` instead of `Tuple`. See [Projections](#projections). |
 | `allowFallback()` | a `.fallback` relation | Query features the dataset does not support compile, and run in memory. See [Query support](#query-support-strict-and-fallback). |
 | `onScan(hook)` | `Relation` | The same relation, reporting in-memory reads to `hook` (a `zom.ScanHook`, or null). A `Container` sets it for you. |
-| `toSlice(allocator)` | `![]Output` | Caller frees. `Output` is `Tuple`, or the projected struct after `select`. |
-| `one(allocator)` | `!?Output` | `null` when empty, `error.MoreThanOneTuple` when ambiguous. |
-| `first(allocator)` | `!?Output` | |
+| `toSlice(allocator)` | `![]Output` | Caller frees, with `free(allocator, rows)` to work on any adapter (see [Memory rules](#memory-rules)). `Output` is `Tuple`, or the projected struct after `select`. |
+| `one(allocator)` | `!?Output` | `null` when empty, `error.MoreThanOneTuple` when ambiguous. Free the tuple with `freeOne(allocator, tuple)`. |
+| `first(allocator)` | `!?Output` | Free like `one`. |
+| `free(allocator, rows)` | `void` | Frees what `toSlice` returned: the slice, and its strings when the adapter's strings are caller-owned. |
+| `freeOne(allocator, tuple)` | `void` | Frees a tuple's strings when they are caller-owned; a no-op on `.dataset` adapters. |
 | `count()` | `!usize` | The number of rows `toSlice` would return, so `limit` and `offset` apply. On a `.fallback` relation it is `count(allocator)`, because it may have to read the rows to count them. |
 | `mapTo(E, allocator)` | `![]E` | `mapWith(zom.Mapper(Output, E, .{}))`. |
 | `mapWith(M, allocator)` | `![]M.Output` | `M` is a `zom.Mapper` whose `Input` is `Output`. |
-| `create(tuple)` | `Create` | `.map(f)` applies `f: fn (Tuple) Tuple`; `.commit()` returns `!Tuple`, the stored tuple. A compile error after `select`. |
+| `create(tuple)` | `Create` | `.map(f)` applies `f: fn (Tuple) Tuple`; `.commit()` returns `!Tuple`, the stored tuple. `.commitAlloc(allocator)` does the same on every adapter, allocating the returned strings when they are caller-owned (zom-pg, where plain `commit()` is a compile error); free the result with `freeOne`. A compile error after `select`. |
 | `createMany(tuples)` | `CreateMany` | A compile error after `select`. `tuples: []const Tuple`, borrowed until commit. `.commit()` returns `!usize`, the rows inserted. Uses the dataset's `insertMany`, else loops over `insert` (see [the adapter contract](#the-adapter-contract)). |
 | `update()` | `Update` | `.set(field, value)` adds a change (at most `max_changes = 16`); `.commit()` returns `!usize`, the rows changed. |
 | `delete()` | `!usize` | The rows removed. |
@@ -422,12 +426,13 @@ In full, with `Q = zom.Query(S.Tuple)`:
 | `Gateway.transaction` | `fn (*Gateway, ...)` | no, `.transaction` | Not used by the core yet. |
 | `read` | `fn (*Dataset, Q, Allocator) ![]S.Tuple` | yes | Applies filters, then order, then offset and limit. The caller frees the slice. |
 | `count` | `fn (*Dataset, Q) !usize` | yes | The number of rows `read` would return: filters, offset and limit all apply. |
-| `insert` | `fn (*Dataset, S.Tuple) !S.Tuple` | no, `.writable` | Returns the tuple as stored. `error.DuplicatePrimaryKey` on a key clash. |
+| `insert` | `fn (*Dataset, S.Tuple) !S.Tuple`, or `fn (*Dataset, S.Tuple, Allocator) !S.Tuple` | no, `.writable` | Returns the tuple as stored. `error.DuplicatePrimaryKey` on a key clash. With `strings = .caller` it must take the allocator, which owns the returned strings; `createMany` then needs `insertMany`. |
 | `insertMany` | `fn (*Dataset, []const S.Tuple) !usize` | no, `.batch_insert` | Returns the tuples stored. `error.DuplicatePrimaryKey` on a key clash, with the stored rows or inside the batch. Used by `createMany`. |
 | `update` | `fn (*Dataset, Q, []const Q.Change) !usize` | no, `.updatable` | Returns the rows changed. A failed update changes nothing. |
 | `delete` | `fn (*Dataset, Q) !usize` | no, `.deletable` | Returns the rows removed. |
 | `supports` | `zom.Supports` | no | The query features the dataset handles; the defaults when missing. A strict relation that uses one left out does not compile; see [Query support](#query-support-strict-and-fallback). |
 | `filterable` | `fn (comptime field: []const u8, comptime op: zom.Op) bool` | no | Narrows `supports` per attribute, for a backend that only filters on some (TigerBeetle filters transfers on `ledger` and `code`, not `amount`). Called at compile time, only for ops `supports` allows; false makes that filter unsupported. Without it, every attribute is filterable. |
+| `strings` | `zom.StringOwnership` | no | `.dataset` (the default): returned strings point into the dataset. `.caller`: `read`, `readProjected` and `insert` allocate them with the allocator passed in, and every string attribute must be a slice. |
 | `readProjected` | `fn (*Dataset, Q, comptime P: type, Allocator) ![]P` | when `supports.projection` | The rows `read` would return, as `P`, a `zom.Project(S.Tuple, ...)` with some of the tuple's fields (copy them by name, e.g. with `zom.Mapper(S.Tuple, P, .{})`). Used by `select`. Without it, zom reads whole tuples and maps them down. |
 
 A method may take `self` by value, `*Self` or `*const Self`. Every dataset
@@ -615,6 +620,21 @@ pattern ending in a lone `\`, which memory reads as a literal `\`.
 `error.InvalidNullComparison` is returned for `lt` / `lte` / `gt` / `gte`
 against `null`. (`eq null` and `neq null` are `IS NULL` and `IS NOT NULL`.)
 
+### zom-pg
+
+`adapters/pg` is a gateway for PostgreSQL on
+[pg.zig](https://github.com/karlseguin/pg.zig): a connection pool,
+statements from zom-sql, `zom.Value` params bound through `pg.Stmt`, and
+rows decoded by column name. Its strings are caller-owned (see
+[Memory rules](#memory-rules)). Setup, type mapping and errors are in
+[adapters/pg/README.md](adapters/pg/README.md).
+
+```zig
+var pg = try zom_pg.Gateway.init(allocator, .{ .io = io, .url = "postgres://app@localhost/app" });
+defer pg.deinit();
+const users = try zom.Relation(UserSchema, zom_pg.Gateway).init(&pg);
+```
+
 ### Errors
 
 | Error | Returned by |
@@ -645,10 +665,30 @@ bump and a changelog entry:
 - `toSlice`, `mapTo`, `mapWith` and `Mapper.many` return slices the caller
   owns. zom-sql's `compile*` functions return a `Compiled` that the caller
   frees with `compiled.deinit(allocator)`.
-- String attributes are copied into the dataset's arena on insert and update,
-  so input buffers can be reused straight away. Strings you read back
-  (including those in tuples from `one`, `first` and `create(...).commit()`)
-  are valid for as long as the gateway lives.
+- Every adapter copies string attributes on insert and update, so input
+  buffers can be reused straight away.
+- Who owns the strings you read back depends on the adapter's
+  `zom.StringOwnership`. With `.dataset` (memory, CSV, YAML) they point into
+  the dataset and stay valid as long as the gateway lives. With `.caller`
+  (zom-pg) they are allocated with the allocator you passed to the read (or
+  to `commitAlloc`) and are yours. Code that should run on any adapter frees
+  with the relation:
+
+  ```zig
+  const rows = try users.toSlice(allocator);
+  defer users.free(allocator, rows); // allocator.free(rows) on memory
+  if (try users.byPk(1).one(allocator)) |u| {
+      defer users.freeOne(allocator, u); // a no-op on memory
+  }
+  const stored = try users.create(tuple).commitAlloc(allocator);
+  defer users.freeOne(allocator, stored);
+  ```
+
+  zom frees the strings it drops along the way (rows filtered out in memory
+  by a `.fallback` read, attributes `select` leaves out, the extra row
+  `one` reads). After `mapTo` / `mapWith`, the strings the mapper copied
+  belong to the entities (`zom.strings.freeAll(E, allocator, entities)`
+  frees them); the rest are freed. An arena per request avoids all of this.
 - `createMany` does not copy the slice you pass; keep it alive until
   `commit`. The tuples' strings are copied on commit, as with `create`.
 - A relation does not copy the values you filter on. A string passed to
@@ -693,8 +733,9 @@ rom-yaml:
 1. Adapter contract, `zom.lint` conformance suite, and `zom.Container`.
 2. `zom-csv` and `zom-yaml`, built on the memory engine.
 3. `zom-sql` compiler and the `zom-pg` driver on `karlseguin/pg.zig`,
-   *zom-sql's SELECT compiler is in `adapters/sql`; zom-pg is next.*
-   with projections and a richer query AST.
+   with projections and a richer query AST. *zom-sql is in `adapters/sql`
+   and zom-pg in `adapters/pg`; transactions and CI against a Postgres
+   container are next.*
 4. Associations in the schema, and `combine` with one `IN (...)` query
    instead of today's O(n·m) `combineMany`.
 5. Repositories, transactions and plugins (timestamps, pagination).
