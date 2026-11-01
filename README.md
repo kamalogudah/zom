@@ -137,9 +137,9 @@ breaking change needs a minor version bump and an entry in
 | `zom.Capability` | `writable`, `batch_insert`, `updatable`, `deletable`, `transaction`. |
 | `zom.Capabilities` | A struct with one `bool` per `Capability`, all `false` by default. |
 | `zom.adapter` | The module behind `Adapter`, `Capability` and `Capabilities`. |
-| `zom.Query(T)` | The adapter-neutral query a relation builds: `filters` (AND-ed, at most `max_filters = 16`), `order: ?Order`, `limit: ?usize`, `offset: usize`. Adapters read it through `filterSlice()`, and may use `matches(row)`, `lessThan(order, a, b)` and `fieldValue(row, field)` to evaluate it in memory. Nested types: `Field` (enum of `T`'s fields), `Filter`, `Order`, `Change`. |
+| `zom.Query(T)` | The adapter-neutral query a relation builds: `filters` (AND-ed, at most `max_filters = 16`), `order: ?Order`, `limit: ?usize`, `offset: usize`. Adapters read it through `filterSlice()`, and may use `matches(row)`, `lessThan(order, a, b)` and `fieldValue(row, field)` to evaluate it in memory. Nested types: `Field` (enum of `T`'s fields), `Filter` (`field`, `op`, `operand`), `Order`, `Change`. `max_in = 64` bounds one `in` list. The query also builds itself, with the same `where` / `whereIn` / `whereNotIn` as a relation, so adapters and tests can make one without a gateway. |
 | `zom.Value` | The runtime value carried by filters and changes. See [Value](#value). |
-| `zom.Op` | Filter operators: `eq`, `neq`, `lt`, `lte`, `gt`, `gte`. `op.sql()` returns the SQL spelling. |
+| `zom.Op` | Filter operators: `eq`, `neq`, `lt`, `lte`, `gt`, `gte`, `in`, `not_in`, `like`, `ilike`, `between`, `is_null`, `is_not_null`. `op.sql()` returns the SQL spelling, `op.operand()` the `Operand` variant it takes. |
 | `zom.Direction` | `asc`, `desc`. |
 | `zom.Container(spec)` | Declares gateways and relations once; `init(self, allocator, Config)` / `deinit()` connect and disconnect them all. See [Container](#container). |
 | `zom.changeset` | `Create(Rel)`, `CreateMany(Rel)` and `Update(Rel)`, the types returned by `relation.create`, `relation.createMany` and `relation.update`. You don't name them yourself. |
@@ -151,7 +151,7 @@ breaking change needs a minor version bump and an entry in
 | `zom.memory.Store(S)` | The in-memory row engine, usable without a gateway: `init(allocator)`, `deinit()`, `read`, `count`, `insert`, `insertMany`, `update`, `delete`, plus `rows() []const Tuple` (every row, in insertion order), `load(row)` and `loadMany(rows)` (insert without the primary-key check, for trusted bulk loads) and `clear()`. Strings are copied into the store's arena; rows it returns point into it until `clear` or `deinit`. |
 | `zom.lint` | The adapter conformance suite, see [Checking an adapter](#checking-an-adapter-with-zomlint). Also exports the schema it tests on, `Users` (`User`, `Role`), its seed rows, `users`, `OnDuplicate` and `expectSharedError`. |
 | `zom.sql` | `compileSelect(T, allocator, table, query) !Compiled`, returning `Compiled{ sql, params }` with Postgres placeholders (`$1`). `writeIdent` appends a quoted identifier. |
-| `zom.query` | The module behind `Query`, `Value`, `Op` and `Direction`. Adapters can use `toValue(x) Value` and `fromValue(F, value) !F` to convert between attribute values and `Value`. Its `assert*`, `isString` and `isComptimeOnly` helpers are used by the core and are not part of the frozen API. |
+| `zom.query` | The module behind `Query`, `Value`, `Op` and `Direction`, plus `Operand` (a filter's value side: `none`, `one`, `many: ValueList` or `range: [2]Value`), `ValueList` (a borrowed list read with `at(i)`) and `like(text, pattern, case)`, the `LIKE` matcher `matches` uses. Adapters can use `toValue(x) Value` and `fromValue(F, value) !F` to convert between attribute values and `Value`. Its `assert*`, `isString` and `isComptimeOnly` helpers are used by the core and are not part of the frozen API. |
 
 ### Relation
 
@@ -162,7 +162,8 @@ relation and never touch the dataset. `field` is always an enum literal, and
 | Method | Returns | Notes |
 |---|---|---|
 | `Relation.init(*Gateway)` | `!Relation` | Asks the gateway for the schema's dataset. |
-| `where(field, op, value)` | `Relation` | Filters are AND-ed. `null` means `IS NULL` (`eq`) or `IS NOT NULL` (`neq`). |
+| `where(field, op, value)` | `Relation` | Filters are AND-ed. `op` is comptime, and decides what `value` is (below). `eq null` / `neq null` are aliases of `is_null` / `is_not_null`. |
+| `whereIn(field, slice)`, `whereNotIn(field, slice)` | `Relation` | `in` / `not_in` over a runtime slice (or pointer to an array) of the attribute's type, at most `max_in` long. Borrowed, not copied. |
 | `byPk(value)` | `Relation` | `where(primary_key, .eq, value)`. |
 | `order(field, direction)` | `Relation` | One order; a second call replaces it. |
 | `limit(n)`, `offset(n)` | `Relation` | `n: usize`. |
@@ -176,6 +177,26 @@ relation and never touch the dataset. `field` is always an enum literal, and
 | `createMany(tuples)` | `CreateMany` | `tuples: []const Tuple`, borrowed until commit. `.commit()` returns `!usize`, the rows inserted. Uses the dataset's `insertMany`, else loops over `insert` (see [the adapter contract](#the-adapter-contract)). |
 | `update()` | `Update` | `.set(field, value)` adds a change (at most `max_changes = 16`); `.commit()` returns `!usize`, the rows changed. |
 | `delete()` | `!usize` | The rows removed. |
+
+What `where` takes for each op. Every value is type-checked against the
+attribute, and a comptime value (`.c`, `300`) must fit it.
+
+| `op` | `value` | Example |
+|---|---|---|
+| `eq`, `neq`, `lt`, `lte`, `gt`, `gte` | a value, or `null` on an optional attribute | `where(.age, .gte, 18)` |
+| `in`, `not_in` | a tuple of comptime-known values, at most `max_in` (64) | `where(.id, .in, .{ 1, 2, 3 })` |
+| `like`, `ilike` | a string pattern, on string attributes only | `where(.name, .like, "Ach%")` |
+| `between` | `.{ lo, hi }`, both inclusive | `where(.age, .between, .{ 18, 30 })` |
+| `is_null`, `is_not_null` | `{}`, on an optional attribute | `where(.deleted_at, .is_null, {})` |
+
+Nulls follow SQL: a null attribute only matches `is_null` / `is_not_null`.
+`NULL IN (...)`, `NULL NOT IN (...)` and `NULL LIKE ...` never match, a null
+inside an `in` list equals nothing and makes `not_in` match nothing, and an
+empty `in` list matches nothing. In a `like` pattern, `%` matches any run of
+characters, `_` one UTF-8 character, and `\` escapes the next one (`\%`,
+`\_`, `\\`); `ilike` folds ASCII case only. Building a query never
+allocates: a tuple's values become a static array, and `whereIn` borrows the
+slice.
 
 The relation's fields `dataset` and `query` are public too, so a relation
 can be handed to an adapter function such as `zom.sql.compileSelect`.
@@ -363,7 +384,9 @@ test "zom.lint" {
 
 Each check gets a new gateway seeded with the same six rows (`zom.lint.users`
 over `zom.lint.Users`). It reads them back, filters with every `Op` on
-integer, nullable, string and enum attributes, checks `null` semantics,
+integer, nullable, string and enum attributes (`in`/`not_in` only when the
+dataset's `supports.in` is set, `like`/`ilike` only with `supports.like`),
+checks `null` semantics,
 ordering (nulls last on `.asc`, first on `.desc`), `limit` and `offset` edge
 cases, and `one`; every case also checks that `count` equals the rows read.
 The write checks cover `insert` (returns the stored tuple, a duplicate key
@@ -438,6 +461,7 @@ adapter never changes zom's package hash. Every adapter's tests should call
 | `error.MoreThanOneTuple` | `one`. |
 | `error.DatasetTypeMismatch` | `memory.Gateway.dataset` (and so `Relation.init`), when two different schema types share a dataset name. |
 | `error.InvalidNullComparison` | `sql.compileSelect`, for `lt`/`lte`/`gt`/`gte` against `null`. |
+| `error.UnsupportedFilter` | `sql.compileSelect`, for `in`, `not_in`, `like`, `ilike` and `between`, which zom-sql will render with a `Dialect` (#35). |
 | `error.OutOfMemory` | Anything that takes or uses an allocator. |
 
 `zom.adapter.Error` reserves the names every adapter uses for the same
@@ -465,7 +489,10 @@ bump and a changelog entry:
 - `createMany` does not copy the slice you pass; keep it alive until
   `commit`. The tuples' strings are copied on commit, as with `create`.
 - A relation does not copy the values you filter on. A string passed to
-  `where` must stay alive until the relation is last used.
+  `where`, and the slice passed to `whereIn` / `whereNotIn`, must stay alive
+  and unchanged until the relation (and every relation chained from it) is
+  last used. A tuple given to `where(.x, .in, .{ ... })` has no such limit:
+  its values are comptime-known and stored statically.
 - The gateway must outlive every relation made from it, and
   `memory.Gateway.deinit` frees all of its datasets at once.
 - For `combineMany`, use an arena: it allocates one child slice per parent.

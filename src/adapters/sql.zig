@@ -48,18 +48,23 @@ pub fn compileSelect(comptime T: type, allocator: Allocator, table: []const u8, 
     for (query.filterSlice(), 0..) |f, i| {
         try sql.appendSlice(allocator, if (i == 0) " WHERE " else " AND ");
         try writeIdent(&sql, allocator, @tagName(f.field));
-        if (f.value == .null) {
-            try sql.appendSlice(allocator, switch (f.op) {
-                .eq => " IS NULL",
-                .neq => " IS NOT NULL",
-                else => return error.InvalidNullComparison,
-            });
-            continue;
+        switch (f.op) {
+            .is_null, .is_not_null => {
+                try sql.append(allocator, ' ');
+                try sql.appendSlice(allocator, f.op.sql());
+            },
+            .eq, .neq, .lt, .lte, .gt, .gte => {
+                // eq/neq null were stored as is_null/is_not_null.
+                if (f.operand.one == .null) return error.InvalidNullComparison;
+                try sql.append(allocator, ' ');
+                try sql.appendSlice(allocator, f.op.sql());
+                try sql.print(allocator, " ${d}", .{params.items.len + 1});
+                try params.append(allocator, f.operand.one);
+            },
+            // Rendering these needs a Dialect (ILIKE, empty IN lists, LIKE
+            // escapes); it comes with zom-sql (#35).
+            .in, .not_in, .like, .ilike, .between => return error.UnsupportedFilter,
         }
-        try sql.append(allocator, ' ');
-        try sql.appendSlice(allocator, f.op.sql());
-        try sql.print(allocator, " ${d}", .{params.items.len + 1});
-        try params.append(allocator, f.value);
     }
 
     if (query.order) |o| {

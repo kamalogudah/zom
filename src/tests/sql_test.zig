@@ -45,7 +45,7 @@ test "sql compiler renders the largest limit and offset in full" {
 test "sql compiler quotes reserved words and mixed case" {
     const Row = struct { id: u32, order: u32, createdAt: i64 };
     var query: zom.Query(Row) = .{};
-    query.addFilter(.{ .field = .order, .op = .eq, .value = .{ .int = 1 } });
+    query.addFilter(.{ .field = .order, .op = .eq, .operand = .{ .one = .{ .int = 1 } } });
     query.order = .{ .field = .createdAt, .direction = .asc };
     const compiled = try zom.sql.compileSelect(Row, testing.allocator, "user", query);
     defer compiled.deinit(testing.allocator);
@@ -66,4 +66,25 @@ test "writeIdent doubles embedded quotes" {
     list.clearRetainingCapacity();
     try zom.sql.writeIdent(&list, testing.allocator, "users\"; DROP TABLE users; --");
     try testing.expectEqualStrings("\"users\"\"; DROP TABLE users; --\"", list.items);
+}
+
+test "sql compiler renders is_null / is_not_null, and rejects ops that wait for zom-sql" {
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
+    defer gw.deinit();
+    const users = try Users.init(&gw);
+
+    const rel = users.where(.deleted_at, .is_not_null, {}).where(.deleted_at, .neq, null);
+    const compiled = try zom.sql.compileSelect(UserTuple, testing.allocator, Users.schema.name, rel.query);
+    defer compiled.deinit(testing.allocator);
+    try testing.expectEqualStrings(
+        "SELECT \"id\", \"name\", \"email\", \"age\", \"role\", \"deleted_at\" FROM \"users\" WHERE \"deleted_at\" IS NOT NULL AND \"deleted_at\" IS NOT NULL",
+        compiled.sql,
+    );
+
+    // IN, LIKE and BETWEEN need a Dialect; they are rendered by zom-sql (#35).
+    const a = testing.allocator;
+    const name = Users.schema.name;
+    try testing.expectError(error.UnsupportedFilter, zom.sql.compileSelect(UserTuple, a, name, users.where(.id, .in, .{ 1, 2 }).query));
+    try testing.expectError(error.UnsupportedFilter, zom.sql.compileSelect(UserTuple, a, name, users.where(.name, .like, "A%").query));
+    try testing.expectError(error.UnsupportedFilter, zom.sql.compileSelect(UserTuple, a, name, users.where(.age, .between, .{ 18, 30 }).query));
 }

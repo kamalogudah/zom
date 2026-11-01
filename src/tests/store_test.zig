@@ -29,7 +29,7 @@ test "insert, read, count, update and delete without a gateway" {
     try testing.expectError(error.DuplicatePrimaryKey, store.insertMany(&.{ user(5, "A", 1), user(5, "B", 2) }));
 
     var query: Q = .{};
-    query.addFilter(.{ .field = .age, .op = .gt, .value = .{ .int = 20 } });
+    query.addFilter(.{ .field = .age, .op = .gt, .operand = .{ .one = .{ .int = 20 } } });
     query.order = .{ .field = .age, .direction = .desc };
     const hits = try store.read(query, testing.allocator);
     defer testing.allocator.free(hits);
@@ -38,7 +38,7 @@ test "insert, read, count, update and delete without a gateway" {
     try testing.expectEqual(@as(usize, 3), try store.count(query));
 
     var by_id: Q = .{};
-    by_id.addFilter(.{ .field = .id, .op = .eq, .value = .{ .int = 2 } });
+    by_id.addFilter(.{ .field = .id, .op = .eq, .operand = .{ .one = .{ .int = 2 } } });
     try testing.expectEqual(@as(usize, 1), try store.update(by_id, &.{.{ .field = .name, .value = .{ .string = "Otis" } }}));
     try testing.expectEqualStrings("Otis", store.rows()[1].name);
 

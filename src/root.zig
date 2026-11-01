@@ -52,4 +52,5 @@ test {
     _ = @import("tests/codec_test.zig");
     _ = @import("tests/sql_test.zig");
     _ = file;
+    _ = @import("tests/query_test.zig");
 }

@@ -92,6 +92,9 @@ const checks = .{
     .{ Check{ .name = "filter: every op on an int attribute" }, checkIntOps },
     .{ Check{ .name = "filter: eq/neq on string and enum attributes" }, checkStringOps },
     .{ Check{ .name = "filter: null semantics" }, checkNulls },
+    .{ Check{ .name = "filter: in / not_in, from a tuple and from a slice", .features = &.{"in"} }, checkIn },
+    .{ Check{ .name = "filter: like / ilike", .features = &.{"like"} }, checkLike },
+    .{ Check{ .name = "filter: between, inclusive" }, checkBetween },
     .{ Check{ .name = "order: on the primary key" }, checkOrderPk },
     .{ Check{ .name = "order: on other attributes, nulls last on asc", .features = &.{"order_on"} }, checkOrderOn },
     .{ Check{ .name = "limit" }, checkLimit },
@@ -130,6 +133,8 @@ pub fn run(comptime G: type, comptime F: type) !void {
 }
 
 fn skipReason(comptime A: type, comptime c: Check) ?[]const u8 {
+    // Checking the dataset contract for every entry in `checks` adds up.
+    @setEvalBranchQuota(10_000);
     for (c.needs) |cap| {
         if (!A.has(Users, cap))
             return std.fmt.comptimePrint("dataset has no `{t}` capability", .{cap});
@@ -390,6 +395,71 @@ fn checkNulls(comptime G: type, comptime F: type) !void {
     try expectIds(rel.where(.age, .lte, null), "age lte null (matches nothing)", .any, &.{});
     try expectIds(rel.where(.age, .gt, null), "age gt null (matches nothing)", .any, &.{});
     try expectIds(rel.where(.age, .gte, null), "age gte null (matches nothing)", .any, &.{});
+    try expectIds(rel.where(.age, .is_null, {}), "age is_null", .any, &.{ 2, 5 });
+    try expectIds(rel.where(.age, .is_not_null, {}), "age is_not_null", .any, &.{ 1, 3, 4, 6 });
+}
+
+fn checkIn(comptime G: type, comptime F: type) !void {
+    var fx: Fixture(G, F) = undefined;
+    const rel = try fx.init();
+    defer fx.deinit();
+
+    try expectIds(rel.where(.id, .in, .{ 1, 3, 5 }), "id in (1, 3, 5)", .any, &.{ 1, 3, 5 });
+    try expectIds(rel.where(.id, .in, .{ 3, 99 }), "id in (3, 99)", .any, &.{3});
+    try expectIds(rel.where(.id, .in, .{}), "id in () (matches nothing)", .any, &.{});
+    try expectIds(rel.where(.id, .not_in, .{ 1, 3, 5 }), "id not_in (1, 3, 5)", .any, &.{ 2, 4, 6 });
+    try expectIds(rel.where(.id, .not_in, .{}), "id not_in () (every row)", .any, &.{ 1, 2, 3, 4, 5, 6 });
+    try expectIds(rel.where(.name, .in, .{ "ada", "zed", "fa" }), "name in (\"ada\", \"zed\", \"fa\")", .any, &.{2});
+    try expectIds(rel.where(.role, .in, .{ .a, .c }), "role in (.a, .c)", .any, &.{ 1, 3, 4, 6 });
+    try expectIds(rel.where(.role, .not_in, .{.a}), "role not_in (.a)", .any, &.{ 2, 3, 5, 6 });
+
+    // SQL null semantics: a null attribute is never in or not in a list, a
+    // null in the list equals nothing, and makes not_in match nothing.
+    try expectIds(rel.where(.age, .in, .{ 17, 52 }), "age in (17, 52)", .any, &.{ 3, 4 });
+    try expectIds(rel.where(.age, .not_in, .{17}), "age not_in (17) (nulls excluded)", .any, &.{ 1, 4, 6 });
+    try expectIds(rel.where(.age, .in, .{ 17, null }), "age in (17, null)", .any, &.{3});
+    try expectIds(rel.where(.age, .not_in, .{ 17, null }), "age not_in (17, null) (matches nothing)", .any, &.{});
+
+    var keys = [_]u32{ 6, 2, 99 };
+    try expectIds(rel.whereIn(.id, &keys), "whereIn id [6, 2, 99]", .any, &.{ 2, 6 });
+    try expectIds(rel.whereNotIn(.id, &keys), "whereNotIn id [6, 2, 99]", .any, &.{ 1, 3, 4, 5 });
+    try expectIds(rel.whereIn(.id, keys[0..0]), "whereIn id [] (matches nothing)", .any, &.{});
+    const roles = [_]Role{.b};
+    try expectIds(rel.whereIn(.role, &roles), "whereIn role [.b]", .any, &.{ 2, 5 });
+    try expectIds(rel.whereIn(.id, &keys).order(.id, .desc).limit(1), "whereIn id, order id desc, limit 1", .as_read, &.{6});
+}
+
+fn checkLike(comptime G: type, comptime F: type) !void {
+    var fx: Fixture(G, F) = undefined;
+    const rel = try fx.init();
+    defer fx.deinit();
+
+    try expectIds(rel.where(.name, .like, "a%"), "name like \"a%\"", .any, &.{2});
+    try expectIds(rel.where(.name, .like, "%e%"), "name like \"%e%\"", .any, &.{ 1, 5 });
+    try expectIds(rel.where(.name, .like, "_y"), "name like \"_y\"", .any, &.{6});
+    try expectIds(rel.where(.name, .like, "___"), "name like \"___\"", .any, &.{ 1, 2, 3, 4, 5 });
+    try expectIds(rel.where(.name, .like, "%"), "name like \"%\" (every row)", .any, &.{ 1, 2, 3, 4, 5, 6 });
+    try expectIds(rel.where(.name, .like, ""), "name like \"\" (no empty names)", .any, &.{});
+    try expectIds(rel.where(.name, .like, "fay"), "name like \"fay\" (no wildcard)", .any, &.{3});
+    try expectIds(rel.where(.name, .like, "fa_"), "name like \"fa_\"", .any, &.{3});
+    try expectIds(rel.where(.name, .like, "fa\\_"), "name like \"fa\\_\" (escaped _ is literal)", .any, &.{});
+    try expectIds(rel.where(.name, .like, "%\\%"), "name like \"%\\%\" (escaped % is literal)", .any, &.{});
+    try expectIds(rel.where(.name, .like, "A%"), "name like \"A%\" (case-sensitive)", .any, &.{});
+    try expectIds(rel.where(.name, .ilike, "A%"), "name ilike \"A%\"", .any, &.{2});
+    try expectIds(rel.where(.name, .ilike, "%E"), "name ilike \"%E\"", .any, &.{ 1, 5 });
+}
+
+fn checkBetween(comptime G: type, comptime F: type) !void {
+    var fx: Fixture(G, F) = undefined;
+    const rel = try fx.init();
+    defer fx.deinit();
+
+    try expectIds(rel.where(.id, .between, .{ 2, 4 }), "id between 2 and 4", .any, &.{ 2, 3, 4 });
+    try expectIds(rel.where(.id, .between, .{ 3, 3 }), "id between 3 and 3", .any, &.{3});
+    try expectIds(rel.where(.id, .between, .{ 4, 2 }), "id between 4 and 2 (lo > hi, empty)", .any, &.{});
+    try expectIds(rel.where(.age, .between, .{ 17, 36 }), "age between 17 and 36 (nulls excluded)", .any, &.{ 1, 3, 6 });
+    try expectIds(rel.where(.name, .between, .{ "b", "d" }), "name between \"b\" and \"d\"", .any, &.{ 4, 6 });
+    try expectIds(rel.where(.role, .between, .{ .a, .b }), "role between .a and .b (declaration order)", .any, &.{ 1, 2, 4, 5 });
 }
 
 fn checkOrderPk(comptime G: type, comptime F: type) !void {
