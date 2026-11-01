@@ -5,7 +5,7 @@ A [zom](../../README.md) gateway for PostgreSQL, on
 from [zom-sql](../sql) (`Dialect.postgres`); zom-pg runs them on a
 connection pool, binds their parameters and decodes the rows.
 
-It passes the whole `zom.lint` suite: every capability except
+It passes the whole `zom.lint` suite, has every capability including
 `transaction`, and every query feature except joins.
 
 ## Setup
@@ -104,8 +104,8 @@ it, refusing a value that does not fit (`error.ValueOutOfRange`).
 
 - `count` runs `SELECT COUNT(*)` over the compiled `SELECT`, so `limit` and
   `offset` apply, as the contract says.
-- `insertMany` runs zom-sql's multi-row `INSERT`s in one transaction: all or
-  nothing.
+- `insertMany` runs zom-sql's multi-row `INSERT`s in one transaction (a
+  SAVEPOINT inside `transaction`): all or nothing.
 - `update` checks each value against the attribute's Zig type before
   sending it, so setting a `u8` to 300 is `error.ValueOutOfRange` even
   though a `smallint` column would take it.
@@ -116,16 +116,73 @@ it, refusing a value that does not fit (`error.ValueOutOfRange`).
   of a query. Inside a `whereAny` / `whereNot` group they are still
   zom-sql's `error.InvalidNullComparison`.
 
+## Transactions
+
+`gateway.transaction(ctx, f)` takes a connection from the pool, runs
+`BEGIN`, calls `f(ctx, tx)`, and runs `COMMIT`. If `f` (or the `COMMIT`)
+fails, it runs `ROLLBACK` and returns that error unchanged. Zig has no
+closures, so whatever `f` needs comes in through `ctx`:
+
+```zig
+const Transfer = struct { from: u32, to: u32, amount: i64 };
+
+try gateway.transaction(Transfer{ .from = 1, .to = 2, .amount = 50 }, struct {
+    fn f(t: Transfer, tx: *zom_pg.Gateway) !void {
+        const accounts = try zom.Relation(AccountSchema, zom_pg.Gateway).init(tx);
+        _ = try accounts.byPk(t.from).update().set(.balance, ...).commit();
+        _ = try accounts.byPk(t.to).update().set(.balance, ...).commit();
+    }
+}.f);
+```
+
+- `tx` is a `*zom_pg.Gateway` pinned to the one connection: every relation
+  built on it runs inside the transaction, so relation code is the same as
+  outside one. It lives until `transaction` returns, so don't `deinit` it
+  or keep relations over it, and use it from one thread. Calls on the outer
+  gateway inside `f` are not part of the transaction (they take a second
+  connection, so with `pool_size = 1` they wait and then fail).
+- `transaction` returns what `f` returns, with `zom_pg.Gateway.Error`
+  added to its error set. `f` may also return a plain value.
+- **Nested transactions are SAVEPOINTs.** `tx.transaction(ctx, g)` rolls
+  back only `g`'s work when `g` fails, and the outer transaction goes on.
+- Postgres aborts the whole transaction on any failed statement. If `f`
+  catches an error and carries on, every later call fails with
+  `error.Database` (SQLSTATE `25P02`), and so does the `COMMIT`, which
+  rolls back. To recover from an expected error, such as a duplicate key,
+  run that statement in a nested `transaction` and catch the error there.
+
 ## Errors
 
 | Error | When |
 |---|---|
-| `error.DuplicatePrimaryKey` | A unique violation (SQLSTATE `23505`). |
+| `error.DuplicatePrimaryKey` | Any unique violation (SQLSTATE `23505`), on the primary key or on another `UNIQUE` constraint. Telling them apart would need the constraint's name, which can be anything, or a catalog query, which an aborted transaction refuses. `lastError().constraint` says which one it was. |
 | `error.ValueOutOfRange` | A value that does not fit the column or the attribute (`22003`, or a check before binding or after decoding). |
+| `error.NotFound` | The schema's table does not exist (`42P01`). |
 | `error.ReadOnly` | A read-only transaction or replica (`25006`). |
 | `error.ConnectionFailed` | The pool can't connect or hand out a connection in time, a socket error, or SQLSTATE class `08`. |
-| `error.PG` | Any other Postgres error. Its code and message are logged at debug level under the `.zom_pg` scope. |
+| `error.Database` | Any other Postgres or pg.zig error. |
 | `error.MissingColumn`, `error.ColumnTypeMismatch`, `error.UnexpectedNull` | The table doesn't match the schema. Each is logged with the column at debug level. |
+
+All of them except the last row are in `zom_pg.Gateway.Error`.
+
+`zom_pg.Gateway.lastError()` returns the last Postgres error on the
+calling thread as a `zom_pg.ServerError`: `code` (the SQLSTATE),
+`severity`, `message`, and, when the server sent them, `detail`, `hint`,
+`table`, `column` and `constraint`. It works like `errno`: it is kept per
+thread (so concurrent calls through one pool don't overwrite each other's),
+a call that succeeds leaves it as it was, and its strings are valid until
+the next Postgres error on that thread. Every Postgres error is also logged
+at debug level under the `.zom_pg` scope.
+
+```zig
+users.create(u).commitAlloc(allocator) catch |err| switch (err) {
+    error.DuplicatePrimaryKey => {
+        const e = zom_pg.Gateway.lastError().?;
+        std.log.warn("{s} is taken ({s})", .{ u.name, e.constraint orelse "?" });
+    },
+    else => return err,
+};
+```
 
 ## Testing
 
@@ -137,7 +194,8 @@ createdb zom_test
 ZOM_PG_URL=postgres://postgres@127.0.0.1:5432/zom_test zig build test
 ```
 
-Every check drops and recreates a `lint_users` table, so use a database you
-can spare that table in. Without `ZOM_PG_URL`, `zig build test` (here, or
+Every check drops and recreates a `lint_users` table, and the transaction
+and error tests a `tx_items` table, so use a database you can spare those
+tables in. Without `ZOM_PG_URL`, `zig build test` (here, or
 `zig build test-adapters` at the root) only checks that zom-pg compiles and
 satisfies the adapter contract.

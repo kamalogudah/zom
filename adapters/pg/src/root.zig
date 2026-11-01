@@ -11,8 +11,10 @@
 //! errors and string ownership, and README.md for setup.
 
 pub const Gateway = @import("gateway.zig").Gateway;
+pub const ServerError = @import("gateway.zig").ServerError;
 
 test {
     _ = @import("gateway.zig");
     _ = @import("lint_test.zig");
+    _ = @import("transaction_test.zig");
 }

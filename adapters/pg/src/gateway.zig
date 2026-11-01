@@ -11,6 +11,10 @@
 //! allocator passed to that call, and belongs to the caller. Free reads with
 //! the relation's `free(allocator, rows)` and single tuples with
 //! `freeOne(allocator, tuple)`, or read into an arena.
+//!
+//! Transactions: `transaction(ctx, f)` pins one pooled connection and hands
+//! `f` a gateway (`*Gateway`, the same type) whose datasets all run on it.
+//! A nested `transaction` on that gateway is a SAVEPOINT. See `Source`.
 
 const std = @import("std");
 const zom = @import("zom");
@@ -45,9 +49,40 @@ pub const Gateway = struct {
     };
 
     allocator: Allocator,
-    pool: *pg.Pool,
+    /// The pool, or inside `transaction` the connection it pinned.
+    source: Source,
     /// One per schema, made by the first `dataset(S)` call.
     datasets: std.ArrayList(Entry) = .empty,
+
+    /// What every zom-pg call can fail with, besides its own checks
+    /// (`error.MissingColumn` and the like). The first five are zom's
+    /// shared names (`zom.Error`).
+    pub const Error = error{
+        /// Any unique violation (SQLSTATE `23505`), on the primary key or
+        /// on another UNIQUE constraint: `lastError().constraint` says which.
+        DuplicatePrimaryKey,
+        /// `22003`, or a parameter pg.zig can't fit in its column.
+        ValueOutOfRange,
+        /// `42P01`: the schema's table does not exist.
+        NotFound,
+        /// `25006`: a read-only transaction or a replica.
+        ReadOnly,
+        /// No connection in time, a socket error, or SQLSTATE class `08`.
+        ConnectionFailed,
+        /// Any other Postgres or pg.zig error. `lastError()` has the server's.
+        Database,
+        OutOfMemory,
+        /// `std.Io` cancelled the call.
+        Canceled,
+    };
+
+    /// The Postgres error a call on this thread last got, or null if there
+    /// has been none. The strings live in a per-thread buffer (long ones
+    /// are cut short), valid until the next Postgres error on this thread.
+    /// A call that succeeds leaves it as it was, like `errno`.
+    pub fn lastError() ?ServerError {
+        return last_error.err;
+    }
 
     const Entry = struct {
         type_name: []const u8,
@@ -66,7 +101,7 @@ pub const Gateway = struct {
                 else => error.ConnectionFailed,
             };
         };
-        return .{ .allocator = allocator, .pool = pool };
+        return .{ .allocator = allocator, .source = .{ .pool = pool } };
     }
 
     fn openPool(allocator: Allocator, config: Config) !*pg.Pool {
@@ -80,10 +115,12 @@ pub const Gateway = struct {
         return pg.Pool.init(config.io, allocator, opts);
     }
 
+    /// Closes the pool. Not for the gateway `transaction` passes to its
+    /// callback, which `transaction` cleans up itself.
     pub fn deinit(self: *Gateway) void {
         for (self.datasets.items) |e| e.destroy(e.ptr, self.allocator);
         self.datasets.deinit(self.allocator);
-        self.pool.deinit();
+        if (self.source == .pool) self.source.pool.deinit();
         self.* = undefined;
     }
 
@@ -101,25 +138,151 @@ pub const Gateway = struct {
         }
         try self.datasets.ensureUnusedCapacity(self.allocator, 1);
         const d = try self.allocator.create(D);
-        d.* = .{ .pool = self.pool, .allocator = self.allocator };
+        d.* = .{ .source = self.source, .allocator = self.allocator };
         self.datasets.appendAssumeCapacity(.{ .type_name = name, .ptr = d, .destroy = D.destroy });
         return d;
     }
 
     /// Runs `sql` with no parameters and no rows, e.g. `CREATE TABLE`. zom
     /// has no migrations; this is for setup and tests.
-    pub fn exec(self: *Gateway, sql: []const u8) !void {
-        const conn = try acquire(self.pool);
-        defer self.pool.release(conn);
+    pub fn exec(self: *Gateway, sql: []const u8) Error!void {
+        const conn = try self.source.acquire();
+        defer self.source.release(conn);
         _ = conn.exec(sql, .{}) catch |err| return mapError(conn, err);
+    }
+
+    /// `f(ctx, tx)` in a transaction: BEGIN, then COMMIT when `f` returns,
+    /// or ROLLBACK when it (or the COMMIT) fails, returning `f`'s error
+    /// unchanged. Zig has no closures, so `f`'s state comes in through
+    /// `ctx`. Returns what `f` returns.
+    ///
+    /// `tx` is a `*Gateway` pinned to one pooled connection: every dataset
+    /// made from it, and so every relation over it, runs on that
+    /// connection. It lives until `transaction` returns, and so do its
+    /// datasets; don't `deinit` it or keep relations over it. It is for one
+    /// thread. Calls on the outer gateway inside `f` are not part of the
+    /// transaction, and wait for a second connection.
+    ///
+    /// On `tx`, `transaction` nests as a SAVEPOINT: its errors roll back
+    /// to the savepoint only. That is also how to go on after an error
+    /// inside `f`: Postgres aborts the whole transaction on any failed
+    /// statement, so catching the error and carrying on fails every later
+    /// call (`error.Database`), and COMMIT with it. Run the statement that
+    /// may fail in a nested `transaction` and catch that instead.
+    pub fn transaction(self: *Gateway, ctx: anytype, comptime f: anytype) Transaction(@TypeOf(ctx), f) {
+        const conn = try self.source.acquire();
+        defer self.source.release(conn);
+        const depth = self.source.nextDepth();
+
+        var tx: Gateway = .{ .allocator = self.allocator, .source = .{ .tx = .{ .conn = conn, .depth = depth } } };
+        defer tx.deinit();
+
+        try begin(conn, depth);
+        // An error rolling back can't replace the one that caused it.
+        errdefer rollback(conn, depth);
+        const out = if (comptime isErrorUnion(FnResult(@TypeOf(ctx), f))) try f(ctx, &tx) else f(ctx, &tx);
+        try commit(conn, depth);
+        return out;
+    }
+
+    /// What `transaction(ctx, f)` returns: `f`'s result, with
+    /// `Gateway.Error` merged into its error set.
+    pub fn Transaction(comptime Ctx: type, comptime f: anytype) type {
+        const R = FnResult(Ctx, f);
+        return switch (@typeInfo(R)) {
+            .error_union => |eu| (eu.error_set || Error)!eu.payload,
+            else => Error!R,
+        };
+    }
+
+    /// `@TypeOf(f(ctx, tx))`, which also works when `f` is generic (its
+    /// `@typeInfo` return type is then null).
+    fn FnResult(comptime Ctx: type, comptime f: anytype) type {
+        return @TypeOf(f(@as(Ctx, undefined), @as(*Gateway, undefined)));
     }
 };
 
-fn acquire(pool: *pg.Pool) !*pg.Conn {
-    return pool.acquire() catch |err| {
-        log.debug("acquiring a connection failed: {t}", .{err});
-        return if (err == error.OutOfMemory) error.OutOfMemory else error.ConnectionFailed;
-    };
+fn isErrorUnion(comptime T: type) bool {
+    return @typeInfo(T) == .error_union;
+}
+
+/// Where a gateway's calls get their connection. The value is copied into
+/// each dataset, so a gateway may move after `dataset` is called.
+const Source = union(enum) {
+    /// Each call takes a connection and gives it back.
+    pool: *pg.Pool,
+    /// Inside `transaction`: every call uses `conn`. `depth` is 0 for the
+    /// outermost transaction and n for the n-th SAVEPOINT inside it.
+    tx: struct { conn: *pg.Conn, depth: u32 },
+
+    fn acquire(self: Source) Gateway.Error!*pg.Conn {
+        return switch (self) {
+            .pool => |pool| pool.acquire() catch |err| {
+                log.debug("acquiring a connection failed: {t}", .{err});
+                return switch (@as(anyerror, err)) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    error.Canceled => error.Canceled,
+                    else => error.ConnectionFailed,
+                };
+            },
+            .tx => |t| t.conn,
+        };
+    }
+
+    fn release(self: Source, conn: *pg.Conn) void {
+        // A connection that isn't idle (an error mid-result, a transaction
+        // left open) is closed and replaced by the pool.
+        if (self == .pool) self.pool.release(conn);
+    }
+
+    /// The depth a transaction started now would have.
+    fn nextDepth(self: Source) u32 {
+        return switch (self) {
+            .pool => 0,
+            .tx => |t| t.depth + 1,
+        };
+    }
+};
+
+// -- transactions ------------------------------------------------------------
+
+/// "zom_<depth>", the savepoint for a transaction nested `depth` deep.
+fn savepointSql(buf: []u8, comptime fmt: []const u8, depth: u32) []const u8 {
+    return std.fmt.bufPrint(buf, fmt, .{ .d = depth }) catch unreachable;
+}
+
+fn begin(conn: *pg.Conn, depth: u32) Gateway.Error!void {
+    var buf: [64]u8 = undefined;
+    if (depth == 0) {
+        conn.begin() catch |err| return mapError(conn, err);
+    } else {
+        _ = conn.exec(savepointSql(&buf, "SAVEPOINT zom_{[d]d}", depth), .{}) catch |err| return mapError(conn, err);
+    }
+}
+
+/// COMMIT, or RELEASE the savepoint. On a transaction a swallowed error
+/// aborted, this is `error.Database`: pg.zig refuses the COMMIT itself,
+/// and Postgres a RELEASE (`25P02`, in_failed_sql_transaction).
+fn commit(conn: *pg.Conn, depth: u32) Gateway.Error!void {
+    var buf: [64]u8 = undefined;
+    if (depth == 0) {
+        conn.commit() catch |err| return mapError(conn, err);
+    } else {
+        _ = conn.exec(savepointSql(&buf, "RELEASE SAVEPOINT zom_{[d]d}", depth), .{}) catch |err| return mapError(conn, err);
+    }
+}
+
+/// ROLLBACK, or roll back to the savepoint and drop it, which leaves the
+/// outer transaction usable. Sent even on a connection in the failed
+/// state. Errors are dropped: the caller is already returning one.
+fn rollback(conn: *pg.Conn, depth: u32) void {
+    var buf: [96]u8 = undefined;
+    if (depth == 0) {
+        conn.rollback() catch |err| log.debug("ROLLBACK failed: {t}", .{err});
+    } else {
+        const sql = savepointSql(&buf, "ROLLBACK TO SAVEPOINT zom_{[d]d}; RELEASE SAVEPOINT zom_{[d]d}", depth);
+        conn.execIgnoringState(sql) catch |err| log.debug("{s} failed: {t}", .{ sql, err });
+    }
 }
 
 fn PgDataset(comptime S: type) type {
@@ -141,9 +304,8 @@ fn PgDataset(comptime S: type) type {
         /// See the top of this file.
         pub const strings: zom.StringOwnership = .caller;
 
-        /// The gateway's, which lives on the heap, so the gateway itself
-        /// may move after `dataset` is called.
-        pool: *pg.Pool,
+        /// The gateway's pool, or its transaction's connection.
+        source: Source,
         /// For statements, which are freed before each call returns.
         allocator: Allocator,
 
@@ -165,8 +327,8 @@ fn PgDataset(comptime S: type) type {
             };
             defer compiled.deinit(allocator);
 
-            const conn = try acquire(self.pool);
-            defer self.pool.release(conn);
+            const conn = try self.source.acquire();
+            defer self.source.release(conn);
             const result = try run(conn, compiled.sql, compiled.params);
             defer result.deinit();
             errdefer result.drain() catch {};
@@ -195,8 +357,8 @@ fn PgDataset(comptime S: type) type {
             const sql = try std.fmt.allocPrint(a, "SELECT COUNT(*) FROM ({s}) AS \"zom_count\"", .{compiled.sql});
             defer a.free(sql);
 
-            const conn = try acquire(self.pool);
-            defer self.pool.release(conn);
+            const conn = try self.source.acquire();
+            defer self.source.release(conn);
             const result = try run(conn, sql, compiled.params);
             defer result.deinit();
             errdefer result.drain() catch {};
@@ -214,8 +376,8 @@ fn PgDataset(comptime S: type) type {
             const compiled = try zom_sql.compileInsert(dialect, T, a, table, row);
             defer compiled.deinit(a);
 
-            const conn = try acquire(self.pool);
-            defer self.pool.release(conn);
+            const conn = try self.source.acquire();
+            defer self.source.release(conn);
             const result = try run(conn, compiled.sql, compiled.params);
             defer result.deinit();
             errdefer result.drain() catch {};
@@ -228,20 +390,22 @@ fn PgDataset(comptime S: type) type {
         }
 
         /// All or nothing: the multi-row `INSERT`s zom-sql splits the batch
-        /// into run in one transaction.
+        /// into run in one transaction, or inside `transaction` in a
+        /// SAVEPOINT, so a failed batch leaves the transaction usable.
         pub fn insertMany(self: *Self, rows: []const T) !usize {
             if (rows.len == 0) return 0;
             const a = self.allocator;
             const batch = try zom_sql.compileInsertMany(dialect, T, a, table, rows);
             defer batch.deinit(a);
 
-            const conn = try acquire(self.pool);
-            defer self.pool.release(conn);
-            conn.begin() catch |err| return mapError(conn, err);
-            errdefer conn.rollback() catch {};
+            const conn = try self.source.acquire();
+            defer self.source.release(conn);
+            const depth = self.source.nextDepth();
+            try begin(conn, depth);
+            errdefer rollback(conn, depth);
             var n: usize = 0;
             for (batch.statements) |s| n += try runCounting(conn, s.sql, s.params);
-            conn.commit() catch |err| return mapError(conn, err);
+            try commit(conn, depth);
             return n;
         }
 
@@ -282,8 +446,8 @@ fn PgDataset(comptime S: type) type {
             const a = self.allocator;
             const sql = try std.fmt.allocPrint(a, "{s} RETURNING 1", .{compiled.sql});
             defer a.free(sql);
-            const conn = try acquire(self.pool);
-            defer self.pool.release(conn);
+            const conn = try self.source.acquire();
+            defer self.source.release(conn);
             return runCounting(conn, sql, compiled.params);
         }
 
@@ -353,23 +517,33 @@ fn bindValue(stmt: *pg.Stmt, v: Value) !void {
     }
 }
 
-/// zom's shared error names for what Postgres and pg.zig report. Other
-/// Postgres errors are `error.PG`, with the message logged at debug level
-/// (scope `.zom_pg`).
-fn mapError(conn: *pg.Conn, err: anyerror) anyerror {
+/// zom's shared error names for what Postgres and pg.zig report (see
+/// `Gateway.Error`). Every Postgres error is also kept for `lastError()`
+/// and logged at debug level (scope `.zom_pg`).
+///
+/// Every unique violation is `error.DuplicatePrimaryKey`, not only the
+/// primary key's: telling them apart needs the constraint's name, which
+/// can be anything, or a catalog query, which an aborted transaction
+/// refuses. `lastError().constraint` names the one that was violated.
+fn mapError(conn: *pg.Conn, err: anyerror) Gateway.Error {
     switch (err) {
         error.PG => if (conn.err) |pge| {
+            record(pge);
             log.debug("postgres error {s}: {s}", .{ pge.code, pge.message });
-            if (pge.isUnique()) return error.DuplicatePrimaryKey;
-            // numeric_value_out_of_range.
-            if (std.mem.eql(u8, pge.code, "22003")) return error.ValueOutOfRange;
-            // read_only_sql_transaction: a replica or a read-only session.
-            if (std.mem.eql(u8, pge.code, "25006")) return error.ReadOnly;
+            if (sqlstates.get(pge.code)) |mapped| return mapped;
             // Class 08: connection exceptions.
             if (std.mem.startsWith(u8, pge.code, "08")) return error.ConnectionFailed;
+            return error.Database;
         },
         error.IntWontFit => return error.ValueOutOfRange,
         error.OutOfMemory => return error.OutOfMemory,
+        error.Canceled => return error.Canceled,
+        // pg.zig refuses statements on a connection in the failed state,
+        // which inside a transaction means an earlier error aborted it.
+        error.ConnectionBusy => if (conn._state == .fail) {
+            log.debug("the transaction was aborted by an earlier error", .{});
+            return error.Database;
+        },
         else => {
             const name = @errorName(err);
             for (connection_errors) |c| if (std.mem.eql(u8, name, c)) {
@@ -378,7 +552,68 @@ fn mapError(conn: *pg.Conn, err: anyerror) anyerror {
             };
         },
     }
-    return err;
+    log.debug("pg.zig error: {t}", .{err});
+    return error.Database;
+}
+
+/// The SQLSTATEs with a name of their own. The rest of class 08 is
+/// `error.ConnectionFailed`, everything else `error.Database`.
+const sqlstates = std.StaticStringMap(Gateway.Error).initComptime(.{
+    .{ "23505", error.DuplicatePrimaryKey }, // unique_violation
+    .{ "22003", error.ValueOutOfRange }, // numeric_value_out_of_range
+    .{ "42P01", error.NotFound }, // undefined_table
+    .{ "25006", error.ReadOnly }, // read_only_sql_transaction
+});
+
+/// A Postgres error, as `Gateway.lastError()` returns it.
+pub const ServerError = struct {
+    /// The SQLSTATE, e.g. "23505".
+    code: []const u8,
+    /// "ERROR", "FATAL", ...
+    severity: []const u8,
+    message: []const u8,
+    detail: ?[]const u8 = null,
+    hint: ?[]const u8 = null,
+    table: ?[]const u8 = null,
+    column: ?[]const u8 = null,
+    constraint: ?[]const u8 = null,
+};
+
+/// Per thread, so concurrent calls through one pool each see their own.
+/// Postgres messages are short; past `buf.len`, fields are cut short.
+threadlocal var last_error: struct {
+    buf: [2048]u8 = undefined,
+    err: ?ServerError = null,
+} = .{};
+
+/// Copies `pge`, which lives in the connection until its next error, into
+/// `last_error`.
+fn record(pge: anytype) void {
+    const store = &last_error;
+    var used: usize = 0;
+    const copy = struct {
+        fn f(buf: []u8, at: *usize, v: []const u8) []const u8 {
+            const n = @min(v.len, buf.len - at.*);
+            const out = buf[at.*..][0..n];
+            @memcpy(out, v[0..n]);
+            at.* += n;
+            return out;
+        }
+        fn opt(buf: []u8, at: *usize, v: ?[]const u8) ?[]const u8 {
+            return if (v) |x| f(buf, at, x) else null;
+        }
+    };
+    const b = &store.buf;
+    store.err = .{
+        .code = copy.f(b, &used, pge.code),
+        .severity = copy.f(b, &used, pge.severity),
+        .message = copy.f(b, &used, pge.message),
+        .constraint = copy.opt(b, &used, pge.constraint),
+        .table = copy.opt(b, &used, pge.table),
+        .column = copy.opt(b, &used, pge.column),
+        .detail = copy.opt(b, &used, pge.detail),
+        .hint = copy.opt(b, &used, pge.hint),
+    };
 }
 
 /// Socket-level failures, by name: pg.zig's error sets are inferred, so

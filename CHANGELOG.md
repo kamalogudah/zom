@@ -29,6 +29,12 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
   the shared names (`23505` is `error.DuplicatePrimaryKey`). It passes the
   full lint suite, which runs when `ZOM_PG_URL` is set. ([#37])
 
+- zom-pg transactions: `Gateway.transaction(ctx, f)` runs `f(ctx, tx)`
+  between `BEGIN` and `COMMIT`, or `ROLLBACK` when it fails, and returns
+  `f`'s error unchanged. `tx` is a `*Gateway` pinned to one pooled
+  connection, so relations over it run in the transaction. Nested calls
+  are SAVEPOINTs, and so is `insertMany` inside a transaction. ([#38])
+
 - Caller-owned strings. A dataset can declare `pub const strings:
   zom.StringOwnership = .caller`: the strings it returns are allocated with
   the allocator passed to `read` / `readProjected` / `insert`, which then
@@ -318,6 +324,14 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Changed (breaking)
 
+- zom-pg errors are a closed set, `zom_pg.Gateway.Error`. `42P01`
+  (undefined_table) is now `error.NotFound`, and every other Postgres or
+  pg.zig error is `error.Database` (it was `error.PG`, or pg.zig's own
+  error). The server's error is available through
+  `zom_pg.Gateway.lastError()`, a per-thread `zom_pg.ServerError` with the
+  SQLSTATE, message and constraint. Every unique violation, on the primary
+  key or not, is still `error.DuplicatePrimaryKey`. ([#38])
+
 - A dataset that sets `supports.projection = true` (for example with
   `zom.Supports.all`) must now declare `readProjected`, or the adapter
   contract check fails naming it. Set `projection = false` to keep the old
@@ -440,3 +454,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#35]: https://github.com/kamalogudah/zom/issues/35
 [#36]: https://github.com/kamalogudah/zom/issues/36
 [#37]: https://github.com/kamalogudah/zom/issues/37
+[#38]: https://github.com/kamalogudah/zom/issues/38
