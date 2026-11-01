@@ -420,6 +420,10 @@ fn ReadOnlyDataset(comptime S: type) type {
             return self.store.read(query, allocator);
         }
 
+        pub fn readProjected(self: *Self, query: Q, comptime P: type, allocator: Allocator) ![]P {
+            return self.store.readProjected(query, P, allocator);
+        }
+
         pub fn count(self: *Self, query: Q) !usize {
             return self.store.count(query);
         }
@@ -456,6 +460,10 @@ fn WritableDataset(comptime S: type, comptime Format: type) type {
 
         pub fn read(self: *Self, query: Q, allocator: Allocator) ![]T {
             return self.store.read(query, allocator);
+        }
+
+        pub fn readProjected(self: *Self, query: Q, comptime P: type, allocator: Allocator) ![]P {
+            return self.store.readProjected(query, P, allocator);
         }
 
         pub fn count(self: *Self, query: Q) !usize {

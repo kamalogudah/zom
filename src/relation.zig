@@ -11,19 +11,38 @@
 //! compile, naming the adapter, when it is missing.
 //! Zig only analyses a function that is called, so a relation over a
 //! read-only adapter compiles fine as long as only its reads are used.
+//!
+//! `select(.{ .id, .name })` returns a relation whose reads give a narrower
+//! struct (see projection.zig). Its query stays typed on the full tuple, so
+//! filters and orders on attributes that were not selected still work, as
+//! in `SELECT name FROM users WHERE age > 3`.
 
 const std = @import("std");
 const q = @import("query.zig");
 const mapper = @import("mapper.zig");
 const changeset = @import("changeset.zig");
 const adapter = @import("adapter.zig");
+const projection = @import("projection.zig");
 
+/// A relation over schema `S`, reading whole tuples.
 pub fn Relation(comptime S: type, comptime Gateway: type) type {
+    return RelationOf(S, Gateway, S.Tuple);
+}
+
+/// A relation over schema `S` whose reads return `Out`: `S.Tuple`, or a
+/// `zom.Project(S.Tuple, ...)` after `select`. `Relation(S, G)` is
+/// `RelationOf(S, G, S.Tuple)`, the same type.
+pub fn RelationOf(comptime S: type, comptime Gateway: type, comptime Out: type) type {
     return struct {
         const Self = @This();
 
         pub const schema = S;
+        /// The stored tuple. Queries, filters and changes are typed on it.
         pub const Tuple = S.Tuple;
+        /// What reads (`toSlice`, `one`, `first`) return.
+        pub const Output = Out;
+        /// True after `select`.
+        pub const projected = Out != Tuple;
         pub const Q = q.Query(Tuple);
         pub const Field = Q.Field;
         pub const Adapter = adapter.Adapter(Gateway);
@@ -116,23 +135,54 @@ pub fn Relation(comptime S: type, comptime Gateway: type) type {
             return next;
         }
 
+        /// ROM's `select(:id, :name)`: the same relation, reading only
+        /// `fields`, a tuple of attribute names such as `.{ .id, .name }`.
+        /// Reads return `zom.Project(Tuple, fields)`, which has only those
+        /// fields, in that order. Filters and orders, before or after, may
+        /// still use any attribute. On a relation that is already projected,
+        /// `fields` must be among the ones selected. The primary key does
+        /// not have to be selected.
+        pub fn select(self: Self, comptime fields: anytype) Selected(fields) {
+            return .{ .dataset = self.dataset, .query = self.query };
+        }
+
+        fn Selected(comptime fields: anytype) type {
+            const P = projection.Project(Tuple, fields);
+            if (projected) {
+                for (@typeInfo(P).@"struct".fields) |f| {
+                    if (!@hasField(Output, f.name))
+                        @compileError("zom.select: '" ++ f.name ++ "' was not selected on this relation, so it cannot be selected again");
+                }
+            }
+            return RelationOf(S, Gateway, P);
+        }
+
         // -- materializing -------------------------------------------------
 
         /// Caller owns the returned slice. String attributes point into the
         /// dataset and stay valid as long as the gateway lives.
-        pub fn toSlice(self: Self, allocator: std.mem.Allocator) ![]Tuple {
-            return self.dataset.read(self.query, allocator);
+        ///
+        /// After `select`, a dataset with `supports.projection` reads the
+        /// selected attributes itself (`readProjected`); any other dataset
+        /// reads whole tuples, which zom maps down and frees.
+        pub fn toSlice(self: Self, allocator: std.mem.Allocator) ![]Output {
+            if (comptime !projected) return self.dataset.read(self.query, allocator);
+            if (comptime Adapter.supports(S).projection)
+                return self.dataset.readProjected(self.query, Output, allocator);
+            const rows = try self.dataset.read(self.query, allocator);
+            defer allocator.free(rows);
+            return mapper.Mapper(Tuple, Output, .{}).many(allocator, rows);
         }
 
         /// ROM's `relation.one`: null when empty, error when ambiguous.
-        pub fn one(self: Self, allocator: std.mem.Allocator) !?Tuple {
+        pub fn one(self: Self, allocator: std.mem.Allocator) !?Output {
             const rows = try self.limit(2).toSlice(allocator);
             defer allocator.free(rows);
             if (rows.len > 1) return error.MoreThanOneTuple;
             return if (rows.len == 1) rows[0] else null;
         }
 
-        pub fn first(self: Self, allocator: std.mem.Allocator) !?Tuple {
+        pub fn first(self: Self, allocator: std.mem.Allocator) !?Output {
             const rows = try self.limit(1).toSlice(allocator);
             defer allocator.free(rows);
             return if (rows.len == 1) rows[0] else null;
@@ -143,12 +193,13 @@ pub fn Relation(comptime S: type, comptime Gateway: type) type {
         }
 
         /// ROM's `relation.map_to(Entity)` / auto_struct: copy matching
-        /// attributes by name into `E`.
+        /// attributes by name into `E`. After `select`, only the selected
+        /// attributes are there to copy.
         pub fn mapTo(self: Self, comptime E: type, allocator: std.mem.Allocator) ![]E {
-            return self.mapWith(mapper.Mapper(Tuple, E, .{}), allocator);
+            return self.mapWith(mapper.Mapper(Output, E, .{}), allocator);
         }
 
-        /// ROM's `relation.map_with(:mapper)`.
+        /// ROM's `relation.map_with(:mapper)`. `M.Input` is `Output`.
         pub fn mapWith(self: Self, comptime M: type, allocator: std.mem.Allocator) ![]M.Output {
             const rows = try self.toSlice(allocator);
             defer allocator.free(rows);
@@ -156,9 +207,14 @@ pub fn Relation(comptime S: type, comptime Gateway: type) type {
         }
 
         // -- commands / changesets ----------------------------------------
+        //
+        // `update` and `delete` target the query, so they work after
+        // `select` too. `create` and `createMany` take whole tuples, which a
+        // projected relation does not describe, so they are refused there.
 
         /// ROM's `users.changeset(:create, data)`.
         pub fn create(self: Self, tuple: Tuple) changeset.Create(Self) {
+            comptime requireWhole("create");
             comptime Adapter.require(S, .writable, "create");
             return .{ .relation = self, .tuple = tuple };
         }
@@ -168,6 +224,7 @@ pub fn Relation(comptime S: type, comptime Gateway: type) type {
         /// `changeset.CreateMany` for what a failure leaves behind. The
         /// changeset borrows `tuples` until `commit`.
         pub fn createMany(self: Self, tuples: []const Tuple) changeset.CreateMany(Self) {
+            comptime requireWhole("createMany");
             comptime Adapter.requireAny(S, &.{ .batch_insert, .writable }, "createMany");
             return .{ .relation = self, .tuples = tuples };
         }
@@ -182,6 +239,12 @@ pub fn Relation(comptime S: type, comptime Gateway: type) type {
         pub fn delete(self: Self) !usize {
             comptime Adapter.require(S, .deletable, "delete");
             return try self.dataset.delete(self.query);
+        }
+
+        fn requireWhole(comptime method: []const u8) void {
+            if (projected)
+                @compileError("zom: `" ++ method ++ "` needs whole tuples, but relation '" ++ S.name ++
+                    "' is projected by `select`; call it on the relation before `select`");
         }
     };
 }

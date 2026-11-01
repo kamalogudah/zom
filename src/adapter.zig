@@ -29,6 +29,12 @@
 //!   update(*Self, Q, []const Q.Change) !usize        // .updatable
 //!   delete(*Self, Q) !usize                          // .deletable
 //!   pub const supports: zom.Supports                 // query features
+//!   readProjected(*Self, Q, comptime P: type, std.mem.Allocator) ![]P
+//!
+//! `readProjected` is required when `supports.projection` is true: it reads
+//! the rows `read` would, as `P`, a `zom.Project(S.Tuple, ...)` struct with
+//! some of the tuple's fields (copy them by name, e.g. with `zom.Mapper`).
+//! Without it, `select` reads whole tuples and zom maps them down.
 //!
 //! `self` may be taken by value, `*Self` or `*const Self`.
 
@@ -37,8 +43,9 @@ const q = @import("query.zig");
 
 /// The query features a dataset can evaluate itself. A dataset declares
 /// `pub const supports: zom.Supports = ...;`, setting only what it handles;
-/// one that declares nothing gets the defaults. Relations do not check this
-/// yet (plan.md Phase 3).
+/// one that declares nothing gets the defaults. Relations only use
+/// `projection` so far (plan.md Phase 3); `zom.lint` skips the checks for
+/// the features a dataset does not support.
 pub const Supports = struct {
     /// Filters combined with `or`.
     @"or": bool = false,
@@ -50,7 +57,9 @@ pub const Supports = struct {
     order_on: bool = true,
     /// Skipping rows with `offset`.
     offset: bool = true,
-    /// Reading only some attributes (`select`).
+    /// Reading only some attributes (`select`), through `readProjected`.
+    /// When false, `select` still works: zom reads whole tuples and maps
+    /// them down.
     projection: bool = false,
     /// Joining another dataset.
     join: bool = false,
@@ -286,8 +295,23 @@ fn checkDataset(comptime G: type, comptime S: type) void {
         .returns = .{ .fallible = usize },
         .text = "fn (*Self, zom.Query(Tuple)) !usize",
     });
-    if (@hasDecl(D, "supports") and @TypeOf(D.supports) != Supports)
-        problems = problems ++ "\n  - `supports` must be a `zom.Supports`, found `" ++ @typeName(@TypeOf(D.supports)) ++ "`";
+    var projection = false;
+    if (@hasDecl(D, "supports")) {
+        if (@TypeOf(D.supports) != Supports) {
+            problems = problems ++ "\n  - `supports` must be a `zom.Supports`, found `" ++ @typeName(@TypeOf(D.supports)) ++ "`";
+        } else {
+            projection = D.supports.projection;
+        }
+    }
+    if (projection and !@hasDecl(D, "readProjected")) {
+        problems = problems ++ "\n  - `supports.projection` is true, but there is no `pub fn readProjected`";
+    } else {
+        // Generic in P, so the return type can't be checked.
+        problems = problems ++ checkMethod(D, "readProjected", false, .{
+            .params = &.{ Q, type, std.mem.Allocator },
+            .text = "fn (*Self, zom.Query(Tuple), comptime P: type, std.mem.Allocator) ![]P",
+        });
+    }
 
     if (problems.len > 0) @compileError(header ++ problems);
 }

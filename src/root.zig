@@ -21,6 +21,10 @@ pub const not = query.not;
 
 pub const Schema = @import("schema.zig").Schema;
 pub const Relation = @import("relation.zig").Relation;
+/// A relation whose reads return `Output`; see `Relation.select`.
+pub const RelationOf = @import("relation.zig").RelationOf;
+/// The narrower struct `select` reads into: `Project(User, .{ .id, .name })`.
+pub const Project = @import("projection.zig").Project;
 
 pub const adapter = @import("adapter.zig");
 pub const Adapter = adapter.Adapter;
@@ -57,4 +61,5 @@ test {
     _ = @import("tests/sql_test.zig");
     _ = file;
     _ = @import("tests/query_test.zig");
+    _ = @import("tests/projection_test.zig");
 }

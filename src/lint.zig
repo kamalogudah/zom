@@ -102,6 +102,7 @@ const checks = .{
     .{ Check{ .name = "limit" }, checkLimit },
     .{ Check{ .name = "offset", .features = &.{"offset"} }, checkOffset },
     .{ Check{ .name = "one: null, one tuple, or error.MoreThanOneTuple" }, checkOne },
+    .{ Check{ .name = "select: readProjected keeps filters, order and limit", .features = &.{ "projection", "order_on" } }, checkProjection },
     .{ Check{ .name = "insert: returns the stored tuple, error.DuplicatePrimaryKey", .needs = &.{.writable} }, checkInsert },
     .{ Check{ .name = "insert: strings are copied", .needs = &.{.writable} }, checkInsertCopies },
     .{ Check{ .name = "insertMany: count, error.DuplicatePrimaryKey", .needs_any = &.{ .batch_insert, .writable } }, checkInsertMany },
@@ -580,6 +581,31 @@ fn checkOne(comptime G: type, comptime F: type) !void {
     try testing.expectEqual(@as(u32, 6), ((try rel.where(.id, .gt, 5).one(a)) orelse return error.TestExpectedOneTuple).id);
     try testing.expectError(error.MoreThanOneTuple, rel.where(.role, .eq, .a).one(a));
     try testing.expectError(error.MoreThanOneTuple, rel.one(a));
+}
+
+fn checkProjection(comptime G: type, comptime F: type) !void {
+    var fx: Fixture(G, F) = undefined;
+    const rel = try fx.init();
+    defer fx.deinit();
+
+    // Filtered and ordered on `age`, which is not selected.
+    try expectNames(rel.where(.age, .gt, 20).order(.age, .desc).select(.{ .name, .role }), "age gt 20, order age desc, select name, role", &.{ "bob", "dee", "cy" });
+    try expectNames(rel.order(.id, .asc).limit(2).select(.{.name}), "order id asc, limit 2, select name", &.{ "dee", "ada" });
+    try expectNames(rel.where(.role, .eq, .b).order(.name, .desc).select(.{ .role, .name }), "role eq .b, order name desc, select role, name", &.{ "eve", "ada" });
+    try expectNames(rel.where(.id, .gt, 99).select(.{.name}), "nothing matches", &.{});
+}
+
+/// Reads the projected relation `rel` and checks its names, in order.
+fn expectNames(rel: anytype, label: []const u8, want: []const []const u8) !void {
+    errdefer std.debug.print("zom.lint:   case: {s}\n", .{label});
+    const rows = try rel.toSlice(testing.allocator);
+    defer testing.allocator.free(rows);
+    if (rows.len != want.len) {
+        std.debug.print("zom.lint:   expected {d} rows, found {d}\n", .{ want.len, rows.len });
+        return error.TestExpectedEqual;
+    }
+    for (rows, want) |row, name| try testing.expectEqualStrings(name, row.name);
+    try expectCount(rel, rows.len);
 }
 
 fn checkInsert(comptime G: type, comptime F: type) !void {

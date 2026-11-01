@@ -8,6 +8,7 @@
 const std = @import("std");
 const q = @import("../query.zig");
 const Supports = @import("../adapter.zig").Supports;
+const Mapper = @import("../mapper.zig").Mapper;
 const Allocator = std.mem.Allocator;
 
 pub const Gateway = struct {
@@ -172,8 +173,22 @@ pub fn Store(comptime S: type) type {
         /// The matching rows, sorted and paged, in a slice the caller frees
         /// with `allocator`. Their strings still belong to the store.
         pub fn read(self: *Self, query: Q, allocator: Allocator) ![]T {
-            var hits: std.ArrayList(T) = .empty;
+            var hits = try self.matching(query, allocator);
             defer hits.deinit(allocator);
+            return allocator.dupe(T, page(query, hits.items));
+        }
+
+        /// `read`, keeping only the fields of `P` (a `zom.Project(T, ...)`).
+        pub fn readProjected(self: *Self, query: Q, comptime P: type, allocator: Allocator) ![]P {
+            var hits = try self.matching(query, allocator);
+            defer hits.deinit(allocator);
+            return Mapper(T, P, .{}).many(allocator, page(query, hits.items));
+        }
+
+        /// The matching rows, sorted.
+        fn matching(self: *Self, query: Q, allocator: Allocator) !std.ArrayList(T) {
+            var hits: std.ArrayList(T) = .empty;
+            errdefer hits.deinit(allocator);
             for (self.list.items) |row| {
                 if (query.matches(row)) try hits.append(allocator, row);
             }
@@ -181,9 +196,14 @@ pub fn Store(comptime S: type) type {
             // pdq), so rows equal on every sort key, or every row when there
             // is no order, keep their insertion order.
             std.mem.sort(T, hits.items, query.orderSlice(), Q.lessThan);
-            const start = @min(query.offset, hits.items.len);
-            const end = if (query.limit) |l| @min(start + l, hits.items.len) else hits.items.len;
-            return allocator.dupe(T, hits.items[start..end]);
+            return hits;
+        }
+
+        /// `sorted` with the query's offset and limit applied.
+        fn page(query: Q, sorted: []const T) []const T {
+            const start = @min(query.offset, sorted.len);
+            const end = if (query.limit) |l| @min(start + l, sorted.len) else sorted.len;
+            return sorted[start..end];
         }
 
         /// The number of rows `read` would return: `limit` and `offset`

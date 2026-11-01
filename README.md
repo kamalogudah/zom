@@ -51,10 +51,10 @@ Each row below says whether that part exists today or is planned (see
 | **Adapter registry** | `ROM.register_adapter(:csv, ROM::CSV)` puts the adapter in a global runtime table, and `ROM.container(:csv, path)` finds it there by symbol. | Zig has no runtime registry, and zom doesn't need one. An adapter is a Zig package that exports a `Gateway` type, and you pass that type in directly: `zom.Relation(Schema, zom_csv.Gateway)`. The contract is checked when the code compiles, not when it runs. *Today: `zom.Adapter` checks it, for `zom.memory` or any gateway you write. Planned: separate adapter packages.* |
 | **Adapter shape** | Adapters subclass `ROM::Gateway`, `ROM::Relation` and `ROM::Memory::Dataset`, then override methods. | No inheritance. A gateway is any type with the right declarations (see [the adapter contract](#the-adapter-contract)). File adapters *wrap* the memory engine, `zom.memory.Store(S)`, instead of subclassing it. |
 | **Optional features** | Whether an adapter supports a command is found out at runtime, when the command is built or run. | An adapter simply leaves out `insert`, `update` or `delete`, and `relation.create(...).commit()` fails to compile with a message naming the adapter. `zom.Adapter(G).capabilities(S)` says what it supports. |
-| **Checking an adapter** | `ROM::Lint` specs, run by each adapter gem. | `zom.lint.run(Gateway, Factory)`, a test suite each adapter runs in its own `zig build test`. *Today: read, filter, null, ordering, limit/offset, `one`, insert, `insertMany`, update and delete checks.* |
+| **Checking an adapter** | `ROM::Lint` specs, run by each adapter gem. | `zom.lint.run(Gateway, Factory)`, a test suite each adapter runs in its own `zig build test`. *Today: read, filter, null, ordering, limit/offset, `one`, projection, insert, `insertMany`, update and delete checks.* |
 | **Container** | `ROM.container` builds a runtime registry: `container.relations[:users]`. | Relations are types, so a container is a comptime struct with one field per relation: `app.relations.users`. A missing relation is a compile error, not a runtime lookup failure. *Today: `zom.Container`.* |
 | **Schema inference** | rom-sql can read a table's columns from the database at boot. | A Zig struct has to exist when the code compiles, before any database is reachable, so you write the schema struct yourself. The plan adds a startup check against the database, and later a code generator. |
-| **Structs** | `ROM::Struct` builds result classes at runtime from the schema. | You declare the entity struct (or use the tuple), and `mapTo` copies fields by name. Narrowed types, like a future `select(.{ .id, .name })`, are built at compile time with `@Struct`. |
+| **Structs** | `ROM::Struct` builds result classes at runtime from the schema. | You declare the entity struct (or use the tuple), and `mapTo` copies fields by name. `select(.{ .id, .name })` reads into a narrower struct built at compile time with `@Struct`, so reading a field that wasn't selected is a compile error. |
 | **Type errors** | Found at runtime, if the database or a type check catches them. | Found at compile time: wrong field names, wrong value types, `null` on a non-optional field, an enum value that doesn't exist, an integer literal that doesn't fit. |
 | **Errors** | Exceptions. | Error sets: `error.DuplicatePrimaryKey`, `error.ValueOutOfRange`, `error.MoreThanOneTuple`, returned with `try`. |
 | **Memory** | Garbage collected. | Every call that returns a slice takes an allocator, and the caller frees the slice (see [Memory rules](#memory-rules)). |
@@ -133,6 +133,8 @@ breaking change needs a minor version bump and an entry in
 |---|---|
 | `zom.Schema(T, name, pk)` | Returns a schema type with `Tuple = T`, `name` (the dataset name) and `primary_key` (a field of `T`, as an enum literal). |
 | `zom.Relation(S, Gateway)` | Returns an immutable relation type over schema `S` and an adapter's `Gateway`. Checks the [adapter contract](#the-adapter-contract) at compile time through `zom.Adapter(Gateway)`, which it exposes as `Relation.Adapter`. |
+| `zom.RelationOf(S, Gateway, Output)` | The relation type whose reads return `Output`. `Relation(S, G)` is `RelationOf(S, G, S.Tuple)`, and `select` returns `RelationOf(S, G, Project(S.Tuple, fields))`. Exposes `Tuple`, `Output` and `projected`. |
+| `zom.Project(T, .{ fields })` | The struct `select` reads into: only `fields` of `T`, in the order given, with their types and defaults. An empty tuple, an unknown field or a repeated one is a compile error. Equal arguments return the same type. |
 | `zom.Adapter(G)` | Checks gateway `G` against the [adapter contract](#the-adapter-contract), reporting every problem in one compile error. Has `Gateway`, `name` (`G.adapter_name`), `Dataset(S)` (checks the dataset for schema `S`), `capabilities(S) Capabilities`, `has(S, cap) bool`, `readOnly(S) bool` and `require(S, cap, method)`. |
 | `zom.Capability` | `writable`, `batch_insert`, `updatable`, `deletable`, `transaction`. |
 | `zom.Capabilities` | A struct with one `bool` per `Capability`, all `false` by default. |
@@ -171,14 +173,15 @@ relation and never touch the dataset. `field` is always an enum literal, and
 | `order(field, direction)` | `Relation` | Adds a sort key after those already set: `.order(.role, .asc).order(.age, .desc)` is `ORDER BY role ASC, age DESC`. At most `Query.max_orders = 4` keys; a fifth panics. |
 | `reorder(.{ .{ field, direction }, ... })` | `Relation` | Replaces every sort key; `reorder(.{})` removes the order. More than `max_orders` keys is a compile error. |
 | `limit(n)`, `offset(n)` | `Relation` | `n: usize`. |
-| `toSlice(allocator)` | `![]Tuple` | Caller frees. |
-| `one(allocator)` | `!?Tuple` | `null` when empty, `error.MoreThanOneTuple` when ambiguous. |
-| `first(allocator)` | `!?Tuple` | |
+| `select(.{ field, ... })` | a projected relation | Reads return `zom.Project(Tuple, fields)` instead of `Tuple`. See [Projections](#projections). |
+| `toSlice(allocator)` | `![]Output` | Caller frees. `Output` is `Tuple`, or the projected struct after `select`. |
+| `one(allocator)` | `!?Output` | `null` when empty, `error.MoreThanOneTuple` when ambiguous. |
+| `first(allocator)` | `!?Output` | |
 | `count()` | `!usize` | The number of rows `toSlice` would return, so `limit` and `offset` apply. |
-| `mapTo(E, allocator)` | `![]E` | `mapWith(zom.Mapper(Tuple, E, .{}))`. |
-| `mapWith(M, allocator)` | `![]M.Output` | `M` is a `zom.Mapper`. |
-| `create(tuple)` | `Create` | `.map(f)` applies `f: fn (Tuple) Tuple`; `.commit()` returns `!Tuple`, the stored tuple. |
-| `createMany(tuples)` | `CreateMany` | `tuples: []const Tuple`, borrowed until commit. `.commit()` returns `!usize`, the rows inserted. Uses the dataset's `insertMany`, else loops over `insert` (see [the adapter contract](#the-adapter-contract)). |
+| `mapTo(E, allocator)` | `![]E` | `mapWith(zom.Mapper(Output, E, .{}))`. |
+| `mapWith(M, allocator)` | `![]M.Output` | `M` is a `zom.Mapper` whose `Input` is `Output`. |
+| `create(tuple)` | `Create` | `.map(f)` applies `f: fn (Tuple) Tuple`; `.commit()` returns `!Tuple`, the stored tuple. A compile error after `select`. |
+| `createMany(tuples)` | `CreateMany` | A compile error after `select`. `tuples: []const Tuple`, borrowed until commit. `.commit()` returns `!usize`, the rows inserted. Uses the dataset's `insertMany`, else loops over `insert` (see [the adapter contract](#the-adapter-contract)). |
 | `update()` | `Update` | `.set(field, value)` adds a change (at most `max_changes = 16`); `.commit()` returns `!usize`, the rows changed. |
 | `delete()` | `!usize` | The rows removed. |
 
@@ -204,6 +207,34 @@ slice.
 
 The relation's fields `dataset` and `query` are public too, so a relation
 can be handed to an adapter function such as `zom.sql.compileSelect`.
+
+#### Projections
+
+`select` narrows what a relation reads, like `SELECT id, name`. The query
+stays typed on the full tuple, so `where` and `order`, before or after
+`select`, may still use attributes that were not selected:
+
+```zig
+const names = try users.where(.age, .gt, 18).order(.age, .desc).select(.{ .id, .name }).toSlice(allocator);
+defer allocator.free(names);
+// @TypeOf(names[0]) has exactly `id` and `name`; `names[0].age` does not compile.
+```
+
+- Fields are listed as enum literals and come out in that order, with the
+  types and defaults they have in the tuple. An empty list, an unknown field
+  or a field listed twice is a compile error.
+- **The primary key does not have to be selected.** rom doesn't require it,
+  `SELECT name FROM users` is valid SQL, and zom never needs the key of a
+  projected row: `update()` and `delete()` still work after `select`,
+  because they go through the relation's query, not through rows read from
+  it. `create` and `createMany` take whole tuples, so they are compile
+  errors after `select`.
+- `select` on a projected relation narrows it further, and may only name
+  fields that were selected. Equal field lists give equal types, so
+  `users.select(.{ .id, .name })` written twice is one type.
+- A dataset with `supports.projection` reads the projection itself through
+  `readProjected`. Any other dataset reads whole tuples, which zom maps down
+  with `zom.Mapper` and frees, so `select` works with every adapter.
 
 ### Container
 
@@ -345,6 +376,8 @@ In full, with `Q = zom.Query(S.Tuple)`:
 | `insertMany` | `fn (*Dataset, []const S.Tuple) !usize` | no, `.batch_insert` | Returns the tuples stored. `error.DuplicatePrimaryKey` on a key clash, with the stored rows or inside the batch. Used by `createMany`. |
 | `update` | `fn (*Dataset, Q, []const Q.Change) !usize` | no, `.updatable` | Returns the rows changed. A failed update changes nothing. |
 | `delete` | `fn (*Dataset, Q) !usize` | no, `.deletable` | Returns the rows removed. |
+| `supports` | `zom.Supports` | no | The query features the dataset handles; the defaults when missing. |
+| `readProjected` | `fn (*Dataset, Q, comptime P: type, Allocator) ![]P` | when `supports.projection` | The rows `read` would return, as `P`, a `zom.Project(S.Tuple, ...)` with some of the tuple's fields (copy them by name, e.g. with `zom.Mapper(S.Tuple, P, .{})`). Used by `select`. Without it, zom reads whole tuples and maps them down. |
 
 A method may take `self` by value, `*Self` or `*const Self`. Every dataset
 call is fallible, so an adapter's own errors (I/O, connection loss) flow
@@ -398,7 +431,8 @@ integer, nullable, string and enum attributes (`in`/`not_in` only when the
 dataset's `supports.in` is set, `like`/`ilike` only with `supports.like`),
 checks `null` semantics,
 ordering on one key and on several (nulls last on `.asc`, first on `.desc`), `limit` and `offset` edge
-cases, and `one`; every case also checks that `count` equals the rows read.
+cases, `one`, and `select` through `readProjected` (with `supports.projection`
+and `supports.order_on`); every case also checks that `count` equals the rows read.
 The write checks cover `insert` (returns the stored tuple, a duplicate key
 fails with `error.DuplicatePrimaryKey`), `createMany` (the count, both kinds
 of duplicate key, and what a failure leaves stored: nothing by default with
@@ -577,7 +611,8 @@ links to the topics below.
 | `src/query.zig` | `Value` union, `Query(T)`, filter matching, compile-time type checks | Tagged unions, `@typeInfo`, `@compileError` |
 | `src/adapter.zig` | `Adapter(G)`: checks the adapter contract and finds a gateway's capabilities | `@hasDecl`, `@typeInfo(...).@"fn"`, building comptime strings |
 | `src/lint.zig` | `lint.run(G, Factory)`: the conformance suite every adapter runs | Tests as library code, `inline for` over a tuple of generic functions |
-| `src/relation.zig` | `Relation(S, Gateway)`: immutable query builder | Comptime field enums, `anytype` |
+| `src/relation.zig` | `Relation(S, Gateway)`: immutable query builder | Comptime field enums, `anytype`, a type parameter with a default through a wrapper (`Relation` calls `RelationOf`) |
+| `src/projection.zig` | `Project(T, fields)`: the narrower struct `select` reads into | `@Struct`, field defaults in reflection, memoised comptime calls |
 | `src/container.zig` | `Container(spec)`: gateways and relations declared once, init/deinit in one place | Building struct types with `@Struct`, `errdefer` with a counter in an `inline for` |
 | `src/changeset.zig` | `Create`, `CreateMany` and `Update` changesets | Fixed-capacity arrays, slices, comptime capability branching |
 | `src/mapper.zig` | Copies tuples into domain structs | `inline for` over struct fields |

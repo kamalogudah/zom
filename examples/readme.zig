@@ -67,6 +67,28 @@ test "README: Usage, then A longer tour" {
     );
 }
 
+test "README: Projections" {
+    const allocator = testing.allocator;
+    const zom = @import("zom");
+
+    const User = struct { id: u32, name: []const u8, age: u8, deleted_at: ?i64 = null };
+    const Users = zom.Relation(zom.Schema(User, "users", .id), zom.memory.Gateway);
+
+    var gw = zom.memory.Gateway.init(allocator, .{});
+    defer gw.deinit();
+    const users = try Users.init(&gw);
+    _ = try users.create(.{ .id = 1, .name = "Achieng", .age = 31 }).commit();
+
+    // -- README: Projections ----------------------------------------------
+    const names = try users.where(.age, .gt, 18).order(.age, .desc).select(.{ .id, .name }).toSlice(allocator);
+    defer allocator.free(names);
+    // @TypeOf(names[0]) has exactly `id` and `name`; `names[0].age` does not compile.
+
+    // ---------------------------------------------------------------------
+    try testing.expectEqual(2, @typeInfo(@TypeOf(names[0])).@"struct".fields.len);
+    try testing.expectEqualStrings("Achieng", names[0].name);
+}
+
 test "README: Value" {
     const zom = @import("zom");
 

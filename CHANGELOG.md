@@ -9,6 +9,20 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- Projections. `users.select(.{ .id, .name })` returns a relation whose
+  reads (`toSlice`, `one`, `first`, `mapTo`) give `zom.Project(Tuple, .{ .id,
+  .name })`, a struct built with `@Struct` that has only those fields, in that
+  order, with their types and defaults. Reading a field that wasn't selected
+  is a compile error, and so are an empty list, an unknown field and a field
+  listed twice. The query stays typed on the full tuple, so filters and
+  orders may use attributes that weren't selected. The primary key does not
+  have to be selected. `update` and `delete` work after `select`; `create`
+  and `createMany` are compile errors there. `Relation(S, G)` is now
+  `RelationOf(S, G, S.Tuple)`, and `RelationOf` is exported along with
+  `Project`. A dataset with `supports.projection` must declare
+  `readProjected(query, comptime P, allocator) ![]P` (the memory adapter and
+  `zom.file` datasets do); for any other dataset zom reads whole tuples and
+  maps them down. `zom.lint` checks `readProjected`. ([#33])
 - Order by several fields. `order(field, direction)` now appends a sort key,
   so `.order(.role, .asc).order(.age, .desc)` is `ORDER BY role ASC, age
   DESC`, and `reorder(.{ .{ .role, .asc }, .{ .age, .desc } })` replaces them
@@ -212,6 +226,10 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Changed (breaking)
 
+- A dataset that sets `supports.projection = true` (for example with
+  `zom.Supports.all`) must now declare `readProjected`, or the adapter
+  contract check fails naming it. Set `projection = false` to keep the old
+  behaviour: `select` then maps whole tuples down. ([#33])
 - `Relation.order` (and the new `Query.order`) appends a sort key instead of
   replacing the order: use `reorder` to replace. `Query.order: ?Order` is now
   `orders` / `order_count`, read through `orderSlice()` and written with
@@ -325,3 +343,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#30]: https://github.com/kamalogudah/zom/issues/30
 [#31]: https://github.com/kamalogudah/zom/issues/31
 [#32]: https://github.com/kamalogudah/zom/issues/32
+[#33]: https://github.com/kamalogudah/zom/issues/33
