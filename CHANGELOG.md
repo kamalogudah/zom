@@ -7,7 +7,38 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ## [Unreleased]
 
+### Removed (breaking)
+
+- `zom.sql` is gone from the core, which now has no SQL in it. The compiler
+  moved to the `zom-sql` package in `adapters/sql` (`@import("zom_sql")`):
+  `zom.sql.compileSelect(T, allocator, table, query)` becomes
+  `zom_sql.compileSelect(.postgres, T, allocator, table, query)`, or
+  `zom_sql.compileRelation(.postgres, allocator, relation)`, and
+  `zom.sql.writeIdent(list, allocator, name)` becomes
+  `zom_sql.writeIdent(dialect, writer, name)`, writing to a
+  `*std.Io.Writer`. `zom.Op.sql()` is removed too; SQL spellings live in
+  zom-sql. ([#35])
+
 ### Added
+
+- zom-sql, a dialect-aware SQL compiler. `zom_sql.Dialect` (`placeholder`,
+  `quote`, `returning`, `ilike`, `nulls_order`, `limit_all`) is a comptime
+  argument with `Dialect.postgres` and `Dialect.sqlite` presets. It renders
+  the whole query AST: `AND` / `OR` / `NOT` groups with parentheses, `IN`
+  and `NOT IN` (empty lists become `1=0` / `1=1`, or a form that stays
+  unknown for null on a nullable attribute, so results match the memory
+  adapter), `LIKE` with `ESCAPE '\'`, `ILIKE` (`LOWER(x) LIKE LOWER(y)` on
+  SQLite), `BETWEEN`, `IS [NOT] NULL`, several `ORDER BY` keys with `NULLS
+  LAST` / `NULLS FIRST` on nullable keys to match memory's null ordering, and
+  projections (`compileRelation` reads a `select`ed relation's columns;
+  `compileProjected` takes the narrower struct). `writeSelect` renders into
+  any `*std.Io.Writer`. SQLite gets `LIMIT -1` before a bare `OFFSET`.
+  ([#35])
+
+### Fixed
+
+- `limit` and `offset` above the largest bigint are clamped to it in SQL;
+  `LIMIT 18446744073709551615` was rejected by Postgres. ([#35])
 
 - Query support is enforced. A relation is `.strict` by default: a filter,
   sort key or `offset` its dataset's `supports` leaves out is a compile error
@@ -368,3 +399,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#32]: https://github.com/kamalogudah/zom/issues/32
 [#33]: https://github.com/kamalogudah/zom/issues/33
 [#34]: https://github.com/kamalogudah/zom/issues/34
+[#35]: https://github.com/kamalogudah/zom/issues/35

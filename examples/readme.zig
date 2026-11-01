@@ -50,21 +50,12 @@ test "README: Usage, then A longer tour" {
         try posts.toSlice(arena.allocator()),
     );
 
-    // The same relation compiles to SQL instead.
-    const compiled = try zom.sql.compileSelect(User, allocator, "users", users.where(.age, .gte, 18).query);
-    defer compiled.deinit(allocator);
-    // compiled.sql: SELECT "id", "name", "age", "deleted_at" FROM "users" WHERE "age" >= $1
-
     // -- checks (not in the README) ---------------------------------------
     try testing.expectEqual(1, active.len);
     try testing.expectEqual(1, changed);
     try testing.expectEqual(0, removed);
     try testing.expectEqualStrings("Achieng", authors[0].full_name);
     try testing.expectEqual(1, authors[0].posts.len);
-    try testing.expectEqualStrings(
-        "SELECT \"id\", \"name\", \"age\", \"deleted_at\" FROM \"users\" WHERE \"age\" >= $1",
-        compiled.sql,
-    );
 }
 
 test "README: Projections" {

@@ -19,7 +19,7 @@ that each do one thing, and nothing is an "active record".
 | `command(:delete)`                         | `try users.where(...).delete()`                                |
 | `ROM::Mapper`, `map_with`, `map_to`        | `zom.Mapper(Tuple, Entity, .{ .renames = ... })`, `mapWith`, `mapTo` |
 | `users.combine(:posts)`                    | `zom.combineMany(.{ .into, .parent_key, .child_key }, ...)`    |
-| rom-sql (Sequel)                           | `zom.sql.compileSelect`, a query-to-SQL compiler with no driver yet |
+| rom-sql (Sequel)                           | `zom_sql.compileRelation(.postgres, allocator, rel)` in [zom-sql](#zom-sql), a query-to-SQL compiler with no driver yet |
 
 ## What Zig gives you for free
 
@@ -36,7 +36,7 @@ that each do one thing, and nothing is an "active record".
   asserted.
 - **The adapter seam is a comptime contract.** A relation never runs anything
   itself; it builds a `Query(T)` value, and the adapter interprets it. The same
-  relation can be evaluated in memory or compiled to SQL (see the last test).
+  relation can be evaluated in memory or compiled to SQL by [zom-sql](#zom-sql).
 
 ## How zom differs from rom
 
@@ -112,11 +112,6 @@ try zom.combineMany(
     authors,
     try posts.toSlice(arena.allocator()),
 );
-
-// The same relation compiles to SQL instead.
-const compiled = try zom.sql.compileSelect(User, allocator, "users", users.where(.age, .gte, 18).query);
-defer compiled.deinit(allocator);
-// compiled.sql: SELECT "id", "name", "age", "deleted_at" FROM "users" WHERE "age" >= $1
 ```
 
 ## API (v0.2)
@@ -146,7 +141,7 @@ breaking change needs a minor version bump and an entry in
 | `zom.Query(T)` | The adapter-neutral query a relation builds: a filter tree, sort keys (`orders`, at most `max_orders = 4`, read through `orderSlice()`, most significant first), `limit: ?usize`, `offset: usize`. The tree is stored flat so a copy is a full copy: `filters` (at most `max_filters = 16`) and `nodes` (at most `max_nodes = 32`: filters plus `any` / `all` / `not` groups, which refer to children by index), AND-ed at the top level. An adapter without `or` support reads an AND-only query through `filterSlice()` (it asserts `isConjunction()`); one with it walks `nodeSlice()` from `topNodes()`. `matches(row)` and `truth(row) ?bool` evaluate the query in memory with SQL's three-valued logic, alongside `lessThan(orders, a, b)` (the comparator for `std.mem.sort(T, rows, query.orderSlice(), lessThan)`: key by key, the next key breaking ties), `orderBy(order, a, b)` (one key) and `fieldValue(row, field)`. Nested types: `Field` (enum of `T`'s fields), `Filter` (`field`, `op`, `operand`), `Node` (`filter`, `and_group`, `or_group`, `not`), `Children`, `Order`, `Change`. `max_in = 64` bounds one `in` list. The query also builds itself, with the same `where` / `whereIn` / `whereNotIn` / `whereAny` / `whereNot` / `order` / `reorder` as a relation (and `addOrder`), so adapters and tests can make one without a gateway. |
 | `zom.any(conds)`, `zom.all(conds)`, `zom.not(cond)` | Boolean groups to nest inside `whereAny` / `whereNot`. A condition is `.{ field, op, value }` or another group. |
 | `zom.Value` | The runtime value carried by filters and changes. See [Value](#value). |
-| `zom.Op` | Filter operators: `eq`, `neq`, `lt`, `lte`, `gt`, `gte`, `in`, `not_in`, `like`, `ilike`, `between`, `is_null`, `is_not_null`. `op.sql()` returns the SQL spelling, `op.operand()` the `Operand` variant it takes. |
+| `zom.Op` | Filter operators: `eq`, `neq`, `lt`, `lte`, `gt`, `gte`, `in`, `not_in`, `like`, `ilike`, `between`, `is_null`, `is_not_null`. `op.operand()` returns the `Operand` variant it takes. |
 | `zom.Direction` | `asc`, `desc`. |
 | `zom.Container(spec)` | Declares gateways and relations once; `init(self, allocator, Config)` / `deinit()` connect and disconnect them all. See [Container](#container). |
 | `zom.changeset` | `Create(Rel)`, `CreateMany(Rel)` and `Update(Rel)`, the types returned by `relation.create`, `relation.createMany` and `relation.update`. You don't name them yourself. |
@@ -157,7 +152,6 @@ breaking change needs a minor version bump and an entry in
 | `zom.memory` | The in-memory adapter: `Gateway` (`adapter_name = "memory"`, `Config = struct {}`, `init(allocator, Config)`, `deinit()`), whose dataset is `Store(S)`. Every capability except `transaction`. |
 | `zom.memory.Store(S)` | The in-memory row engine, usable without a gateway: `init(allocator)`, `deinit()`, `read`, `count`, `insert`, `insertMany`, `update`, `delete`, plus `rows() []const Tuple` (every row, in insertion order), `load(row)` and `loadMany(rows)` (insert without the primary-key check, for trusted bulk loads) and `clear()`. Strings are copied into the store's arena; rows it returns point into it until `clear` or `deinit`. |
 | `zom.lint` | The adapter conformance suite, see [Checking an adapter](#checking-an-adapter-with-zomlint). Also exports the schema it tests on, `Users` (`User`, `Role`), its seed rows, `users`, `OnDuplicate` and `expectSharedError`. |
-| `zom.sql` | `compileSelect(T, allocator, table, query) !Compiled`, returning `Compiled{ sql, params }` with Postgres placeholders (`$1`). `writeIdent` appends a quoted identifier. |
 | `zom.query` | The module behind `Query`, `Value`, `Op` and `Direction`, plus `Operand` (a filter's value side: `none`, `one`, `many: ValueList` or `range: [2]Value`), `ValueList` (a borrowed list read with `at(i)`) and `like(text, pattern, case)`, the `LIKE` matcher `matches` uses. Adapters can use `toValue(x) Value` and `fromValue(F, value) !F` to convert between attribute values and `Value`. Its `assert*`, `isString` and `isComptimeOnly` helpers are used by the core and are not part of the frozen API. |
 
 ### Relation
@@ -216,7 +210,7 @@ allocates: a tuple's values become a static array, and `whereIn` borrows the
 slice.
 
 The relation's fields `dataset` and `query` are public too, so a relation
-can be handed to an adapter function such as `zom.sql.compileSelect`.
+can be handed to an adapter function such as `zom_sql.compileRelation`.
 
 #### Projections
 
@@ -553,6 +547,54 @@ the root `build.zig`. `adapters/` is not in zom's `.paths`, so changing an
 adapter never changes zom's package hash. Every adapter's tests should call
 `zom.lint.run` once it can store the lint seed rows.
 
+### zom-sql
+
+`adapters/sql` is the SQL half of rom-sql that needs no driver: it compiles a
+relation's query into a statement and its bind parameters, for a `Dialect`.
+A gateway such as the planned zom-pg pairs it with a driver.
+
+```zig
+const zom_sql = @import("zom_sql");
+
+const compiled = try zom_sql.compileRelation(.postgres, allocator, users.where(.age, .gte, 18).select(.{ .id, .name }));
+defer compiled.deinit(allocator);
+// compiled.sql:    SELECT "id", "name" FROM "users" WHERE "age" >= $1
+// compiled.params: .{ .{ .int = 18 } }
+```
+
+| Declaration | What it is |
+|---|---|
+| `Dialect` | `placeholder` (`.dollar_n` for `$1`, `.question` for `?`), `quote` (default `'"'`), `returning`, `ilike`, `nulls_order` (understands `NULLS LAST`, default true) and `limit_all` (what goes after `LIMIT` when there is only an offset; `null` when a bare `OFFSET` is valid). Presets: `Dialect.postgres` and `Dialect.sqlite`. Always a comptime argument, so each dialect gets its own compiler. |
+| `compileRelation(dialect, allocator, relation) !Compiled` | The relation's schema name is the table and its `Output` (the tuple, or what `select` kept) the columns. |
+| `compileSelect(dialect, T, allocator, table, query) !Compiled` | Every field of `T`. |
+| `compileProjected(dialect, T, Out, allocator, table, query) !Compiled` | Only `Out`'s fields, e.g. `zom.Project(T, .{ .id })`. |
+| `Compiled` | `sql: []u8` and `params: []zom.Value`, one per placeholder, in order. Free with `deinit(allocator)`. String params borrow from the query. |
+| `writeSelect(dialect, T, Out, writer, *Params, table, *const query) RenderError!void` | Renders into any `*std.Io.Writer`; what the `compile*` functions use. |
+| `writeIdent(dialect, writer, name)` | Writes a quoted identifier, doubling any quote inside it. |
+
+Every identifier is quoted. Every node of the query is rendered: `AND` / `OR`
+groups in parentheses, `NOT (...)`, `IN (...)`, `LIKE ... ESCAPE '\'`
+(`ILIKE`, or `LOWER(x) LIKE LOWER(y)` without it), `BETWEEN`, `IS [NOT] NULL`,
+several `ORDER BY` keys, `LIMIT` and `OFFSET`. The SQL is true, false or
+unknown exactly where the memory adapter's `Query.truth` is:
+
+- `IN ()` is not valid SQL, so an empty `in` is `1=0` and an empty `not_in`
+  `1=1`. On a nullable attribute they are `(x IS NULL AND NULL)` and
+  `(x IS NOT NULL OR NULL)`, which stay unknown for a null, as in memory, so
+  `whereNot` of either still skips null rows.
+- A nullable sort key says where its nulls go: `ASC NULLS LAST`, `DESC NULLS
+  FIRST`, matching memory (and Postgres's default, which SQLite's isn't).
+- `limit` and `offset` are clamped to the largest bigint, since Postgres
+  rejects `LIMIT 18446744073709551615`.
+
+Remaining differences come from the database, not the SQL: an enum stored as
+text sorts by name rather than declaration order; SQLite's `LIKE` ignores
+ASCII case unless `PRAGMA case_sensitive_like = ON`; and Postgres rejects a
+pattern ending in a lone `\`, which memory reads as a literal `\`.
+
+`error.InvalidNullComparison` is returned for `lt` / `lte` / `gt` / `gte`
+against `null`. (`eq null` and `neq null` are `IS NULL` and `IS NOT NULL`.)
+
 ### Errors
 
 | Error | Returned by |
@@ -561,8 +603,7 @@ adapter never changes zom's package hash. Every adapter's tests should call
 | `error.ValueOutOfRange` | `update().set(...).commit()` with a runtime value that does not fit the attribute, e.g. a `u32` holding 300 set on a `u8`. |
 | `error.MoreThanOneTuple` | `one`. |
 | `error.DatasetTypeMismatch` | `memory.Gateway.dataset` (and so `Relation.init`), when two different schema types share a dataset name. |
-| `error.InvalidNullComparison` | `sql.compileSelect`, for `lt`/`lte`/`gt`/`gte` against `null`. |
-| `error.UnsupportedFilter` | `sql.compileSelect`, for `in`, `not_in`, `like`, `ilike` and `between`, which zom-sql will render with a `Dialect` (#35). Also `update().commit()` and `delete()` on a `.fallback` relation with a filter its dataset can't evaluate. |
+| `error.UnsupportedFilter` | `update().commit()` and `delete()` on a `.fallback` relation with a filter its dataset can't evaluate. |
 | `error.OutOfMemory` | Anything that takes or uses an allocator. |
 
 `zom.adapter.Error` reserves the names every adapter uses for the same
@@ -574,15 +615,14 @@ condition (`DuplicatePrimaryKey`, `ValueOutOfRange`, `NotFound`, `ReadOnly`,
 These are scheduled in [plan.md](plan.md) and will each come with a version
 bump and a changelog entry:
 
-- Phase 3: `zom.sql` moves out of the core into the `zom-sql` package.
 - Phase 4: `zom.combineMany` is deprecated in favour of `combine`.
 - Phase 6: `zom.Value` gains a `u128` variant.
 
 ## Memory rules
 
 - `toSlice`, `mapTo`, `mapWith` and `Mapper.many` return slices the caller
-  owns. `sql.compileSelect` returns a `Compiled` that the caller frees with
-  `compiled.deinit(allocator)`.
+  owns. zom-sql's `compile*` functions return a `Compiled` that the caller
+  frees with `compiled.deinit(allocator)`.
 - String attributes are copied into the dataset's arena on insert and update,
   so input buffers can be reused straight away. Strings you read back
   (including those in tuples from `one`, `first` and `create(...).commit()`)
@@ -631,6 +671,7 @@ rom-yaml:
 1. Adapter contract, `zom.lint` conformance suite, and `zom.Container`.
 2. `zom-csv` and `zom-yaml`, built on the memory engine.
 3. `zom-sql` compiler and the `zom-pg` driver on `karlseguin/pg.zig`,
+   *zom-sql's SELECT compiler is in `adapters/sql`; zom-pg is next.*
    with projections and a richer query AST.
 4. Associations in the schema, and `combine` with one `IN (...)` query
    instead of today's O(n·m) `combineMany`.
@@ -675,13 +716,13 @@ links to the topics below.
 | `src/mapper.zig` | Copies tuples into domain structs | `inline for` over struct fields |
 | `src/codec.zig` | Text cells to typed fields and back, with a `Diagnostic` out-parameter | `@typeInfo` dispatch, mapping error sets with `catch \|e\| switch`, the diagnostics pattern, `std.Io.Writer` and shortest round-trip float formatting |
 | `src/adapters/memory.zig` | In-memory gateway and dataset | Allocators, arenas, `ArrayList`, hash maps, type erasure with `*anyopaque` |
-| `src/adapters/sql.zig` | Compiles a query to a SQL string | Building strings with `ArrayList(u8)` |
 | `src/tests/` | Tests, one file per layer, with shared `fixtures.zig` | `std.testing` |
 | `examples/readme.zig` | Every README code block, compiled by `zig build test` | Using zom as a package import |
 | `examples/csv_users/` | A program joining CSV users with in-memory posts through `zom.Container`, run and checked by `zig build test` | `b.addExecutable`, `pub fn main(init: std.process.Init)`, writing to stdout |
 | `tests/compile_errors/` | Code that must *not* compile, checked by `zig build compile-errors` | What `@compileError` messages users see |
 | `src/file.zig` | `zom.file`: the gateway and datasets file adapters share, over a `Format` (load and dump) | Comptime-parameterised generics, duck typing checked with `@hasDecl`/`@hasField`, atomic writes (temp file, fsync, rename) |
 | `adapters/csv/` | The `zom-csv` package, a CSV `Format` for `zom.file`, depending on zom by path | `build.zig.zon` dependencies, `b.dependency(...).module(...)` |
+| `adapters/sql/` | The `zom-sql` package: compiles a query to SQL for a comptime `Dialect` | Comptime struct parameters, rendering into a `*std.Io.Writer`, recursion with an explicit error set, multiline string literals in tests |
 | `adapters/yaml/` | The `zom-yaml` package: a YAML-subset parser and writer, and a YAML `Format` for `zom.file` | A hand-written line parser, arenas, escaping that round-trips |
 
 ### 3. Zig concepts used everywhere in zom

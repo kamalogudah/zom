@@ -2,7 +2,7 @@
 //!
 //! A relation never runs anything itself. It only builds up a `Query(T)`
 //! value (filters, ordering, limit/offset). Each adapter decides what that
-//! means: the memory adapter evaluates it against rows, the SQL adapter
+//! means: the memory adapter evaluates it against rows, zom-sql
 //! compiles it into a statement. This is the seam ROM draws between
 //! relations and datasets.
 
@@ -28,24 +28,6 @@ pub const Op = enum {
     between,
     is_null,
     is_not_null,
-
-    pub fn sql(op: Op) []const u8 {
-        return switch (op) {
-            .eq => "=",
-            .neq => "<>",
-            .lt => "<",
-            .lte => "<=",
-            .gt => ">",
-            .gte => ">=",
-            .in => "IN",
-            .not_in => "NOT IN",
-            .like => "LIKE",
-            .ilike => "ILIKE",
-            .between => "BETWEEN",
-            .is_null => "IS NULL",
-            .is_not_null => "IS NOT NULL",
-        };
-    }
 
     /// Which `Operand` variant a filter with this op carries.
     pub fn operand(op: Op) std.meta.Tag(Operand) {
@@ -916,7 +898,7 @@ pub fn Query(comptime T: type) type {
         }
 
         /// True when the query's WHERE is true for `row`, as SQL decides
-        /// which rows a SELECT returns: unknown is not a match.
+        /// which rows a query returns: unknown is not a match.
         pub fn matches(self: *const Self, row: T) bool {
             return self.truth(row) == true;
         }

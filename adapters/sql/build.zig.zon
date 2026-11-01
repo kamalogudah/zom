@@ -1,0 +1,10 @@
+.{
+    .name = .zom_sql,
+    .version = "0.0.0",
+    .fingerprint = 0xfa8df251847c8c08,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .zom = .{ .path = "../.." },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}

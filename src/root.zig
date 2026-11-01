@@ -1,7 +1,7 @@
 //! zom: a Ruby Object Mapper (rom-rb) style data mapping toolkit for Zig.
 //!
 //! Layers, mirroring ROM:
-//!   Gateway / Dataset  -> adapters (memory today, SQL compiler, more later)
+//!   Gateway / Dataset  -> adapters (memory here; zom-csv, zom-yaml, zom-sql in adapters/)
 //!   Schema             -> tuple struct + dataset name + primary key
 //!   Relation           -> immutable, chainable query over a dataset
 //!   Changeset          -> create / update data, committed explicitly
@@ -54,7 +54,6 @@ pub const codec = @import("codec.zig");
 
 pub const memory = @import("adapters/memory.zig");
 pub const file = @import("file.zig");
-pub const sql = @import("adapters/sql.zig");
 
 test {
     _ = @import("tests/adapter_test.zig");
@@ -66,7 +65,6 @@ test {
     _ = @import("tests/store_test.zig");
     _ = @import("tests/lint_test.zig");
     _ = @import("tests/codec_test.zig");
-    _ = @import("tests/sql_test.zig");
     _ = file;
     _ = @import("tests/query_test.zig");
     _ = @import("tests/projection_test.zig");

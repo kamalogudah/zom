@@ -216,10 +216,9 @@ test "is_null / is_not_null, and eq null as their alias" {
     try expectIds(q.where(.age, .lt, null), &.{});
 }
 
-test "every op has an operand shape and a SQL spelling" {
+test "every op has an operand shape" {
     inline for (@typeInfo(zom.Op).@"enum".fields) |f| {
         const op: zom.Op = @enumFromInt(f.value);
-        try testing.expect(op.sql().len > 0);
         _ = op.operand();
     }
 }
