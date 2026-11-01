@@ -14,6 +14,10 @@ pub const Op = query.Op;
 pub const Direction = query.Direction;
 pub const Value = query.Value;
 pub const Query = query.Query;
+/// Boolean groups for `whereAny` / `whereNot`; see `query.any`.
+pub const any = query.any;
+pub const all = query.all;
+pub const not = query.not;
 
 pub const Schema = @import("schema.zig").Schema;
 pub const Relation = @import("relation.zig").Relation;
@@ -52,4 +56,5 @@ test {
     _ = @import("tests/codec_test.zig");
     _ = @import("tests/sql_test.zig");
     _ = file;
+    _ = @import("tests/query_test.zig");
 }

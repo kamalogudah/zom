@@ -9,6 +9,32 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- Boolean groups. `whereAny(.{ .{ .age, .gt, 30 }, .{ .role, .eq, .admin } })`
+  AND-s an OR group, `whereNot(cond)` a negation, and `zom.any`, `zom.all`
+  and `zom.not` nest inside either. Each condition is `.{ field, op, value }`,
+  type-checked like `where`. The filter tree is stored flat in the query
+  (`nodes`, at most `Query.max_nodes = 32`, indexing into `filters`), so
+  copying a relation copies the whole tree. `Query.matches` now uses SQL's
+  three-valued logic, exposed as `Query.truth(row) ?bool`: `NOT (age > 30)`
+  doesn't match a null age. `zom.sql.compileSelect` renders the groups with
+  parentheses. `zom.lint` checks them, and skips that check when
+  `supports.or` is false. A condition that can't fit an empty query is a
+  compile error, and running out of room at runtime panics, naming the
+  limit. ([#31])
+- Query ops `in`, `not_in`, `like`, `ilike`, `between`, `is_null` and
+  `is_not_null`. `where(.id, .in, .{ 1, 2, 3 })` takes a tuple of
+  comptime-known values (at most `Query.max_in = 64`, each type-checked),
+  stored as a static array; `whereIn(.id, slice)` and `whereNotIn` take a
+  runtime slice of the attribute's type, which the relation borrows.
+  `where(.name, .like, "Ach%")` only compiles on string attributes;
+  `where(.age, .between, .{ 18, 30 })` is inclusive; `where(.age, .is_null,
+  {})`, with `eq null` / `neq null` kept as aliases (stored as
+  `is_null` / `is_not_null`). `Query.matches` evaluates them all with SQL
+  null semantics, and `like` (`zom.query.like`) handles `%`, `_` (one UTF-8
+  character) and `\` escapes without regex, in O(n·m). Building a query
+  still never allocates. `zom.lint` checks each op, skipping `in` and `like`
+  when `supports.in` / `supports.like` is false. `Query` builds itself too
+  (`Query.where`, `whereIn`, `whereNotIn`). ([#30])
 - `zom_yaml.Gateway` and `zom_yaml.WritableGateway`, with the same structure
   as zom-csv. `Config.path` is one YAML file mapping every dataset name to
   its records (rom-yaml's layout), or a directory of `<name>.yaml` files,
@@ -177,6 +203,13 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Changed (breaking)
 
+- `Query.Filter` is `{ field, op, operand }`, where `operand` is a
+  `zom.query.Operand` (`none`, `one`, `many`, `range`), replacing `value`.
+  A hand-built filter becomes `.operand = .{ .one = v }`. ([#30])
+- The `op` argument of `where` is now `comptime`, since it decides what the
+  value must be. A runtime `zom.Op` no longer compiles. ([#30])
+- `sql.compileSelect` returns `error.UnsupportedFilter` for the new ops
+  until zom-sql renders them (#35). ([#30])
 - A gateway must declare `adapter_name`, `Config`, `init(allocator, Config)`
   and `deinit` as well as `Dataset` and `dataset`. ([#12])
 - `zom.memory.Gateway.init` takes a `Config` (an empty struct for now):
@@ -274,3 +307,5 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#25]: https://github.com/kamalogudah/zom/issues/25
 [#26]: https://github.com/kamalogudah/zom/issues/26
 [#27]: https://github.com/kamalogudah/zom/issues/27
+[#30]: https://github.com/kamalogudah/zom/issues/30
+[#31]: https://github.com/kamalogudah/zom/issues/31

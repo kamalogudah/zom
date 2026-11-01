@@ -123,3 +123,47 @@ test "enums order and compare in declaration order" {
     defer testing.allocator.free(esc_desc);
     try testing.expectEqualSlices(u32, &.{ 2, 1, 3 }, &.{ esc_desc[0].id, esc_desc[1].id, esc_desc[2].id });
 }
+
+test "(age > 30 OR role = admin) AND deleted_at IS NULL on memory" {
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
+    defer gw.deinit();
+    const users = try Users.init(&gw);
+    try seed(users, try Posts.init(&gw));
+
+    // Achieng (31, admin) and Wanjiru (42) pass the OR; Wanjiru is deleted.
+    const active_seniors = users.whereAny(.{ .{ .age, .gt, 30 }, .{ .role, .eq, .admin } }).where(.deleted_at, .is_null, {});
+    const rows = try active_seniors.toSlice(testing.allocator);
+    defer testing.allocator.free(rows);
+    try testing.expectEqual(@as(usize, 1), rows.len);
+    try testing.expectEqualStrings("Achieng", rows[0].name);
+    try testing.expectEqual(@as(usize, 1), try active_seniors.count());
+
+    // NOT (deleted_at IS NULL OR age < 30): Wanjiru only.
+    const old_deleted = users.whereNot(zom.any(.{ .{ .deleted_at, .is_null, {} }, .{ .age, .lt, 30 } }));
+    try testing.expectEqualStrings("Wanjiru", (try old_deleted.one(testing.allocator)).?.name);
+
+    // Writes go through the same tree.
+    try testing.expectEqual(@as(usize, 2), try users.whereAny(.{ .{ .id, .eq, 2 }, .{ .id, .eq, 3 } }).delete());
+    try testing.expectEqual(@as(usize, 1), try users.count());
+}
+
+test "copying a relation copies its query" {
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
+    defer gw.deinit();
+    const users = try Users.init(&gw);
+    try seed(users, try Posts.init(&gw));
+
+    const a = users.whereAny(.{ .{ .age, .gt, 30 }, .{ .role, .eq, .admin } });
+    var b = a;
+    // Change the copy's query in place: turn the OR into an AND and the
+    // first filter into age > 40. The original must not see either.
+    const children = b.query.nodes[0].or_group;
+    b.query.nodes[0] = .{ .and_group = children };
+    b.query.filters[0].operand = .{ .one = .{ .int = 40 } };
+    try testing.expectEqual(@as(usize, 0), try b.count());
+    try testing.expectEqual(@as(usize, 2), try a.count());
+
+    const c = a.where(.deleted_at, .is_null, {});
+    try testing.expectEqual(@as(usize, 1), try c.count());
+    try testing.expectEqual(@as(usize, 2), try a.count());
+}

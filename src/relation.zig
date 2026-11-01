@@ -38,12 +38,48 @@ pub fn Relation(comptime S: type, comptime Gateway: type) type {
 
         // -- query building (returns new relations) ------------------------
 
-        pub fn where(self: Self, comptime field: Field, op: q.Op, value: anytype) Self {
-            const F = @FieldType(Tuple, @tagName(field));
-            comptime q.assertAssignable(F, @TypeOf(value), @tagName(field));
-            if (comptime q.isComptimeOnly(@TypeOf(value))) comptime q.assertLiteral(F, value, @tagName(field));
+        /// See `Query.where` for what each op takes, e.g.
+        /// `where(.id, .in, .{ 1, 2, 3 })`, `where(.name, .like, "Ach%")`,
+        /// `where(.age, .between, .{ 18, 30 })`, `where(.age, .is_null, {})`.
+        pub fn where(self: Self, comptime field: Field, comptime op: q.Op, value: anytype) Self {
             var next = self;
-            next.query.addFilter(.{ .field = field, .op = op, .value = q.toValue(value) });
+            next.query = self.query.where(field, op, value);
+            return next;
+        }
+
+        /// `where(field, .in, ...)` for a runtime slice, at most
+        /// `Q.max_in` long. The relation borrows `values` without copying,
+        /// so it (and every relation chained from it) is invalid once that
+        /// slice is freed or changed.
+        pub fn whereIn(self: Self, comptime field: Field, values: anytype) Self {
+            var next = self;
+            next.query = self.query.whereIn(field, values);
+            return next;
+        }
+
+        /// `whereIn` for `not_in`, with the same borrowing rule.
+        pub fn whereNotIn(self: Self, comptime field: Field, values: anytype) Self {
+            var next = self;
+            next.query = self.query.whereNotIn(field, values);
+            return next;
+        }
+
+        /// AND `conds` OR-ed together, e.g.
+        /// `whereAny(.{ .{ .age, .gt, 30 }, .{ .role, .eq, .admin } })`.
+        /// Each condition is `.{ field, op, value }` as `where` takes it, or
+        /// a nested `zom.any`, `zom.all` or `zom.not`. See `Query.whereAny`.
+        pub fn whereAny(self: Self, conds: anytype) Self {
+            var next = self;
+            next.query = self.query.whereAny(conds);
+            return next;
+        }
+
+        /// AND NOT `cond`, e.g. `whereNot(.{ .age, .gt, 30 })`. Rows where
+        /// `cond` is unknown (a null attribute) match neither `cond` nor its
+        /// negation, as in SQL. See `Query.whereNot`.
+        pub fn whereNot(self: Self, cond: anytype) Self {
+            var next = self;
+            next.query = self.query.whereNot(cond);
             return next;
         }
 

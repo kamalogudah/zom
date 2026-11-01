@@ -29,6 +29,69 @@ pub fn writeIdent(list: *std.ArrayList(u8), allocator: Allocator, name: []const 
     try list.append(allocator, '"');
 }
 
+/// What rendering a WHERE can fail with. Spelled out because `writeNode`
+/// recurses, and a recursive function can't infer its error set.
+pub const WhereError = Allocator.Error || error{ InvalidNullComparison, UnsupportedFilter };
+
+/// Renders `nodes[index]`: a filter, a parenthesized `AND` / `OR` group, or
+/// `NOT (...)`.
+fn writeNode(
+    comptime T: type,
+    sql: *std.ArrayList(u8),
+    params: *std.ArrayList(q.Value),
+    allocator: Allocator,
+    query: *const q.Query(T),
+    index: u8,
+) WhereError!void {
+    switch (query.nodes[index]) {
+        .filter => |f| try writeFilter(T, sql, params, allocator, query.filters[f]),
+        .not => |child| {
+            try sql.appendSlice(allocator, "NOT ");
+            // A group brings its own parentheses.
+            const bare = query.nodes[child] == .filter or query.nodes[child] == .not;
+            if (bare) try sql.append(allocator, '(');
+            try writeNode(T, sql, params, allocator, query, child);
+            if (bare) try sql.append(allocator, ')');
+        },
+        .and_group, .or_group => |g| {
+            const sep = if (query.nodes[index] == .and_group) " AND " else " OR ";
+            try sql.append(allocator, '(');
+            for (g.first..g.first + g.len) |c| {
+                if (c > g.first) try sql.appendSlice(allocator, sep);
+                try writeNode(T, sql, params, allocator, query, @intCast(c));
+            }
+            try sql.append(allocator, ')');
+        },
+    }
+}
+
+fn writeFilter(
+    comptime T: type,
+    sql: *std.ArrayList(u8),
+    params: *std.ArrayList(q.Value),
+    allocator: Allocator,
+    f: q.Query(T).Filter,
+) WhereError!void {
+    try writeIdent(sql, allocator, @tagName(f.field));
+    switch (f.op) {
+        .is_null, .is_not_null => {
+            try sql.append(allocator, ' ');
+            try sql.appendSlice(allocator, f.op.sql());
+        },
+        .eq, .neq, .lt, .lte, .gt, .gte => {
+            // eq/neq null were stored as is_null/is_not_null.
+            if (f.operand.one == .null) return error.InvalidNullComparison;
+            try sql.append(allocator, ' ');
+            try sql.appendSlice(allocator, f.op.sql());
+            try sql.print(allocator, " ${d}", .{params.items.len + 1});
+            try params.append(allocator, f.operand.one);
+        },
+        // Rendering these needs a Dialect (ILIKE, empty IN lists, LIKE
+        // escapes); it comes with zom-sql (#35).
+        .in, .not_in, .like, .ilike, .between => return error.UnsupportedFilter,
+    }
+}
+
 /// Postgres-style placeholders ($1, $2, ...). Column names come from the
 /// tuple's field names; the table and every column are quoted.
 pub fn compileSelect(comptime T: type, allocator: Allocator, table: []const u8, query: q.Query(T)) !Compiled {
@@ -45,21 +108,12 @@ pub fn compileSelect(comptime T: type, allocator: Allocator, table: []const u8, 
     try sql.appendSlice(allocator, " FROM ");
     try writeIdent(&sql, allocator, table);
 
-    for (query.filterSlice(), 0..) |f, i| {
-        try sql.appendSlice(allocator, if (i == 0) " WHERE " else " AND ");
-        try writeIdent(&sql, allocator, @tagName(f.field));
-        if (f.value == .null) {
-            try sql.appendSlice(allocator, switch (f.op) {
-                .eq => " IS NULL",
-                .neq => " IS NOT NULL",
-                else => return error.InvalidNullComparison,
-            });
-            continue;
-        }
-        try sql.append(allocator, ' ');
-        try sql.appendSlice(allocator, f.op.sql());
-        try sql.print(allocator, " ${d}", .{params.items.len + 1});
-        try params.append(allocator, f.value);
+    var it = query.topNodes();
+    var first = true;
+    while (it.next()) |i| {
+        try sql.appendSlice(allocator, if (first) " WHERE " else " AND ");
+        first = false;
+        try writeNode(T, &sql, &params, allocator, &query, @intCast(i));
     }
 
     if (query.order) |o| {
