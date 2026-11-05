@@ -48,7 +48,7 @@ Each row below says whether that part exists today or is planned (see
 
 | | rom (Ruby) | zom (Zig) |
 |---|---|---|
-| **Adapter registry** | `ROM.register_adapter(:csv, ROM::CSV)` puts the adapter in a global runtime table, and `ROM.container(:csv, path)` finds it there by symbol. | Zig has no runtime registry, and zom doesn't need one. An adapter is a Zig package that exports a `Gateway` type, and you pass that type in directly: `zom.Relation(Schema, zom_csv.Gateway)`. The contract is checked when the code compiles, not when it runs. *Today: `zom.Adapter` checks it, for `zom.memory` or any gateway you write. Planned: separate adapter packages.* |
+| **Adapter registry** | `ROM.register_adapter(:csv, ROM::CSV)` puts the adapter in a global runtime table, and `ROM.container(:csv, path)` finds it there by symbol. | Zig has no runtime registry, and zom doesn't need one. An adapter is a Zig module that exports a `Gateway` type, and you pass that type in directly: `zom.Relation(Schema, zom_csv.Gateway)`. The contract is checked when the code compiles, not when it runs. `zom.Adapter` checks it, for `zom.memory` or any gateway you write. zom ships its adapters as modules of the zom package (`dep.module("zom_csv")`), not as separate packages; see [Writing an adapter](#writing-an-adapter). |
 | **Adapter shape** | Adapters subclass `ROM::Gateway`, `ROM::Relation` and `ROM::Memory::Dataset`, then override methods. | No inheritance. A gateway is any type with the right declarations (see [the adapter contract](#the-adapter-contract)). File adapters *wrap* the memory engine, `zom.memory.Store(S)`, instead of subclassing it. |
 | **Optional features** | Whether an adapter supports a command is found out at runtime, when the command is built or run. | An adapter simply leaves out `insert`, `update` or `delete`, and `relation.create(...).commit()` fails to compile with a message naming the adapter. `zom.Adapter(G).capabilities(S)` says what it supports. |
 | **Checking an adapter** | `ROM::Lint` specs, run by each adapter gem. | `zom.lint.run(Gateway, Factory)`, a test suite each adapter runs in its own `zig build test`. *Today: read, filter, null, ordering, limit/offset, `one`, projection, insert, `insertMany`, update and delete checks.* |
@@ -513,21 +513,44 @@ will see that header on a green run.
 
 ### Writing an adapter
 
-Adapters are separate Zig packages, like rom-csv next to rom-core. Until they
-move to their own repos they live in `adapters/<name>/`, and each one depends
-on zom by path, so splitting one out later only changes that path into a
-`.url` and `.hash`:
+rom ships each adapter as its own gem (rom-csv next to rom-core). zom keeps
+the same separation in the code but ships one package with several modules,
+because a Zig package is a whole repo (or tarball) root: an adapter in a
+subdirectory can't be fetched on its own, and splitting into repos would
+mean releasing several of them in lockstep for every 0.x API change. An
+application depends on zom once and picks the modules it uses:
+
+```zig
+const dep = b.dependency("zom", .{ .target = target, .optimize = optimize });
+const zom = dep.module("zom");
+const zom_csv = dep.module("zom_csv"); // also zom_yaml, zom_sql
+```
+
+`zom_pg` needs pg.zig, which is a lazy dependency, so it exists only when
+asked for: `b.dependency("zom", .{ ..., .pg = true })`. Applications that
+don't use Postgres never fetch pg.zig. In a checkout of zom, `-Dpg` is on by
+default; `-Dpg=false` leaves zom-pg out.
+
+Each adapter's code lives in `adapters/<name>/src`, and the root `build.zig`
+exports `adapters/<name>/src/root.zig` as the module `zom_<name>`:
 
 ```
 adapters/csv/
-├── build.zig.zon   .name = .zom_csv, its own .fingerprint, .zom = .{ .path = "../.." }
-├── build.zig       b.dependency("zom", ...).module("zom"), a zom_csv module, a test step
 └── src/root.zig    pub const Gateway = struct { pub const adapter_name = "csv"; ... }
 ```
 
-`adapters/csv` is the template: copy it, rename the package (`.name =
-.zom_yaml`), delete the `.fingerprint` line and run `zig build` once, which
-fails and prints a fresh fingerprint to paste in. Every package needs its own.
+An adapter imports zom only through `@import("zom")` (and other adapters
+through theirs, as zom-pg imports `zom_sql`), never by relative path into
+`src/`. That keeps the public API the whole contract, and lets an adapter
+move to a repo of its own later without code changes, if it ever needs its
+own release schedule (see plan.md, section 3.2).
+
+To add an adapter: create `adapters/<name>/src/root.zig`, add one
+`addAdapter` call in the root `build.zig` (with the modules it imports),
+and add `adapters/<name>/src` to `.paths` in `build.zig.zon`. A third-party
+adapter can still be its own package: depend on zom and import
+`dep.module("zom")` the same way.
+
 A file adapter (one that loads files into `zom.memory.Store`) doesn't write
 a gateway at all. It writes a `Format` with `load` and `dump`, and
 `zom.file.Gateway(Format, .read_only)` / `.writable` supply the rest:
@@ -536,21 +559,10 @@ dataset types, and the atomic `sync`. zom-csv and zom-yaml are both built
 this way. The contract is listed in `src/file.zig` and checked with
 `@hasDecl` when the gateway type is built.
 
-An application depends on `zom` plus the adapters it uses, and
-`@import("zom")` and `@import("zom_csv")` are the only imports it needs: the
-gateway is `zom_csv.Gateway`, passed to `zom.Relation` like any other.
-
-To work on an adapter, run its tests from its own directory:
-
-```sh
-cd adapters/csv && zig build test
-```
-
-From the repo root, `zig build test-adapters` does that for every adapter, and
-`zig build test` runs it too. A new adapter must be added to `adapter_dirs` in
-the root `build.zig`. `adapters/` is not in zom's `.paths`, so changing an
-adapter never changes zom's package hash. Every adapter's tests should call
-`zom.lint.run` once it can store the lint seed rows.
+`zig build test-adapters` runs every adapter's tests, `zig build test-pg`
+only zom-pg's, and `zig build test` runs them all along with the core.
+Every adapter's tests should call `zom.lint.run` once it can store the lint
+seed rows.
 
 ### zom-sql
 
@@ -726,7 +738,7 @@ bump and a changelog entry:
 ## Roadmap
 
 [plan.md](plan.md) lays out the path from this toolkit to a core with
-separate adapter packages, the way rom-core pairs with rom-sql, rom-csv and
+separate adapters, the way rom-core pairs with rom-sql, rom-csv and
 rom-yaml:
 
 0. Tidy the core and freeze the API as v0.2. *Done in 0.2.0.*
@@ -784,9 +796,9 @@ links to the topics below.
 | `examples/csv_users/` | A program joining CSV users with in-memory posts through `zom.Container`, run and checked by `zig build test` | `b.addExecutable`, `pub fn main(init: std.process.Init)`, writing to stdout |
 | `tests/compile_errors/` | Code that must *not* compile, checked by `zig build compile-errors` | What `@compileError` messages users see |
 | `src/file.zig` | `zom.file`: the gateway and datasets file adapters share, over a `Format` (load and dump) | Comptime-parameterised generics, duck typing checked with `@hasDecl`/`@hasField`, atomic writes (temp file, fsync, rename) |
-| `adapters/csv/` | The `zom-csv` package, a CSV `Format` for `zom.file`, depending on zom by path | `build.zig.zon` dependencies, `b.dependency(...).module(...)` |
-| `adapters/sql/` | The `zom-sql` package: compiles a query to SQL for a comptime `Dialect` | Comptime struct parameters, rendering into a `*std.Io.Writer`, recursion with an explicit error set, multiline string literals in tests |
-| `adapters/yaml/` | The `zom-yaml` package: a YAML-subset parser and writer, and a YAML `Format` for `zom.file` | A hand-written line parser, arenas, escaping that round-trips |
+| `adapters/csv/` | The `zom_csv` module, a CSV `Format` for `zom.file` | Modules and imports in `build.zig`, `b.dependency(...).module(...)` |
+| `adapters/sql/` | The `zom_sql` module: compiles a query to SQL for a comptime `Dialect` | Comptime struct parameters, rendering into a `*std.Io.Writer`, recursion with an explicit error set, multiline string literals in tests |
+| `adapters/yaml/` | The `zom_yaml` module: a YAML-subset parser and writer, and a YAML `Format` for `zom.file` | A hand-written line parser, arenas, escaping that round-trips |
 
 ### 3. Zig concepts used everywhere in zom
 

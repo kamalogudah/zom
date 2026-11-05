@@ -10,20 +10,24 @@ It passes the whole `zom.lint` suite, has every capability including
 
 ## Setup
 
-zom-pg depends on zom and zom-sql by path, and on pg.zig pinned to the
+zom-pg is the `zom_pg` module of the zom package. It imports zom and
+zom-sql, and needs pg.zig, pinned in zom's `build.zig.zon` to the
 `zig-0.16.0` branch at commit
 [`1f2bf9e`](https://github.com/karlseguin/pg.zig/commit/1f2bf9e5487b0884f907cd5a8cc751a02d5f7f9c)
 (pg.zig's `master` targets Zig 0.17). To move the pin:
 
 ```sh
-cd adapters/pg
+# from the repo root; then put `.lazy = true` back on the pg entry
 zig fetch --save=pg "git+https://github.com/karlseguin/pg.zig#<commit>"
 ```
 
-In your `build.zig`, import the `zom_pg` module next to `zom`:
+pg.zig is a lazy dependency, so zom only builds `zom_pg` (and fetches
+pg.zig) when asked with `.pg = true`. In your `build.zig`:
 
 ```zig
-const zom_pg = b.dependency("zom_pg", .{ .target = target, .optimize = optimize }).module("zom_pg");
+const dep = b.dependency("zom", .{ .target = target, .optimize = optimize, .pg = true });
+const zom = dep.module("zom");
+const zom_pg = dep.module("zom_pg");
 ```
 
 Open a gateway with a URL, or with the fields one by one. pg.zig does its I/O
@@ -105,16 +109,16 @@ together. `verify` also works on the `tx` gateway inside `transaction`.
 ## Generating the schema structs
 
 Instead of writing the structs by hand, generate them from a live database.
-`addInferStep` in zom-pg's build.zig adds a step that runs `zom-pg-infer`
+`addInferStep` in zom's build.zig adds a step that runs `zom-pg-infer`
 and writes the result into your source tree:
 
 ```zig
 // build.zig
-const zom_pg_build = @import("zom_pg");
+const zom_build = @import("zom");
 
 pub fn build(b: *std.Build) void {
     // ...
-    _ = zom_pg_build.addInferStep(b, .{ .out = "src/schemas.zig" });
+    _ = zom_build.addInferStep(b, .{ .out = "src/schemas.zig" });
 }
 ```
 
@@ -183,7 +187,9 @@ queries the database.
 
 The executable also works on its own:
 `zig build infer -- --url postgres://... --schema public --out schemas.zig`
-in `adapters/pg`, or `zom-pg-infer --help`. The building blocks are
+at zom's root, or `zom-pg-infer --help`. `addInferStep` turns `.pg` on
+for the host build of zom, so it works even when your own
+`b.dependency("zom", ...)` leaves it off. The building blocks are
 `gateway.introspect(allocator, schema)`, which returns a
 `zom_sql.infer.Catalog`, and `zom_sql.infer.render(allocator, catalog,
 .{})`, which needs no database. A future SQLite driver can reuse the second.
@@ -323,15 +329,15 @@ unless `ZOM_PG_URL` is set:
 
 ```sh
 createdb zom_test
-ZOM_PG_URL=postgres://postgres@127.0.0.1:5432/zom_test zig build test
+ZOM_PG_URL=postgres://postgres@127.0.0.1:5432/zom_test zig build test-pg
 ```
 
 Every check drops and recreates a `lint_users` table, the transaction
 and error tests a `tx_items` table, the `verify` tests a `vf_users`
 table and a `vf_role` type, the shared scenario a `sc_books` table, and
 the inference tests a `zom_infer` schema, so use a database you can spare
-those in. Without `ZOM_PG_URL`, `zig build test` (here, or
-`zig build test-adapters` at the root) only checks that zom-pg compiles and
+those in. Without `ZOM_PG_URL`, `zig build test-pg` (or `test-adapters`,
+or `test`) only checks that zom-pg compiles and
 satisfies the adapter contract.
 
 `src/scenario_test.zig` writes one sequence of relation calls (create,
@@ -339,6 +345,8 @@ filter, page, project, update, delete) as `scenario(comptime G: type, gw: *G)`
 and runs it on `zom.memory.Gateway` and on `zom_pg.Gateway`, so code written
 against zom runs unchanged on both. The memory run needs no database.
 
-CI (`.github/workflows/ci.yml`) runs this package's tests against a
-Postgres service container with `ZOM_PG_URL` set, and fails if any test is
-skipped.
+CI runs zom-pg in its own workflow, `.github/workflows/pg.yml`: `zig build
+test-pg` against a Postgres service container with `ZOM_PG_URL` set,
+failing if any test is skipped, then a build of `zom-pg-infer`. The core
+workflow, `ci.yml`, builds with `-Dpg=false`, so it never needs Postgres or
+pg.zig.

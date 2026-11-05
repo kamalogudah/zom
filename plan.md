@@ -134,17 +134,28 @@ checks these.
 
 ### 3.2 Packaging
 
-- The core stays in this repo as the `zom` package. Adapters start life in
-  `adapters/<name>/`, each with its own `build.zig.zon` depending on zom
-  through `.path = "../.."`, so they can be split into their own repos later
-  without code changes (swap `.path` for `.url` + `.hash`).
+- One package, several modules. The core is the `zom` module, and each
+  adapter in `adapters/<name>/src` is exported by the root `build.zig` as
+  `zom_<name>`. An application writes `b.dependency("zom", ...)` once and
+  takes `.module("zom")`, `.module("zom_csv")` and so on. Separate packages
+  per adapter (rom's gem-per-adapter layout) don't work inside one repo in
+  Zig: a fetched package is the repo or tarball root, so an adapter in a
+  subdirectory can't be fetched on its own, and a `.path = "../.."`
+  dependency can't point outside the fetched package.
+- Adapters with third-party dependencies take them as **lazy** dependencies
+  behind a build option (`-Dpg`, `.pg = true` from a dependent), so an
+  application only fetches what it uses.
+- Adapters import zom only through its public module, so one can still move
+  to its own repo without code changes.
 - An adapter moves to its own repo only when it needs CI services the core
   doesn't (a Postgres container, a TigerBeetle cluster) and those jobs slow
   down or break core PRs, or when it needs its own release schedule. Until
   then zom-pg and zom-tigerbeetle live here too, with their service-backed
-  CI jobs in separate workflows so they don't block core PRs.
+  CI jobs in separate workflows so they don't block core PRs. (zom-pg's is
+  `.github/workflows/pg.yml`; `ci.yml` builds with `-Dpg=false`.)
 - An application depends on `zom` plus the adapters it needs. `@import("zom")`
-  and `@import("zom_csv")` are the only imports it needs.
+  and `@import("zom_csv")` are the only imports it needs, from one
+  `b.dependency("zom", ...)`.
 - `zom.memory` stays in core, like `ROM::Memory`, because tests, the lint
   suite and the file adapters all build on it.
 - `zom.sql.compileSelect` moves out to `zom-sql`, so core has no SQL in it.
@@ -360,7 +371,10 @@ them.
 
 The four open questions were decided in #29:
 
-1. Adapter packages live in this repo under `adapters/` (split criteria in 3.2).
+1. Adapters live in this repo under `adapters/` (split criteria in 3.2).
+   Revised on 2026-11-05: they ship as modules of the one zom package, not
+   as separate packages, because separate packages in one repo couldn't be
+   fetched (3.2).
 2. `.fallback` exists, opt-in per relation, with a scan hook (3.1).
 3. The core `Value` grows: `uint128`, `timestamp`, `bytes` (3.3).
 4. `zom-sqlite` is post-v1 and uses a translate-c binding (3.2).

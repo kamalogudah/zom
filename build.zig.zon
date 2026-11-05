@@ -3,6 +3,26 @@
     .version = "0.2.0",
     .fingerprint = 0x77415e19c6fe7460,
     .minimum_zig_version = "0.16.0",
-    .dependencies = .{},
-    .paths = .{ "build.zig", "build.zig.zon", "src", "examples/readme.zig", "README.md", "CHANGELOG.md" },
+    .dependencies = .{
+        // Only zom_pg uses it, and only with `-Dpg=true` (`.pg = true` from a
+        // dependent's build.zig), so applications without Postgres never fetch it.
+        .pg = .{
+            .url = "git+https://github.com/karlseguin/pg.zig#1f2bf9e5487b0884f907cd5a8cc751a02d5f7f9c",
+            .hash = "pg-0.0.0-Wp_7gRBNBwB5UeWisHZe3lpWmy9swOS61GYbZCtOXaLE",
+            .lazy = true,
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "adapters/csv/src",
+        "adapters/yaml/src",
+        "adapters/sql/src",
+        "adapters/pg/src",
+        "adapters/pg/README.md",
+        "examples/readme.zig",
+        "README.md",
+        "CHANGELOG.md",
+    },
 }

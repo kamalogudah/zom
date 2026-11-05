@@ -1,5 +1,10 @@
 name: CI
 
+# The core, the compile-error cases, the adapters that need no service
+# (csv, yaml, sql) and the examples. zom-pg is built with -Dpg=false, so this
+# workflow neither fetches pg.zig nor needs Postgres; zom-pg has its own
+# workflow, pg.yml, so a Postgres problem never fails a core run.
+
 on:
   push:
     branches: [main]
@@ -14,29 +19,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: zom_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d zom_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-
     steps:
       - uses: actions/checkout@v5
 
       - uses: mlugg/setup-zig@v2.2.1
         with:
           version: 0.16.0
-          # Cached below instead: the adapters and examples are separate
-          # builds, each with its own .zig-cache.
+          # Cached below instead: the examples are separate builds, each
+          # with its own .zig-cache.
           use-cache: false
 
       - name: Cache Zig
@@ -45,32 +35,15 @@ jobs:
           path: |
             ~/.cache/zig
             .zig-cache
-            adapters/*/.zig-cache
             examples/*/.zig-cache
-          key: zig-0.16.0-${{ runner.os }}-${{ hashFiles('**/build.zig.zon') }}-${{ github.sha }}
+          key: core-zig-0.16.0-${{ runner.os }}-${{ hashFiles('**/build.zig.zon') }}-${{ github.sha }}
           restore-keys: |
-            zig-0.16.0-${{ runner.os }}-${{ hashFiles('**/build.zig.zon') }}-
-            zig-0.16.0-${{ runner.os }}-
+            core-zig-0.16.0-${{ runner.os }}-${{ hashFiles('**/build.zig.zon') }}-
+            core-zig-0.16.0-${{ runner.os }}-
 
-      # The vendored packages under zig-pkg are not ours to format.
+      # Fetched packages under zig-pkg are not ours to format.
       - name: zig fmt --check
-        run: zig fmt --check --exclude adapters/pg/zig-pkg .
+        run: zig fmt --check --exclude zig-pkg .
 
-      # Core, compile-error cases, every adapter and the examples. ZOM_PG_URL
-      # is unset here, so zom-pg only compiles and checks its contract; its
-      # database tests run in the next step.
       - name: zig build test
-        run: zig build test --summary all
-
-      - name: zig build test (adapters/pg, against Postgres)
-        working-directory: adapters/pg
-        env:
-          ZOM_PG_URL: postgres://postgres:postgres@127.0.0.1:5432/zom_test
-        # A database test that can't see ZOM_PG_URL is skipped, not failed;
-        # here, a skip means the suite didn't run, so fail on it.
-        run: |
-          zig build test --summary all 2>&1 | tee "$RUNNER_TEMP/pg-test.log"
-          if grep -q 'skip' "$RUNNER_TEMP/pg-test.log"; then
-            echo "::error::zom-pg tests were skipped; is ZOM_PG_URL reaching them?"
-            exit 1
-          fi
+        run: zig build test -Dpg=false --summary all

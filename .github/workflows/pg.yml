@@ -1,0 +1,73 @@
+name: zom-pg
+
+# zom-pg's tests, including the full zom.lint suite, against a Postgres
+# service container. Kept apart from ci.yml so the core's checks don't wait
+# on (or fail because of) Postgres. It runs on every push and PR, not only
+# ones touching adapters/pg: a core change can break zom-pg too.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: pg-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: zom_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d zom_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: 0.16.0
+          use-cache: false
+
+      - name: Cache Zig
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/zig
+            .zig-cache
+            zig-pkg
+          key: pg-zig-0.16.0-${{ runner.os }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
+          restore-keys: |
+            pg-zig-0.16.0-${{ runner.os }}-${{ hashFiles('build.zig.zon') }}-
+            pg-zig-0.16.0-${{ runner.os }}-
+
+      - name: zig build test-pg (against Postgres)
+        env:
+          ZOM_PG_URL: postgres://postgres:postgres@127.0.0.1:5432/zom_test
+        # A database test that can't see ZOM_PG_URL is skipped, not failed;
+        # here, a skip means the suite didn't run, so fail on it. An explicit
+        # `shell: bash` adds -o pipefail, so a failing test isn't hidden by tee.
+        shell: bash
+        run: |
+          zig build test-pg -Dpg=true --summary all 2>&1 | tee "$RUNNER_TEMP/pg-test.log"
+          if grep -q 'skip' "$RUNNER_TEMP/pg-test.log"; then
+            echo "::error::zom-pg tests were skipped; is ZOM_PG_URL reaching them?"
+            exit 1
+          fi
+
+      # zom-pg-infer is what addInferStep runs; make sure it still builds.
+      - name: zig build install (zom-pg-infer)
+        run: zig build install -Dpg=true

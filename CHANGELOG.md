@@ -7,6 +7,23 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+- The adapters are modules of the zom package instead of separate packages.
+  `adapters/<name>/build.zig` and `build.zig.zon` are gone; the root
+  `build.zig` exports `zom_csv`, `zom_yaml`, `zom_sql` and, with
+  `-Dpg=true` (`.pg = true` from a dependent), `zom_pg`. Depend on zom once
+  and take `dep.module("zom_csv")` and so on. Before this, the adapters
+  were outside zom's `.paths` and couldn't be fetched at all. pg.zig is now
+  a lazy dependency of zom, fetched only when zom-pg is built.
+  `addInferStep` moved to zom's build.zig: `@import("zom").addInferStep`.
+  `zig build test-pg` runs zom-pg's tests from the root. Fetched packages
+  (`zig-pkg/`) are no longer committed.
+- CI is two workflows: `ci.yml` (core, csv, yaml, sql, examples, with
+  `-Dpg=false`) and `pg.yml` (zom-pg against a Postgres container), so a
+  Postgres failure no longer fails the core's run. The pg step now runs
+  with `pipefail`, so a failing test can't pass behind `tee`.
+
 ### Removed (breaking)
 
 - `zom.sql` is gone from the core, which now has no SQL in it. The compiler

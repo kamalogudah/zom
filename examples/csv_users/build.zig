@@ -4,8 +4,12 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const zom = b.dependency("zom", .{ .target = target, .optimize = optimize }).module("zom");
-    const zom_csv = b.dependency("zom_csv", .{ .target = target, .optimize = optimize }).module("zom_csv");
+    // One dependency, several modules: zom ships its adapters as modules
+    // of the same package. zom_pg isn't built (no `.pg = true`), so this
+    // build never fetches pg.zig.
+    const zom_dep = b.dependency("zom", .{ .target = target, .optimize = optimize });
+    const zom = zom_dep.module("zom");
+    const zom_csv = zom_dep.module("zom_csv");
 
     const exe = b.addExecutable(.{
         .name = "csv_users",

@@ -5,7 +5,6 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .zom = .{ .path = "../.." },
-        .zom_csv = .{ .path = "../../adapters/csv" },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src", "data" },
 }
