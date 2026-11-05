@@ -682,6 +682,21 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
             return .{ .relation = self, .tuples = tuples };
         }
 
+        /// ROM's `posts.changeset(:create, data).associate(user)`, parent
+        /// first: `posts.associate(.author, user).create(.{ ... })` sets the
+        /// foreign key of the `belongsTo` association `assoc` from `parent`
+        /// (the target's tuple, or a `select` of it that kept the key), and
+        /// its `create` / `createMany` take the tuple without that key. See
+        /// changeset.zig for why the parent comes first.
+        pub fn associate(
+            self: Self,
+            comptime assoc: @TypeOf(.enum_literal),
+            parent: anytype,
+        ) changeset.Scoped(Self, changeset.withKey(Self, .{}, assoc, @TypeOf(parent))) {
+            comptime requireWhole("associate");
+            return (changeset.Scoped(Self, .{}){ .relation = self }).associate(assoc, parent);
+        }
+
         /// ROM's `users.by_pk(1).changeset(:update, data)`, built with `.set`.
         pub fn update(self: Self) changeset.Update(Self) {
             comptime Adapter.require(S, .updatable, "update");

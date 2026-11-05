@@ -89,4 +89,5 @@ test {
     _ = @import("tests/schema_test.zig");
     _ = @import("tests/combine_test.zig");
     _ = @import("tests/join_test.zig");
+    _ = @import("tests/associate_test.zig");
 }

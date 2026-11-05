@@ -277,6 +277,34 @@ test "README: Combine" {
     try testing.expectEqualStrings("Achieng", bylines.items[0].author.?.name);
 }
 
+test "README: Associated creates" {
+    const zom = assoc.zom;
+    const allocator = testing.allocator;
+    var gw = zom.memory.Gateway.init(allocator, .{});
+    defer gw.deinit();
+    const users = try zom.Relation(assoc.UserSchema, zom.memory.Gateway).init(&gw);
+    const posts = try zom.Relation(assoc.PostSchema, zom.memory.Gateway).init(&gw);
+    _ = try users.create(.{ .id = 1, .name = "Achieng" }).commit();
+
+    const author = (try users.byPk(1).one(allocator)).?;
+    _ = try posts.associate(.author, author)
+        .create(.{ .id = 12, .title = "Changesets" })
+        .commit();
+
+    // ROM's order, with the key given a value first.
+    _ = try posts.create(.{ .id = 13, .user_id = undefined, .title = "Late" }).associate(.author, author).commit();
+    const tuples = [_]assoc.Post{.{ .id = 14, .user_id = undefined, .title = "Batch" }};
+    _ = try posts.createMany(&tuples).associate(.author, author).commitAlloc(allocator);
+
+    // -- checks (not in the README) ---------------------------------------
+    const scoped = posts.associate(.author, author);
+    const rows = [_]@TypeOf(scoped).Input{.{ .id = 15, .title = "Scoped batch" }};
+    try testing.expectEqual(1, try scoped.createMany(&rows).commitAlloc(allocator));
+    var result = try users.combine(.posts, posts.order(.id, .asc)).mapTo(assoc.Author, allocator);
+    defer result.deinit();
+    try testing.expectEqual(4, result.items[0].posts.len);
+}
+
 test "README: Join" {
     const zom = @import("zom");
     const allocator = testing.allocator;

@@ -15,6 +15,7 @@ that each do one thing, and nothing is an "active record".
 | `users.by_pk(1).one`                       | `users.byPk(1).one(allocator)`                                 |
 | `users.changeset(:create, data).commit`    | `users.create(tuple).map(f).commit()`                          |
 | `users.changeset(:create, [a, b]).commit`  | `users.createMany(&.{ a, b }).commit()`                        |
+| `posts.changeset(:create, data).associate(user)` | `posts.associate(.author, user).create(data).commit()` (see [Associated creates](#associated-creates)) |
 | `users.by_pk(1).changeset(:update, ...)`   | `users.byPk(1).update().set(.email, "...").commit()`           |
 | `command(:delete)`                         | `try users.where(...).delete()`                                |
 | `ROM::Mapper`, `map_with`, `map_to`        | `zom.Mapper(Tuple, Entity, .{ .renames = ... })`, `mapWith`, `mapTo` |
@@ -149,7 +150,7 @@ breaking change needs a minor version bump and an entry in
 | `zom.Op` | Filter operators: `eq`, `neq`, `lt`, `lte`, `gt`, `gte`, `in`, `not_in`, `like`, `ilike`, `between`, `is_null`, `is_not_null`. `op.operand()` returns the `Operand` variant it takes. |
 | `zom.Direction` | `asc`, `desc`. |
 | `zom.Container(spec)` | Declares gateways and relations once; `init(self, allocator, Config)` / `deinit()` connect and disconnect them all. See [Container](#container). |
-| `zom.changeset` | `Create(Rel)`, `CreateMany(Rel)` and `Update(Rel)`, the types returned by `relation.create`, `relation.createMany` and `relation.update`. You don't name them yourself. |
+| `zom.changeset` | `Create(Rel)`, `CreateMany(Rel)`, `Update(Rel)` and `Scoped(Rel, keys)`, the types returned by `relation.create`, `relation.createMany`, `relation.update` and `relation.associate`. You don't name them yourself; `Scoped`'s `Input` is the struct its `create` takes. |
 | `zom.Mapper(Src, Dst, .{ .renames, .skip })` | A comptime mapper: `call(src) Dst` and `many(allocator, srcs) ![]Dst`. A `Dst` field takes the `Src` field of the same name (or its rename), else its default; neither is a compile error. Fields named in `skip` are left undefined for the caller to fill. `sources` lists the `Src` fields it copies, and `options` the options it was made with. |
 | `zom.Combined(Source, association, Target)`, `zom.CombineResult(E)` | What `relation.combine(.assoc, target)` returns, and what its `mapTo` / `mapWith` return: `items: []E` and the arena owning them, freed with `deinit()`. See [Associations](#associations). |
 | `zom.combineMany(.{ .into, .parent_key, .child_key }, allocator, parents, children)` | Sets `parent.into` to the children whose `child_key` equals the parent's `parent_key`, on slices already loaded. O(n·m); prefer `relation.combine`. |
@@ -191,8 +192,9 @@ relation and never touch the dataset. `field` is always an enum literal, and
 | `combine(.assoc, target)` | `zom.Combined(...)` | This relation with association `assoc` of its schema, read from `target`, a relation over the association's target schema. Lazy; its `mapTo(E, allocator)` and `mapWith(M, allocator)` return a `zom.CombineResult(E)`. See [Associations](#associations). |
 | `join(.assoc)` | `Relation` | The rows that have at least one row of association `assoc`, each once, as the same relation type. Needs `supports.join` (a compile error otherwise, even on a `.fallback` relation). See [Join](#join). |
 | `whereJoined(.assoc, field, op, value)` | `Relation` | A filter on the joined rows, typed like `where` on the target's tuple. Needs `join(.assoc)` first. |
-| `create(tuple)` | `Create` | `.map(f)` applies `f: fn (Tuple) Tuple`; `.commit()` returns `!Tuple`, the stored tuple. `.commitAlloc(allocator)` does the same on every adapter, allocating the returned strings when they are caller-owned (zom-pg, where plain `commit()` is a compile error); free the result with `freeOne`. A compile error after `select`. |
-| `createMany(tuples)` | `CreateMany` | A compile error after `select`. `tuples: []const Tuple`, borrowed until commit. `.commit()` returns `!usize`, the rows inserted. Uses the dataset's `insertMany`, else loops over `insert` (see [the adapter contract](#the-adapter-contract)). |
+| `create(tuple)` | `Create` | `.map(f)` applies `f: fn (Tuple) Tuple`; `.associate(.assoc, parent)` overwrites the tuple's foreign key from `parent`; `.commit()` returns `!Tuple`, the stored tuple. `.commitAlloc(allocator)` does the same on every adapter, allocating the returned strings when they are caller-owned (zom-pg, where plain `commit()` is a compile error); free the result with `freeOne`. A compile error after `select`. |
+| `createMany(tuples)` | `CreateMany` | A compile error after `select`. `tuples: []const Tuple`, borrowed until commit. `.commit()` returns `!usize`, the rows inserted. Uses the dataset's `insertMany`, else loops over `insert` (see [the adapter contract](#the-adapter-contract)). `.associate(.assoc, parent)` sets every tuple's foreign key on a copy, so the changeset then commits with `.commitAlloc(allocator)`. |
+| `associate(.assoc, parent)` | `zom.changeset.Scoped(...)` | Sets the foreign key of `belongsTo` association `assoc` from `parent`, the target's tuple or a `select` of it that kept the key. Its `create(data)` and `createMany(rows)` take `Input`, the tuple without that key; chain `.associate` for more associations. Its `createMany` commits with `commitAlloc(allocator)`. A compile error after `select`. See [Associated creates](#associated-creates). |
 | `update()` | `Update` | `.set(field, value)` adds a change (at most `max_changes = 16`); `.commit()` returns `!usize`, the rows changed. |
 | `delete()` | `!usize` | The rows removed. |
 
@@ -481,6 +483,46 @@ nothing, and joining a second one panics, as does `whereJoined` without
 the `join`. `update` and `delete` on a joined relation return
 `error.JoinedWrite`, because which rows a join keeps depends on the other
 table.
+
+#### Associated creates
+
+`posts.associate(.author, user)` is ROM's `changeset.associate(user)`, with
+the parent first: its `create` takes the post without `user_id`, and the
+key comes from `user`:
+
+```zig
+const author = (try users.byPk(1).one(allocator)).?;
+_ = try posts.associate(.author, author)
+    .create(.{ .id = 12, .title = "Changesets" })
+    .commit();
+```
+
+The struct `create` takes is the tuple without the association's foreign
+key, with the same types and defaults otherwise, so the literal is typed
+as usual and the key can't be forgotten or given twice. Chain `associate`
+for several `belongsTo` associations (a comment's post and author). For a
+batch, `posts.associate(.author, author).createMany(&rows)` takes rows of
+that struct, `@TypeOf(scoped).Input`, and commits with
+`commitAlloc(allocator)`, because it builds the stored tuples in a copy.
+
+**Why the parent comes first.** ROM's `create(data)` leaves out `user_id`,
+but a Zig struct has no unset fields, so a post literal without `user_id`
+doesn't compile. Giving the key a default in the tuple would let a post
+silently belong to user 0. Making `create` accept a partial struct would
+mean an `anytype` parameter, and Zig 0.16 doesn't coerce an anonymous
+struct to a named one, so every `create` literal would lose its result
+type (`.id = @intCast(n)` would stop compiling). So `create` keeps taking a
+whole tuple. ROM's order still works if you give the key a value first:
+`posts.create(.{ .id = 13, .user_id = undefined, ... }).associate(.author, author)`,
+and `posts.createMany(&tuples).associate(.author, author).commitAlloc(allocator)`
+for a batch. Nothing catches a forgotten `associate` in that form.
+
+The parent must be the target's tuple, or a `select` of it that kept the
+key (any struct whose fields are all fields of the target's tuple, with
+the same types). Any other type, such as another schema's tuple, is a
+compile error, and so is a `hasMany` association, whose foreign key is in
+the other schema's rows: `users.associate(.posts, post)` points you at
+`posts.associate(.author, ...)`.
 
 #### Nesting
 

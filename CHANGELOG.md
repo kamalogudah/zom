@@ -9,6 +9,18 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- `relation.associate(.assoc, parent)`, ROM's `changeset.associate(user)`
+  with the parent first: `posts.associate(.author, user).create(.{ ... })`
+  takes the tuple without the foreign key (`Input`) and sets it from the
+  parent's key; `.createMany(rows)` does the same for a batch and commits
+  with `commitAlloc(allocator)`. Associations chain, for a row with several
+  parents. ROM's order works on whole tuples too:
+  `create(tuple).associate(...)` and `createMany(tuples).associate(...)`
+  overwrite the key. The parent must be the target's tuple or a `select` of
+  it that kept the key, and the association a `belongsTo`; anything else is
+  a compile error. `create` keeps taking a whole tuple, because a partial
+  struct would mean an `anytype` parameter, and Zig 0.16 literals would lose
+  their result type; see `src/changeset.zig`.
 - Associations on schemas: `zom.hasMany(Target, .fk)` and
   `zom.belongsTo(Target, .fk)` in `.associations`, read back with
   `S.association(.name)` or `S.associations.name` as a `zom.Association`.
