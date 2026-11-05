@@ -17,6 +17,16 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
   are association names. Schemas that refer to each other declare their
   associations as `struct { pub const posts = ...; }`, which Zig evaluates
   only after both schemas exist; see `src/schema.zig`.
+- `relation.combine(.assoc, target)`, ROM's `users.combine(:posts)`: a lazy
+  combined relation whose `mapTo(E, allocator)` / `mapWith(M, allocator)`
+  read the source once, read the target with one `whereIn` query per
+  `Query.max_in` keys, group the rows with a hash map (O(n + m)), and fill
+  `E`'s association field: `[]const X` for `hasMany`, `?X` for
+  `belongsTo`. The result is a `zom.CombineResult(E)` whose arena owns the
+  whole tree; free it with `deinit()`. Nested combines are not supported
+  yet. See `src/combine.zig`.
+- `zom.Mapper` options take `.skip`, fields the mapper leaves for the caller
+  to fill, and a mapper exposes the `options` it was made with.
 
 ### Changed (breaking)
 

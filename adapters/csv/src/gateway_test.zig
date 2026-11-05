@@ -485,3 +485,49 @@ test "sync keeps the file's permissions" {
     const st = try tmp.dir.statFile(testing.io, "users.csv", .{});
     try testing.expectEqual(0o600, st.permissions.toMode() & 0o777);
 }
+
+// -- combine -----------------------------------------------------------------
+
+const Author = struct { id: u32, name: []const u8 };
+const Article = struct { id: u32, author_id: u32, title: []const u8 };
+const AuthorSchema = zom.Schema(Author, "authors", .id, .{
+    .associations = struct {
+        pub const articles = zom.hasMany(ArticleSchema, .author_id);
+    },
+});
+const ArticleSchema = zom.Schema(Article, "articles", .id, .{
+    .associations = struct {
+        pub const author = zom.belongsTo(AuthorSchema, .author_id);
+    },
+});
+
+test "combine: has-many and belongs-to over two CSV files" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "authors.csv", .data = "id,name\n1,Achieng\n2,Otieno\n3,Wanjiru\n" });
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "articles.csv",
+        .data = "id,author_id,title\n10,1,Relations are values\n11,1,Mappers not models\n12,2,Comptime schemas\n13,9,Orphan\n",
+    });
+    var gw = Gateway.init(testing.allocator, .{ .io = testing.io, .dir = tmp.dir, .path = "." });
+    defer gw.deinit();
+    const authors = try zom.Relation(AuthorSchema, Gateway).init(&gw);
+    const articles = try zom.Relation(ArticleSchema, Gateway).init(&gw);
+
+    const Writer = struct { id: u32, name: []const u8, articles: []const struct { id: u32, title: []const u8 } };
+    var writers = try authors.order(.id, .asc).combine(.articles, articles.order(.id, .asc)).mapTo(Writer, testing.allocator);
+    defer writers.deinit();
+    try testing.expectEqual(3, writers.items.len);
+    try testing.expectEqual(2, writers.items[0].articles.len);
+    try testing.expectEqualStrings("Mappers not models", writers.items[0].articles[1].title);
+    try testing.expectEqual(1, writers.items[1].articles.len);
+    try testing.expectEqual(0, writers.items[2].articles.len);
+
+    const Byline = struct { title: []const u8, author: ?Author };
+    var bylines = try articles.order(.id, .asc).combine(.author, authors).mapTo(Byline, testing.allocator);
+    defer bylines.deinit();
+    try testing.expectEqual(4, bylines.items.len);
+    try testing.expectEqualStrings("Achieng", bylines.items[1].author.?.name);
+    try testing.expectEqualStrings("Otieno", bylines.items[2].author.?.name);
+    try testing.expect(bylines.items[3].author == null);
+}

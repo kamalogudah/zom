@@ -44,6 +44,7 @@ const changeset = @import("changeset.zig");
 const adapter = @import("adapter.zig");
 const projection = @import("projection.zig");
 const strings = @import("strings.zig");
+const combine_mod = @import("combine.zig");
 
 /// What a relation does with a query feature its dataset does not support.
 pub const Mode = enum {
@@ -561,6 +562,22 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
             }
             allocator.free(rows);
             return out;
+        }
+
+        // -- associations --------------------------------------------------
+
+        /// ROM's `users.combine(:posts)`: this relation with the rows of
+        /// association `assoc` (declared on its schema), read from `target`,
+        /// a relation over the association's target schema, e.g.
+        /// `users.combine(.posts, posts.where(.published, .eq, true))`.
+        /// Lazy, like any relation; `mapTo(Author, allocator)` reads it with
+        /// one `in` query per `Query.max_in` keys. See combine.zig.
+        pub fn combine(
+            self: Self,
+            comptime assoc: @TypeOf(.enum_literal),
+            target: anytype,
+        ) combine_mod.Combined(Self, S.association(assoc), @TypeOf(target)) {
+            return .{ .source = self, .target = target };
         }
 
         // -- commands / changesets ----------------------------------------

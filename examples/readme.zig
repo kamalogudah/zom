@@ -216,6 +216,7 @@ const assoc = struct {
     const User = struct { id: u32, name: []const u8 };
     const Post = struct { id: u32, user_id: u32, title: []const u8 };
     const Author = struct { id: u32, name: []const u8, posts: []const Post = &.{} };
+    const Byline = struct { title: []const u8, author: ?User };
 
     const UserSchema = zom.Schema(User, "users", .id, .{
         .associations = struct {
@@ -253,4 +254,25 @@ test "README: Associations" {
     try testing.expectEqual(1, authors[0].posts.len);
     try testing.expectEqual(11, authors[0].posts[0].id);
     try testing.expectEqual(10, authors[1].posts[0].id);
+}
+
+test "README: Combine" {
+    const zom = assoc.zom;
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
+    defer gw.deinit();
+    const users = try zom.Relation(assoc.UserSchema, zom.memory.Gateway).init(&gw);
+    const posts = try zom.Relation(assoc.PostSchema, zom.memory.Gateway).init(&gw);
+    _ = try users.create(.{ .id = 1, .name = "Achieng" }).commit();
+    _ = try users.create(.{ .id = 2, .name = "Baraka" }).commit();
+    _ = try posts.create(.{ .id = 10, .user_id = 1, .title = "a" }).commit();
+    _ = try posts.create(.{ .id = 11, .user_id = 1, .title = "b" }).commit();
+
+    var result = try users.order(.id, .asc).combine(.posts, posts.order(.id, .asc)).mapTo(assoc.Author, testing.allocator);
+    defer result.deinit();
+    try testing.expectEqual(2, result.items[0].posts.len);
+    try testing.expectEqual(0, result.items[1].posts.len);
+
+    var bylines = try posts.combine(.author, users).mapTo(assoc.Byline, testing.allocator);
+    defer bylines.deinit();
+    try testing.expectEqualStrings("Achieng", bylines.items[0].author.?.name);
 }

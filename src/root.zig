@@ -58,6 +58,9 @@ pub const lint = @import("lint.zig");
 pub const mapper = @import("mapper.zig");
 pub const Mapper = mapper.Mapper;
 pub const combineMany = mapper.combineMany;
+/// What `relation.combine(.assoc, target)` returns, and what its `mapTo` gives.
+pub const Combined = @import("combine.zig").Combined;
+pub const CombineResult = @import("combine.zig").Result;
 
 pub const codec = @import("codec.zig");
 
@@ -81,4 +84,5 @@ test {
     _ = @import("tests/fallback_test.zig");
     _ = @import("tests/owned_test.zig");
     _ = @import("tests/schema_test.zig");
+    _ = @import("tests/combine_test.zig");
 }

@@ -9,23 +9,38 @@ const std = @import("std");
 const q = @import("query.zig");
 
 pub const Rename = struct { from: []const u8, to: []const u8 };
-pub const Options = struct { renames: []const Rename = &.{} };
+pub const Options = struct {
+    renames: []const Rename = &.{},
+    /// `Dst` fields the mapper leaves undefined for the caller to fill.
+    /// `combine` uses it for the association field, which has no source
+    /// attribute and needs no default.
+    skip: []const []const u8 = &.{},
+};
 
 pub fn Mapper(comptime Src: type, comptime Dst: type, comptime opts: Options) type {
     return struct {
         pub const Input = Src;
         pub const Output = Dst;
+        pub const options = opts;
 
         /// The `Src` fields copied into `Dst`, e.g. to know which strings
         /// the output now shares with the input.
         pub const sources: []const []const u8 = blk: {
             var names: []const []const u8 = &.{};
             for (@typeInfo(Dst).@"struct".fields) |f| {
+                if (skipped(f.name)) continue;
                 const src_name = sourceName(f.name);
                 if (@hasField(Src, src_name)) names = names ++ .{src_name};
             }
             break :blk names;
         };
+
+        fn skipped(comptime name: []const u8) bool {
+            for (opts.skip) |s| {
+                if (std.mem.eql(u8, s, name)) return true;
+            }
+            return false;
+        }
 
         fn sourceName(comptime name: []const u8) []const u8 {
             for (opts.renames) |r| {
@@ -38,7 +53,9 @@ pub fn Mapper(comptime Src: type, comptime Dst: type, comptime opts: Options) ty
             var dst: Dst = undefined;
             inline for (@typeInfo(Dst).@"struct".fields) |f| {
                 const src_name = comptime sourceName(f.name);
-                if (comptime @hasField(Src, src_name)) {
+                if (comptime skipped(f.name)) {
+                    // Left for the caller.
+                } else if (comptime @hasField(Src, src_name)) {
                     @field(dst, f.name) = @field(src, src_name);
                 } else if (comptime f.defaultValue() != null) {
                     @field(dst, f.name) = comptime f.defaultValue().?;

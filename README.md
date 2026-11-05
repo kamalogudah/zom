@@ -18,7 +18,7 @@ that each do one thing, and nothing is an "active record".
 | `users.by_pk(1).changeset(:update, ...)`   | `users.byPk(1).update().set(.email, "...").commit()`           |
 | `command(:delete)`                         | `try users.where(...).delete()`                                |
 | `ROM::Mapper`, `map_with`, `map_to`        | `zom.Mapper(Tuple, Entity, .{ .renames = ... })`, `mapWith`, `mapTo` |
-| `users.combine(:posts)`                    | `zom.combineMany(.{ .into, .parent_key, .child_key }, ...)`    |
+| `users.combine(:posts)`                    | `users.combine(.posts, posts).mapTo(Author, allocator)` (see [Associations](#associations)) |
 | rom-sql (Sequel)                           | `zom_sql.compileRelation(.postgres, allocator, rel)` and `compileInsert` / `compileUpdate` / `compileDelete` in [zom-sql](#zom-sql), a SQL compiler with no driver yet |
 
 ## What Zig gives you for free
@@ -148,8 +148,9 @@ breaking change needs a minor version bump and an entry in
 | `zom.Direction` | `asc`, `desc`. |
 | `zom.Container(spec)` | Declares gateways and relations once; `init(self, allocator, Config)` / `deinit()` connect and disconnect them all. See [Container](#container). |
 | `zom.changeset` | `Create(Rel)`, `CreateMany(Rel)` and `Update(Rel)`, the types returned by `relation.create`, `relation.createMany` and `relation.update`. You don't name them yourself. |
-| `zom.Mapper(Src, Dst, .{ .renames })` | A comptime mapper: `call(src) Dst` and `many(allocator, srcs) ![]Dst`. A `Dst` field takes the `Src` field of the same name (or its rename), else its default; neither is a compile error. `sources` lists the `Src` fields it copies. |
-| `zom.combineMany(.{ .into, .parent_key, .child_key }, allocator, parents, children)` | Sets `parent.into` to the children whose `child_key` equals the parent's `parent_key`. O(n·m). |
+| `zom.Mapper(Src, Dst, .{ .renames, .skip })` | A comptime mapper: `call(src) Dst` and `many(allocator, srcs) ![]Dst`. A `Dst` field takes the `Src` field of the same name (or its rename), else its default; neither is a compile error. Fields named in `skip` are left undefined for the caller to fill. `sources` lists the `Src` fields it copies, and `options` the options it was made with. |
+| `zom.Combined(Source, association, Target)`, `zom.CombineResult(E)` | What `relation.combine(.assoc, target)` returns, and what its `mapTo` / `mapWith` return: `items: []E` and the arena owning them, freed with `deinit()`. See [Associations](#associations). |
+| `zom.combineMany(.{ .into, .parent_key, .child_key }, allocator, parents, children)` | Sets `parent.into` to the children whose `child_key` equals the parent's `parent_key`, on slices already loaded. O(n·m); prefer `relation.combine`. |
 | `zom.mapper` | The module behind `Mapper` and `combineMany`, with their option types `Options`, `Rename` and `CombineOptions`. |
 | `zom.codec` | Text cells to field values, for adapters whose rows arrive as strings. `decodeField(F, text, opts) !F` decodes one cell, and `decodeRow(T, cells, opts, ?*Diagnostic) !T` decodes a row, in field order or through `Options.columns`. `Options.null_text` (default `""`) means null. Strings borrow the cells. On error the `Diagnostic` has `row`, `column`, `field`, `text` and `err`, and formats with `{f}` as `14:3 (age): "abc" is not an integer from 0 to 255`. The other way, `encodeField(writer, value, opts)` and `encodeRow(writer, T, row, opts, sep)` write values back so they decode to the same thing: ints `{d}`, floats in their shortest round-trip form (decimal, or scientific outside `1e-6`..`1e21`), `true`/`false`, tag names, strings as they are, `null` as `null_text`. Nothing is quoted; that is the format writer's job. The accepted spellings are listed in `src/codec.zig`. |
 | `zom.memory` | The in-memory adapter: `Gateway` (`adapter_name = "memory"`, `Config = struct {}`, `init(allocator, Config)`, `deinit()`), whose dataset is `Store(S)`. Every capability except `transaction`. |
@@ -185,6 +186,7 @@ relation and never touch the dataset. `field` is always an enum literal, and
 | `count()` | `!usize` | The number of rows `toSlice` would return, so `limit` and `offset` apply. On a `.fallback` relation it is `count(allocator)`, because it may have to read the rows to count them. |
 | `mapTo(E, allocator)` | `![]E` | `mapWith(zom.Mapper(Output, E, .{}))`. |
 | `mapWith(M, allocator)` | `![]M.Output` | `M` is a `zom.Mapper` whose `Input` is `Output`. |
+| `combine(.assoc, target)` | `zom.Combined(...)` | This relation with association `assoc` of its schema, read from `target`, a relation over the association's target schema. Lazy; its `mapTo(E, allocator)` and `mapWith(M, allocator)` return a `zom.CombineResult(E)`. See [Associations](#associations). |
 | `create(tuple)` | `Create` | `.map(f)` applies `f: fn (Tuple) Tuple`; `.commit()` returns `!Tuple`, the stored tuple. `.commitAlloc(allocator)` does the same on every adapter, allocating the returned strings when they are caller-owned (zom-pg, where plain `commit()` is a compile error); free the result with `freeOne`. A compile error after `select`. |
 | `createMany(tuples)` | `CreateMany` | A compile error after `select`. `tuples: []const Tuple`, borrowed until commit. `.commit()` returns `!usize`, the rows inserted. Uses the dataset's `insertMany`, else loops over `insert` (see [the adapter contract](#the-adapter-contract)). |
 | `update()` | `Update` | `.set(field, value)` adds a change (at most `max_changes = 16`); `.commit()` returns `!usize`, the rows changed. |
@@ -382,8 +384,56 @@ schemas exist first and resolves the associations afterwards. The
 anonymous-struct form `.{ .posts = ... }` is also accepted, for associations
 that don't lead back to the schema declaring them.
 
-Loading associated rows with `combine` is planned for Phase 4; until then,
-`combineMany` takes the keys from the descriptor as well as from strings:
+#### Combine
+
+`users.combine(.posts, posts)` loads the users with their posts, ROM's
+`users.combine(:posts)`. The second argument is the relation to read the
+posts from: any relation over the association's target schema, so it can
+carry its own filters and order. With a container, pass its relation:
+`app.relations.users.combine(.posts, app.relations.posts)`.
+
+```zig
+const Author = struct { id: u32, name: []const u8, posts: []const Post };
+
+var result = try users.where(.age, .gt, 18).order(.id, .asc)
+    .combine(.posts, posts.where(.published, .eq, true))
+    .mapTo(Author, allocator);
+defer result.deinit(); // frees every author, post and string
+for (result.items) |author| std.debug.print("{s}: {d} posts\n", .{ author.name, author.posts.len });
+```
+
+Nothing is read until `mapTo` (or `mapWith(M, allocator)`, for a mapper
+with renames). Then:
+
+1. The users are read once, with their filters, order and limit.
+2. Their distinct keys are collected, and the posts are read with
+   `whereIn(.user_id, keys)`: one query, or ⌈keys / `Query.max_in`⌉ when
+   there are more than 64 keys. Each post keeps its relation's order within
+   its user.
+3. The posts are grouped by key with a hash map, in O(users + posts), and
+   each `Author.posts` gets its own: an empty slice when there are none.
+   Posts whose user was filtered out are dropped.
+
+`belongsTo` works the other way: `posts.combine(.author, users).mapTo(Byline, allocator)`
+fills `Byline.author: ?User` (or any struct the user maps to), which is null
+when the foreign key is null or its user was not read.
+
+The entity needs a field named after the association: `[]const X` for
+`hasMany`, `?X` for `belongsTo`, where `X` is the target's tuple or any
+struct `zom.Mapper` can map it to. It needs no default. A missing field, a
+field of the wrong shape, a target relation over the wrong schema and a key
+dropped by `select` are compile errors. A target relation with a `limit` or
+`offset` is `error.PagedCombineTarget`, since paging would apply to each
+batched query rather than to each user.
+
+The result is a tree of allocations, so `mapTo` returns a
+`zom.CombineResult(Author)`: `items`, plus an arena owning every slice and
+string in it, including the strings of a caller-owned adapter like zom-pg.
+One `deinit()` frees it all.
+
+Nested combines (`users.combine(.posts.combine(.comments))`) are not
+supported yet. `combineMany`, which joins slices already loaded in O(n·m),
+still works, and takes its keys from the descriptor as well as from strings:
 `.{ .into = "posts", .parent_key = posts.primary_key, .child_key = posts.foreign_key }`.
 
 ### Value
