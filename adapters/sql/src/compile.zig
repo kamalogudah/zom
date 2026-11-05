@@ -57,6 +57,10 @@ pub const WriteError = CompileError || error{
     /// least one column). Nothing would change; a gateway can skip the
     /// statement, as `Update.commit` does.
     EmptyUpdate,
+    /// An `UPDATE` or `DELETE` whose query has a join. Which rows a join
+    /// keeps depends on another table, and a write only filters on its own,
+    /// so it would touch rows the join leaves out.
+    JoinedWrite,
 };
 
 /// `WriteError` for the `write*` functions, which render into a writer.
@@ -171,23 +175,115 @@ pub fn writeSelect(
     table: []const u8,
     query: *const zom.Query(T),
 ) RenderError!void {
-    const columns = comptime columnsOf(T, Out);
+    if (query.join) |*j| return writeJoinedSelect(dialect, T, Out, w, params, table, query, j);
 
     try w.writeAll("SELECT ");
-    inline for (columns, 0..) |name, i| {
-        if (i > 0) try w.writeAll(", ");
-        try writeIdent(dialect, w, name);
-    }
+    try writeColumns(dialect, w, null, comptime columnsOf(T, Out));
     try w.writeAll(" FROM ");
     try writeIdent(dialect, w, table);
+    try writeWhere(dialect, T, w, params, null, query, null);
+    try writeOrders(dialect, T, w, null, query);
+    try writePaging(dialect, w, query);
+}
 
-    try writeWhere(dialect, T, w, params, query);
+/// A joined `SELECT` (`relation.join(.posts)`): each row of `table` with at
+/// least one matching row of the joined table, once. Every column is
+/// qualified with its table, since both tables may have an `id`:
+///
+///     SELECT DISTINCT "users"."id", ... FROM "users"
+///     INNER JOIN "posts" ON "posts"."user_id" = "users"."id"
+///     WHERE <the query's filters> AND <the whereJoined filters>
+///     ORDER BY ... LIMIT ... OFFSET ...
+///
+/// `DISTINCT` removes the copies a parent gets from having several joined
+/// rows, so it must see every column of `T` (the primary key among them):
+/// over only a projection's columns it would also merge distinct parents
+/// that happen to agree on them, which memory does not. So a projection
+/// reads its columns from the joined rows in a derived table named after
+/// `table`, and orders and pages outside it:
+///
+///     SELECT "users"."name" FROM (SELECT DISTINCT "users"."id", ... ) AS "users" ORDER BY ...
+///
+/// The same goes for a dialect without `NULLS LAST` that orders by a
+/// nullable column, since its `x IS NULL` sort key is not in the select
+/// list, which `DISTINCT` requires.
+///
+/// A table joined to itself is aliased by the association's name. Columns
+/// whose types have no equality (`json`) can't go through `DISTINCT`.
+fn writeJoinedSelect(
+    comptime dialect: Dialect,
+    comptime T: type,
+    comptime Out: type,
+    w: *Writer,
+    params: *Params,
+    table: []const u8,
+    query: *const zom.Query(T),
+    j: *const zom.Join,
+) RenderError!void {
+    const all = comptime columnsOf(T, T);
+    // Outside `DISTINCT`, ORDER BY may use what the select list leaves out.
+    const derived = Out != T or (!dialect.nulls_order and query.order_count > 0);
+    if (derived) {
+        try w.writeAll("SELECT ");
+        try writeColumns(dialect, w, table, comptime columnsOf(T, Out));
+        try w.writeAll(" FROM (");
+    }
+    const alias = joinAlias(table, j);
+    try w.writeAll("SELECT DISTINCT ");
+    try writeColumns(dialect, w, table, all);
+    try w.writeAll(" FROM ");
+    try writeIdent(dialect, w, table);
+    try w.writeAll(" INNER JOIN ");
+    try writeIdent(dialect, w, j.table);
+    if (!std.mem.eql(u8, alias, j.table)) {
+        try w.writeAll(" AS ");
+        try writeIdent(dialect, w, alias);
+    }
+    try w.writeAll(" ON ");
+    try writeColumn(dialect, w, alias, j.target_key);
+    try w.writeAll(" = ");
+    try writeColumn(dialect, w, table, j.source_key);
+    try writeWhere(dialect, T, w, params, table, query, j);
+    if (derived) {
+        try w.writeAll(") AS ");
+        try writeIdent(dialect, w, table);
+    }
+    try writeOrders(dialect, T, w, table, query);
+    try writePaging(dialect, w, query);
+}
 
+/// What the joined table is called in a joined `SELECT`: its own name,
+/// unless that is the parent's (a self-join), then the association's.
+fn joinAlias(table: []const u8, j: *const zom.Join) []const u8 {
+    if (!std.mem.eql(u8, j.table, table)) return j.table;
+    if (!std.mem.eql(u8, j.assoc, table)) return j.assoc;
+    return "zom_joined";
+}
+
+fn writeColumns(comptime dialect: Dialect, w: *Writer, qual: ?[]const u8, columns: []const []const u8) Writer.Error!void {
+    for (columns, 0..) |name, i| {
+        if (i > 0) try w.writeAll(", ");
+        try writeColumn(dialect, w, qual, name);
+    }
+}
+
+/// `"name"`, or `"qual"."name"`.
+fn writeColumn(comptime dialect: Dialect, w: *Writer, qual: ?[]const u8, name: []const u8) Writer.Error!void {
+    if (qual) |t| {
+        try writeIdent(dialect, w, t);
+        try w.writeByte('.');
+    }
+    try writeIdent(dialect, w, name);
+}
+
+fn writeOrders(comptime dialect: Dialect, comptime T: type, w: *Writer, qual: ?[]const u8, query: *const zom.Query(T)) Writer.Error!void {
     for (query.orderSlice(), 0..) |o, i| {
         try w.writeAll(if (i == 0) " ORDER BY " else ", ");
-        try writeOrder(dialect, T, w, o);
+        try writeOrder(dialect, T, w, qual, o);
     }
+}
 
+fn writePaging(comptime dialect: Dialect, w: *Writer, query: anytype) Writer.Error!void {
     // LIMIT and OFFSET are bigint in Postgres and SQLite. A bound past that
     // can't be reached, so it is clamped rather than sent as an error.
     const max = std.math.maxInt(i64);
@@ -199,21 +295,31 @@ pub fn writeSelect(
     if (query.offset > 0) try w.print(" OFFSET {d}", .{@min(query.offset, max)});
 }
 
-/// ` WHERE a AND b ...` over the query's top-level nodes; nothing when it
-/// has none.
+/// ` WHERE a AND b ...` over the query's top-level nodes, then the joined
+/// filters of `join`; nothing when there are none. Columns of the query's
+/// tuple are qualified with `qual`, joined ones with the joined table.
 fn writeWhere(
     comptime dialect: Dialect,
     comptime T: type,
     w: *Writer,
     params: *Params,
+    qual: ?[]const u8,
     query: *const zom.Query(T),
+    join: ?*const zom.Join,
 ) RenderError!void {
     var it = query.topNodes();
     var first = true;
     while (it.next()) |i| {
         try w.writeAll(if (first) " WHERE " else " AND ");
         first = false;
-        try writeNode(dialect, T, w, params, query, @intCast(i));
+        try writeNode(dialect, T, w, params, qual, query, @intCast(i));
+    }
+    const j = join orelse return;
+    const alias = joinAlias(qual.?, j);
+    for (j.filterSlice()) |f| {
+        try w.writeAll(if (first) " WHERE " else " AND ");
+        first = false;
+        try writeCondition(dialect, w, params, alias, f.column, f.nullable, f.op, f.operand);
     }
 }
 
@@ -400,7 +506,7 @@ pub fn writeUpdate(
         try w.writeAll(" = ");
         try params.bind(dialect, w, c.value);
     }
-    try writeWhere(dialect, T, w, params, query);
+    try writeWhere(dialect, T, w, params, null, query, null);
 }
 
 /// Renders `compileDelete`'s statement into `w`.
@@ -415,11 +521,13 @@ pub fn writeDelete(
     try checkBounded(T, query);
     try w.writeAll("DELETE FROM ");
     try writeIdent(dialect, w, table);
-    try writeWhere(dialect, T, w, params, query);
+    try writeWhere(dialect, T, w, params, null, query, null);
 }
 
-/// The safety rule: a write needs a filter, or `query.all`.
-fn checkBounded(comptime T: type, query: *const zom.Query(T)) error{UnboundedWrite}!void {
+/// The safety rules: a write is never joined, and needs a filter, or
+/// `query.all`.
+fn checkBounded(comptime T: type, query: *const zom.Query(T)) error{ UnboundedWrite, JoinedWrite }!void {
+    if (query.join != null) return error.JoinedWrite;
     var it = query.topNodes();
     if (it.next() == null and !query.all) return error.UnboundedWrite;
 }
@@ -449,17 +557,18 @@ fn writeNode(
     comptime T: type,
     w: *Writer,
     params: *Params,
+    qual: ?[]const u8,
     query: *const zom.Query(T),
     index: u8,
 ) RenderError!void {
     switch (query.nodes[index]) {
-        .filter => |f| try writeFilter(dialect, T, w, params, query.filters[f]),
+        .filter => |f| try writeFilter(dialect, T, w, params, qual, query.filters[f]),
         .not => |child| {
             try w.writeAll("NOT ");
             // A group brings its own parentheses.
             const bare = query.nodes[child] == .filter or query.nodes[child] == .not;
             if (bare) try w.writeByte('(');
-            try writeNode(dialect, T, w, params, query, child);
+            try writeNode(dialect, T, w, params, qual, query, child);
             if (bare) try w.writeByte(')');
         },
         .and_group, .or_group => |g| {
@@ -467,50 +576,66 @@ fn writeNode(
             try w.writeByte('(');
             for (g.first..g.first + g.len) |c| {
                 if (c > g.first) try w.writeAll(sep);
-                try writeNode(dialect, T, w, params, query, @intCast(c));
+                try writeNode(dialect, T, w, params, qual, query, @intCast(c));
             }
             try w.writeByte(')');
         },
     }
 }
 
-/// `x <op> $n` and friends. Each is true, false or unknown exactly when
-/// `Query.filterTruth` is, so wrapping it in `NOT` or `OR` keeps meaning
-/// the same thing as in memory.
+/// One filter of the query's tuple; see `writeCondition`.
 fn writeFilter(
     comptime dialect: Dialect,
     comptime T: type,
     w: *Writer,
     params: *Params,
+    qual: ?[]const u8,
     f: zom.Query(T).Filter,
 ) RenderError!void {
-    const nullable = isOptional(T, f.field);
-    switch (f.op) {
+    try writeCondition(dialect, w, params, qual, @tagName(f.field), isOptional(T, f.field), f.op, f.operand);
+}
+
+/// `x <op> $n` and friends, on column `column` (qualified with `qual`),
+/// which is nullable when its field is optional. Each is true, false or
+/// unknown exactly when `Query.filterTruth` is, so wrapping it in `NOT` or
+/// `OR` keeps meaning the same thing as in memory. Untyped, so the joined
+/// filters, which only have their column's name, render the same way.
+fn writeCondition(
+    comptime dialect: Dialect,
+    w: *Writer,
+    params: *Params,
+    qual: ?[]const u8,
+    column: []const u8,
+    nullable: bool,
+    op: Op,
+    operand: zom.query.Operand,
+) RenderError!void {
+    switch (op) {
         .is_null, .is_not_null => {
-            try writeIdent(dialect, w, @tagName(f.field));
-            try w.writeAll(if (f.op == .is_null) " IS NULL" else " IS NOT NULL");
+            try writeColumn(dialect, w, qual, column);
+            try w.writeAll(if (op == .is_null) " IS NULL" else " IS NOT NULL");
         },
         .eq, .neq, .lt, .lte, .gt, .gte => {
             // eq/neq null were stored as is_null/is_not_null.
-            if (f.operand.one == .null) return error.InvalidNullComparison;
-            try writeIdent(dialect, w, @tagName(f.field));
-            try w.print(" {s} ", .{comparison(f.op)});
-            try params.bind(dialect, w, f.operand.one);
+            if (operand.one == .null) return error.InvalidNullComparison;
+            try writeColumn(dialect, w, qual, column);
+            try w.print(" {s} ", .{comparison(op)});
+            try params.bind(dialect, w, operand.one);
         },
         .in, .not_in => {
-            const list = f.operand.many;
+            const list = operand.many;
             if (list.len == 0) {
                 // `IN ()` is not valid SQL. An empty list matches no value
                 // (`in`) or every value (`not_in`), and a null attribute is
                 // unknown either way, as `NULL IN (...)` is.
-                if (!nullable) return w.writeAll(if (f.op == .in) "1=0" else "1=1");
+                if (!nullable) return w.writeAll(if (op == .in) "1=0" else "1=1");
                 try w.writeByte('(');
-                try writeIdent(dialect, w, @tagName(f.field));
-                try w.writeAll(if (f.op == .in) " IS NULL AND NULL)" else " IS NOT NULL OR NULL)");
+                try writeColumn(dialect, w, qual, column);
+                try w.writeAll(if (op == .in) " IS NULL AND NULL)" else " IS NOT NULL OR NULL)");
                 return;
             }
-            try writeIdent(dialect, w, @tagName(f.field));
-            try w.writeAll(if (f.op == .in) " IN (" else " NOT IN (");
+            try writeColumn(dialect, w, qual, column);
+            try w.writeAll(if (op == .in) " IN (" else " NOT IN (");
             for (0..list.len) |i| {
                 if (i > 0) try w.writeAll(", ");
                 try params.bind(dialect, w, list.at(i));
@@ -518,24 +643,24 @@ fn writeFilter(
             try w.writeByte(')');
         },
         .like, .ilike => {
-            if (f.op == .ilike and !dialect.ilike) {
+            if (op == .ilike and !dialect.ilike) {
                 try w.writeAll("LOWER(");
-                try writeIdent(dialect, w, @tagName(f.field));
+                try writeColumn(dialect, w, qual, column);
                 try w.writeAll(") LIKE LOWER(");
-                try params.bind(dialect, w, f.operand.one);
+                try params.bind(dialect, w, operand.one);
                 try w.writeByte(')');
             } else {
-                try writeIdent(dialect, w, @tagName(f.field));
-                try w.writeAll(if (f.op == .like) " LIKE " else " ILIKE ");
-                try params.bind(dialect, w, f.operand.one);
+                try writeColumn(dialect, w, qual, column);
+                try w.writeAll(if (op == .like) " LIKE " else " ILIKE ");
+                try params.bind(dialect, w, operand.one);
             }
             // zom's patterns escape with `\`. Postgres defaults to it, but
             // SQLite has no default escape character, so always say so.
             try w.writeAll(" ESCAPE '\\'");
         },
         .between => {
-            const lo, const hi = f.operand.range;
-            try writeIdent(dialect, w, @tagName(f.field));
+            const lo, const hi = operand.range;
+            try writeColumn(dialect, w, qual, column);
             try w.writeAll(" BETWEEN ");
             try params.bind(dialect, w, lo);
             try w.writeAll(" AND ");
@@ -559,15 +684,15 @@ fn comparison(op: Op) []const u8 {
 /// One sort key. Memory sorts nulls as if above every value (last on asc,
 /// first on desc), which is Postgres's default but not SQLite's or
 /// MySQL's, so a nullable key always says where its nulls go.
-fn writeOrder(comptime dialect: Dialect, comptime T: type, w: *Writer, o: zom.Query(T).Order) Writer.Error!void {
+fn writeOrder(comptime dialect: Dialect, comptime T: type, w: *Writer, qual: ?[]const u8, o: zom.Query(T).Order) Writer.Error!void {
     const dir = if (o.direction == .asc) " ASC" else " DESC";
     if (isOptional(T, o.field) and !dialect.nulls_order) {
         // `x IS NULL` is false for values and true for nulls, so sorting
         // on it in the key's own direction puts nulls where memory does.
-        try writeIdent(dialect, w, @tagName(o.field));
+        try writeColumn(dialect, w, qual, @tagName(o.field));
         try w.print(" IS NULL{s}, ", .{dir});
     }
-    try writeIdent(dialect, w, @tagName(o.field));
+    try writeColumn(dialect, w, qual, @tagName(o.field));
     try w.writeAll(dir);
     if (isOptional(T, o.field) and dialect.nulls_order)
         try w.writeAll(if (o.direction == .asc) " NULLS LAST" else " NULLS FIRST");

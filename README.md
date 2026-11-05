@@ -19,6 +19,7 @@ that each do one thing, and nothing is an "active record".
 | `command(:delete)`                         | `try users.where(...).delete()`                                |
 | `ROM::Mapper`, `map_with`, `map_to`        | `zom.Mapper(Tuple, Entity, .{ .renames = ... })`, `mapWith`, `mapTo` |
 | `users.combine(:posts)`                    | `users.combine(.posts, posts).mapTo(Author, allocator)` (see [Associations](#associations)) |
+| `users.join(:posts).where(posts[:published] => true)` | `users.join(.posts).whereJoined(.posts, .published, .eq, true)` (see [Join](#join)) |
 | rom-sql (Sequel)                           | `zom_sql.compileRelation(.postgres, allocator, rel)` and `compileInsert` / `compileUpdate` / `compileDelete` in [zom-sql](#zom-sql), a SQL compiler with no driver yet |
 
 ## What Zig gives you for free
@@ -135,7 +136,8 @@ breaking change needs a minor version bump and an entry in
 | `zom.Scan`, `zom.ScanHook` | What a `.fallback` read that ran in memory reports (`adapter`, `relation`, `rows_fetched`, `rows_returned`), and the `*const fn (Scan) void` it reports to. |
 | `zom.Project(T, .{ fields })` | The struct `select` reads into: only `fields` of `T`, in the order given, with their types and defaults. An empty tuple, an unknown field or a repeated one is a compile error. Equal arguments return the same type. |
 | `zom.Adapter(G)` | Checks gateway `G` against the [adapter contract](#the-adapter-contract), reporting every problem in one compile error. Has `Gateway`, `name` (`G.adapter_name`), `Dataset(S)` (checks the dataset for schema `S`), `capabilities(S) Capabilities`, `has(S, cap) bool`, `readOnly(S) bool`, `require(S, cap, method)`, `supports(S) Supports`, and `filterGap(S, field, op)` / `orderGap(S, field)`, which return null when the dataset can evaluate that filter or sort key, else why not. |
-| `zom.Supports` | The query features a dataset evaluates itself: `or` (boolean groups), `in` (`in`, `not_in`), `like` (`like`, `ilike`), `order_on` (order by any attribute, not only the key), `offset`, `projection`, `join`. `Supports.all` sets them all. |
+| `zom.Supports` | The query features a dataset evaluates itself: `or` (boolean groups), `in` (`in`, `not_in`), `like` (`like`, `ilike`), `order_on` (order by any attribute, not only the key), `offset`, `projection`, `join` (`relation.join`). `Supports.all` sets them all. |
+| `zom.Join`, `zom.JoinFilter` | What `relation.join(.assoc)` stores in `query.join`: the association's name, the joined table, the key column on each side and up to `Join.max_filters = 8` `whereJoined` filters, each by column name. Plain data, so a query is still copied by value without allocating; `join.targetQuery(C)` gives the filters back as a `zom.Query(C)`. Only an adapter with `supports.join` reads it. |
 | `zom.Capability` | `writable`, `batch_insert`, `updatable`, `deletable`, `transaction`. |
 | `zom.StringOwnership` | `dataset` or `caller`: who frees the strings in the tuples a dataset returns. See [Memory rules](#memory-rules). |
 | `zom.strings` | Helpers for caller-owned strings: `freeFields(T, allocator, item, keep)` frees an item's string attributes except those named in `keep`, `freeAll(T, allocator, items)` frees every item's strings and the slice, and `dupeFields(T, allocator, item)` copies them (freeing its copies on error). |
@@ -187,6 +189,8 @@ relation and never touch the dataset. `field` is always an enum literal, and
 | `mapTo(E, allocator)` | `![]E` | `mapWith(zom.Mapper(Output, E, .{}))`. |
 | `mapWith(M, allocator)` | `![]M.Output` | `M` is a `zom.Mapper` whose `Input` is `Output`. |
 | `combine(.assoc, target)` | `zom.Combined(...)` | This relation with association `assoc` of its schema, read from `target`, a relation over the association's target schema. Lazy; its `mapTo(E, allocator)` and `mapWith(M, allocator)` return a `zom.CombineResult(E)`. See [Associations](#associations). |
+| `join(.assoc)` | `Relation` | The rows that have at least one row of association `assoc`, each once, as the same relation type. Needs `supports.join` (a compile error otherwise, even on a `.fallback` relation). See [Join](#join). |
+| `whereJoined(.assoc, field, op, value)` | `Relation` | A filter on the joined rows, typed like `where` on the target's tuple. Needs `join(.assoc)` first. |
 | `create(tuple)` | `Create` | `.map(f)` applies `f: fn (Tuple) Tuple`; `.commit()` returns `!Tuple`, the stored tuple. `.commitAlloc(allocator)` does the same on every adapter, allocating the returned strings when they are caller-owned (zom-pg, where plain `commit()` is a compile error); free the result with `freeOne`. A compile error after `select`. |
 | `createMany(tuples)` | `CreateMany` | A compile error after `select`. `tuples: []const Tuple`, borrowed until commit. `.commit()` returns `!usize`, the rows inserted. Uses the dataset's `insertMany`, else loops over `insert` (see [the adapter contract](#the-adapter-contract)). |
 | `update()` | `Update` | `.set(field, value)` adds a change (at most `max_changes = 16`); `.commit()` returns `!usize`, the rows changed. |
@@ -194,7 +198,8 @@ relation and never touch the dataset. `field` is always an enum literal, and
 
 On a `.fallback` relation, `update().commit()` and `delete()` return
 `error.UnsupportedFilter` when the dataset can't evaluate every filter:
-writes never run in memory.
+writes never run in memory. On a joined relation they return
+`error.JoinedWrite`.
 
 What `where` takes for each op. Every value is type-checked against the
 attribute, and a comptime value (`.c`, `300`) must fit it.
@@ -430,6 +435,54 @@ The result is a tree of allocations, so `mapTo` returns a
 `zom.CombineResult(Author)`: `items`, plus an arena owning every slice and
 string in it, including the strings of a caller-owned adapter like zom-pg.
 One `deinit()` frees it all.
+
+#### Join
+
+`users.join(.posts)` keeps the users that have at least one post, ROM's
+`users.join(:posts)`. Where `combine` loads the posts alongside the users,
+a join filters the users by their posts in the dataset and reads only the
+users' own columns, so it returns a relation of the same type: `where`,
+`order`, `limit`, `offset`, `count`, `select` and `combine` all still apply,
+before or after it. `whereJoined` filters on the joined rows, typed and
+checked like `where` on the posts' tuple:
+
+```zig
+// The users with at least one published post, each once.
+const authors = try users.join(.posts)
+    .whereJoined(.posts, .published, .eq, true)
+    .order(.name, .asc)
+    .toSlice(allocator);
+defer users.free(allocator, authors);
+```
+
+Several `whereJoined` filters are AND-ed and must all hold for the same
+post. A user with several matching posts still comes back once. `belongsTo`
+joins the other way: `posts.join(.author).whereJoined(.author, .role, .eq,
+.admin)` is the posts written by admins, and a post whose foreign key is
+null has no author to join.
+
+A join needs `supports.join`. Without it, `join` and `whereJoined` are
+compile errors on a `.fallback` relation too, since a join reads another
+dataset and can't run in memory on this one's rows. zom-pg and the memory
+gateway support it; csv and yaml do not. On zom-sql it compiles to
+
+```sql
+SELECT DISTINCT "users"."id", "users"."name", ... FROM "users"
+INNER JOIN "posts" ON "posts"."user_id" = "users"."id"
+WHERE "posts"."published" = $1 ORDER BY "users"."name" ASC
+```
+
+with every column qualified by its table. The memory gateway runs a hash
+semi-join: the matching posts' keys go into a set, and a user is kept when
+its key is in it, in O(users + posts).
+
+A query holds one join: joining the same association again changes
+nothing, and joining a second one panics, as does `whereJoined` without
+the `join`. `update` and `delete` on a joined relation return
+`error.JoinedWrite`, because which rows a join keeps depends on the other
+table.
+
+#### Nesting
 
 Nested combines (`users.combine(.posts.combine(.comments))`) are not
 supported yet. `combineMany`, which joins slices already loaded in O(n·m),
@@ -752,6 +805,8 @@ const users = try zom.Relation(UserSchema, zom_pg.Gateway).init(&pg);
 | `error.UnboundedWrite` | zom-sql's `compileUpdate` and `compileDelete`, for a query with no filters and `all` not set. |
 | `error.EmptyUpdate` | zom-sql's `compileUpdate`, with no changes. |
 | `error.UnsupportedFilter` | `update().commit()` and `delete()` on a `.fallback` relation with a filter its dataset can't evaluate. |
+| `error.JoinedWrite` | `update().commit()` and `delete()` on a relation with a `join`, and zom-sql's `compileUpdate` / `compileDelete` on a joined query. |
+| `error.JoinUnavailable` | A join read on a `memory.Store` that no `memory.Gateway` handed out, so it has no other dataset to join. |
 | `error.OutOfMemory` | Anything that takes or uses an allocator. |
 
 `zom.adapter.Error` reserves the names every adapter uses for the same

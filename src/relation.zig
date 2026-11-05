@@ -316,7 +316,8 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
 
         fn split(self: *const Self) Plan {
             const query = &self.query;
-            var p: Plan = .{ .pushed = .{} };
+            // A join is always the dataset's (see `requireJoin`).
+            var p: Plan = .{ .pushed = .{ .join = query.join } };
             var it = query.topNodes();
             while (it.next()) |i| {
                 const index: u8 = @intCast(i);
@@ -440,7 +441,11 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
         /// The query `update` and `delete` hand to the dataset. Writes never
         /// run in memory: on a `.fallback` relation whose filters the
         /// dataset can't all evaluate, this is `error.UnsupportedFilter`.
-        pub fn writeQuery(self: Self) error{UnsupportedFilter}!Q {
+        /// On a joined relation it is `error.JoinedWrite`: which rows a
+        /// join keeps depends on another dataset, and writes only ever
+        /// filter on their own.
+        pub fn writeQuery(self: Self) error{ UnsupportedFilter, JoinedWrite }!Q {
+            if (self.query.join != null) return error.JoinedWrite;
             if (comptime mode == .strict) return self.query;
             var it = self.query.topNodes();
             while (it.next()) |i| {
@@ -578,6 +583,78 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
             target: anytype,
         ) combine_mod.Combined(Self, S.association(assoc), @TypeOf(target)) {
             return .{ .source = self, .target = target };
+        }
+
+        /// ROM's `users.join(:posts)`: the rows of this relation that have
+        /// at least one row of association `assoc` (declared on its schema),
+        /// each once. Unlike `combine`, the join filters the parents in the
+        /// dataset and reads only their own columns, so the result is a
+        /// relation of the same type, and filters, order, paging, `select`
+        /// and `combine` all still apply. Narrow the joined rows with
+        /// `whereJoined`.
+        ///
+        /// Needs `supports.join`; without it this is a compile error, even
+        /// on a `.fallback` relation, because a join reads another dataset
+        /// and can't run in memory on this one's rows. A query has at most
+        /// one join: joining the same association again changes nothing,
+        /// and joining a second one panics. `update` and `delete` on a
+        /// joined relation return `error.JoinedWrite`.
+        pub fn join(self: Self, comptime assoc: @TypeOf(.enum_literal)) Self {
+            const a = comptime S.association(assoc);
+            comptime requireJoin(a, "join(." ++ a.name ++ ")");
+            if (self.query.join) |j| {
+                if (std.mem.eql(u8, j.assoc, a.name)) return self;
+                std.debug.panic("zom: relation '{s}' already joins '{s}'; a query has at most one join, so it can't join '{s}' too", .{
+                    S.name, j.assoc, a.name,
+                });
+            }
+            var next = self;
+            next.query.join = .{
+                .assoc = a.name,
+                .table = a.target.name,
+                .source_key = if (a.kind == .has_many) a.primary_key else a.foreign_key,
+                .target_key = if (a.kind == .has_many) a.foreign_key else a.primary_key,
+            };
+            return next;
+        }
+
+        /// A filter on the joined rows of a relation joined with
+        /// `join(assoc)`, typed and checked like `where` on the target's
+        /// tuple: `users.join(.posts).whereJoined(.posts, .published, .eq,
+        /// true)` is the users with at least one published post. Several
+        /// are AND-ed, and must all hold for the same joined row. At most
+        /// `zom.Join.max_filters`; past that, panics. Panics when the
+        /// relation is not joined with `assoc`.
+        pub fn whereJoined(
+            self: Self,
+            comptime assoc: @TypeOf(.enum_literal),
+            comptime field: std.meta.FieldEnum(S.association(assoc).target.Tuple),
+            comptime op: q.Op,
+            value: anytype,
+        ) Self {
+            const a = comptime S.association(assoc);
+            const call = "whereJoined(." ++ a.name ++ ", ." ++ @tagName(field) ++ ", ." ++ @tagName(op) ++ ", ...)";
+            comptime requireJoin(a, call);
+            if (comptime Adapter.filterGap(a.target, @tagName(field), op)) |why|
+                @compileError("zom: adapter '" ++ Adapter.name ++ "' cannot evaluate `" ++ call ++ "` on relation '" ++
+                    S.name ++ "': on the joined dataset '" ++ a.target.name ++ "', " ++ why);
+            const j = self.query.join orelse
+                std.debug.panic("zom: relation '{s}': " ++ call ++ " needs join(.{s}) first", .{ S.name, a.name });
+            if (!std.mem.eql(u8, j.assoc, a.name))
+                std.debug.panic("zom: relation '{s}' joins '{s}', not '{s}'; " ++ call ++ " needs join(.{s})", .{
+                    S.name, j.assoc, a.name, a.name,
+                });
+            var next = self;
+            next.query.join = j.where(a.target.Tuple, field, op, value);
+            return next;
+        }
+
+        /// Joins never fall back to memory, so this is checked in either mode.
+        fn requireJoin(comptime a: @import("schema.zig").Association, comptime call: []const u8) void {
+            if (!supported.join)
+                @compileError("zom: adapter '" ++ Adapter.name ++ "' cannot evaluate `" ++ call ++ "` on relation '" ++
+                    S.name ++ "': `supports.join` is false, and a join reads another dataset ('" ++ a.target.name ++
+                    "'), so `allowFallback()` can't run it in memory; use `combine(." ++ a.name ++ ", ...)` to load the associated rows instead");
         }
 
         // -- commands / changesets ----------------------------------------

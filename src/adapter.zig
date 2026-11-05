@@ -89,7 +89,13 @@ pub const Supports = struct {
     /// When false, `select` still works: zom reads whole tuples and maps
     /// them down.
     projection: bool = false,
-    /// Joining another dataset.
+    /// Joining another dataset: `relation.join(.assoc)` and `whereJoined`,
+    /// which set `query.join` (a `zom.Join`). A dataset with it must read
+    /// that join in `read` and `count`: keep only the rows with at least one
+    /// row of the joined dataset matching the join's keys and filters, each
+    /// once. It is never evaluated in memory, so a relation without it can't
+    /// join even in `.fallback` mode. Writes never see a join (they return
+    /// `error.JoinedWrite` first).
     join: bool = false,
 
     /// Every feature, e.g. for an adapter that evaluates queries in memory.

@@ -14,6 +14,9 @@ pub const Op = query.Op;
 pub const Direction = query.Direction;
 pub const Value = query.Value;
 pub const Query = query.Query;
+/// What `relation.join(.assoc)` stores in its query; see `query.Join`.
+pub const Join = query.Join;
+pub const JoinFilter = query.JoinFilter;
 /// Boolean groups for `whereAny` / `whereNot`; see `query.any`.
 pub const any = query.any;
 pub const all = query.all;
@@ -85,4 +88,5 @@ test {
     _ = @import("tests/owned_test.zig");
     _ = @import("tests/schema_test.zig");
     _ = @import("tests/combine_test.zig");
+    _ = @import("tests/join_test.zig");
 }

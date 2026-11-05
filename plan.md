@@ -287,6 +287,9 @@ for rom.
   `where(.user_id, .in, parent_keys)`, and groups them with a hash map,
   replacing today's O(n·m) `combineMany`.
 - Adapters that support `join` (SQL) can also offer `users.join(.posts)`.
+  Done: `join` / `whereJoined` on the relation (compile error without
+  `supports.join`), `SELECT DISTINCT ... INNER JOIN` in zom-sql, and a hash
+  semi-join in the memory gateway, checked by `zom.lint`.
 - Associated changesets (rom-changeset's `associate`) set foreign keys on
   create.
 - **Done when** combine works the same on memory, csv and pg, and

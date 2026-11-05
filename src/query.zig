@@ -397,6 +397,91 @@ pub fn not3(a: ?bool) ?bool {
     return if (a) |b| !b else null;
 }
 
+// -- joins -------------------------------------------------------------------
+
+/// One `whereJoined` filter: a filter on the joined dataset's tuple. The
+/// query holding it is typed on its own tuple only, so the joined field is
+/// stored by name, a static string from `@tagName`, not by its enum, which
+/// belongs to the other tuple. `Join.targetQuery` turns the filters back
+/// into a typed `Query` over that tuple.
+pub const JoinFilter = struct {
+    column: []const u8,
+    /// Whether the joined field is optional: zom-sql needs it to render an
+    /// empty `in` list the way memory evaluates it.
+    nullable: bool,
+    op: Op,
+    operand: Operand,
+};
+
+/// `relation.join(.posts)`: keep only the rows that have at least one row
+/// of the association's target dataset, matched on its keys and on the
+/// `whereJoined` filters. Each row comes back once however many rows it
+/// matches, and with its own columns only.
+///
+/// Every field is plain data (static strings and a fixed array), so a query
+/// holding a join is still copied by value and never allocates. Only an
+/// adapter with `supports.join` reads it; `Query.matches` ignores it.
+pub const Join = struct {
+    /// Most `whereJoined` filters on one join, AND-ed.
+    pub const max_filters = 8;
+
+    /// The association's name, on the schema of the query's tuple.
+    assoc: []const u8,
+    /// The association's target dataset, `posts` for `users.join(.posts)`.
+    table: []const u8,
+    /// The column of the query's own tuple in `ON`: the primary key for a
+    /// `hasMany`, the foreign key for a `belongsTo`.
+    source_key: []const u8,
+    /// The column of the joined tuple in `ON`: the foreign key for a
+    /// `hasMany`, the target's primary key for a `belongsTo`.
+    target_key: []const u8,
+    filters: [max_filters]JoinFilter = undefined,
+    filter_count: u8 = 0,
+
+    pub fn filterSlice(self: *const Join) []const JoinFilter {
+        return self.filters[0..self.filter_count];
+    }
+
+    /// Appends `f`, a filter over the joined tuple `C`. Panics, naming the
+    /// limit, past `max_filters`.
+    pub fn addFilter(self: *Join, comptime C: type, f: Query(C).Filter) void {
+        if (self.filter_count >= max_filters)
+            std.debug.panic("zom: join '{s}' has more than Join.max_filters ({d}) filters", .{ self.assoc, max_filters });
+        self.filters[self.filter_count] = switch (f.field) {
+            inline else => |tag| .{
+                .column = @tagName(tag),
+                .nullable = @typeInfo(@FieldType(C, @tagName(tag))) == .optional,
+                .op = f.op,
+                .operand = f.operand,
+            },
+        };
+        self.filter_count += 1;
+    }
+
+    /// A copy of this join with one more filter on the joined tuple `C`,
+    /// type-checked exactly like `Query(C).where`.
+    pub fn where(self: Join, comptime C: type, comptime field: Query(C).Field, comptime op: Op, value: anytype) Join {
+        const one = (Query(C){}).where(field, op, value);
+        var next = self;
+        next.addFilter(C, one.filters[0]);
+        return next;
+    }
+
+    /// The joined filters as a query over the joined tuple `C`, for an
+    /// adapter that evaluates the join itself. Copies nothing but the
+    /// filters; list operands still borrow what they borrowed.
+    pub fn targetQuery(self: *const Join, comptime C: type) Query(C) {
+        const QC = Query(C);
+        var out: QC = .{};
+        for (self.filterSlice()) |f| {
+            const field = std.meta.stringToEnum(QC.Field, f.column) orelse
+                std.debug.panic("zom: join '{s}': '{s}' is not a field of {s}", .{ self.assoc, f.column, @typeName(C) });
+            out.addFilter(.{ .field = field, .op = f.op, .operand = f.operand });
+        }
+        return out;
+    }
+};
+
 pub fn Query(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -460,6 +545,9 @@ pub fn Query(comptime T: type) type {
         /// refuse an unfiltered `UPDATE` / `DELETE` (`error.UnboundedWrite`)
         /// unless this is true. The memory adapter does not look at it.
         all: bool = false,
+        /// Set by `relation.join`: only rows with a matching row in another
+        /// dataset. See `Join`. `matches` and `truth` do not look at it.
+        join: ?Join = null,
 
         /// The filters of a query that has no `any` / `not` groups, which
         /// are then all AND-ed. An adapter that does not support `or` reads

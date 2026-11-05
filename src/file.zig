@@ -395,6 +395,15 @@ pub fn Gateway(comptime Format: type, comptime mode: Mode) type {
     };
 }
 
+/// What a file dataset evaluates: everything its `memory.Store` does,
+/// except joins. The store reads the other side of a join through a memory
+/// gateway, and a file dataset owns its store instead.
+const file_supports: Supports = blk: {
+    var s: Supports = .all;
+    s.join = false;
+    break :blk s;
+};
+
 /// The dataset type of `Gateway(Format, mode)` for schema `S`: a
 /// `memory.Store(S)` holding the file's rows, with only the declarations
 /// `mode` allows, so `zom.Relation` refuses writes on a read-only one at
@@ -412,7 +421,7 @@ fn ReadOnlyDataset(comptime S: type) type {
         const Q = Query(S.Tuple);
         const Store = memory.Store(S);
 
-        pub const supports: Supports = Store.supports;
+        pub const supports: Supports = file_supports;
 
         store: Store,
 
@@ -449,7 +458,7 @@ fn WritableDataset(comptime S: type, comptime Format: type) type {
         const Q = Query(T);
         const Store = memory.Store(S);
 
-        pub const supports: Supports = Store.supports;
+        pub const supports: Supports = file_supports;
 
         store: Store,
         state: StateOf(Format, S) = undefined,

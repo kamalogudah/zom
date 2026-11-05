@@ -99,7 +99,13 @@ fn Factory(comptime G: type) type {
     };
 }
 
-const Full = OwnedGateway(zom.Supports.all);
+/// Everything but joins: this fake holds `zom.lint.Users` only, and the
+/// join check needs `zom.lint.Posts` too.
+const Full = OwnedGateway(blk: {
+    var s: zom.Supports = .all;
+    s.join = false;
+    break :blk s;
+});
 /// Default supports: no `in`, `like`, `or` or projection.
 const Narrow = OwnedGateway(.{ .offset = false });
 

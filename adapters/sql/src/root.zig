@@ -38,6 +38,7 @@ test {
     _ = compile;
     _ = @import("compile_test.zig");
     _ = @import("write_test.zig");
+    _ = @import("join_test.zig");
     _ = infer;
     _ = @import("infer_test.zig");
 }

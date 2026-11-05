@@ -6,7 +6,9 @@ from [zom-sql](../sql) (`Dialect.postgres`); zom-pg runs them on a
 connection pool, binds their parameters and decodes the rows.
 
 It passes the whole `zom.lint` suite, has every capability including
-`transaction`, and every query feature except joins.
+`transaction`, and every query feature, joins included
+(`users.join(.posts)`, rendered by zom-sql as `SELECT DISTINCT ... INNER
+JOIN`).
 
 ## Setup
 

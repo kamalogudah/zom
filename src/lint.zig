@@ -10,6 +10,9 @@
 //! Lint defines its own schema (`Users`) and seed rows, so every adapter is
 //! tested on the same data. Each check gets a fresh gateway from the factory,
 //! seeded with `users`, and goes through `zom.Relation` like application code.
+//! An adapter with `supports.join` is also given the join check, which seeds
+//! and joins a second schema, `Posts` (dataset `lint_posts`), so its factory
+//! must provide that one too, empty, as it does `lint_users`.
 //!
 //! The factory says how to make a gateway, because each adapter needs a
 //! different setup (memory needs nothing, CSV a temporary directory, Postgres
@@ -45,6 +48,8 @@ const std = @import("std");
 const testing = std.testing;
 const adapter = @import("adapter.zig");
 const Schema = @import("schema.zig").Schema;
+const hasMany = @import("schema.zig").hasMany;
+const belongsTo = @import("schema.zig").belongsTo;
 const RelationOf = @import("relation.zig").Relation;
 const query = @import("query.zig");
 const strings = @import("strings.zig");
@@ -58,7 +63,36 @@ pub const User = struct {
     role: Role,
 };
 
-pub const Users = Schema(User, "lint_users", .id, .{});
+pub const Users = Schema(User, "lint_users", .id, .{
+    .associations = struct {
+        pub const posts = hasMany(Posts, .user_id);
+    },
+});
+
+/// The other side of the join check, the only check that uses it.
+pub const Post = struct {
+    id: u32,
+    user_id: ?u32,
+    title: []const u8,
+    published: bool,
+};
+
+pub const Posts = Schema(Post, "lint_posts", .id, .{
+    .associations = struct {
+        pub const author = belongsTo(Users, .user_id);
+    },
+});
+
+/// Seeded by the join check only. bob has two posts, so a join that does
+/// not remove duplicates returns him twice; dee, eve and fay have none, and
+/// post 24 belongs to nobody.
+pub const posts = [_]Post{
+    .{ .id = 20, .user_id = 4, .title = "b1", .published = true },
+    .{ .id = 21, .user_id = 4, .title = "b2", .published = true },
+    .{ .id = 22, .user_id = 2, .title = "a1", .published = false },
+    .{ .id = 23, .user_id = 6, .title = "c1", .published = true },
+    .{ .id = 24, .user_id = null, .title = "orphan", .published = true },
+};
 
 /// The seed rows. They are stored out of key order, and the names do not
 /// sort the same way as the ids, so ordering by the wrong attribute (or not
@@ -110,6 +144,7 @@ const checks = .{
     .{ Check{ .name = "offset", .features = &.{"offset"} }, checkOffset },
     .{ Check{ .name = "one: null, one tuple, or error.MoreThanOneTuple" }, checkOne },
     .{ Check{ .name = "select: readProjected keeps filters, order and limit", .features = &.{ "projection", "order_on" } }, checkProjection },
+    .{ Check{ .name = "join: rows with a matching row in another dataset, each once", .features = &.{"join"} }, checkJoin },
     .{ Check{ .name = "insert: returns the stored tuple, error.DuplicatePrimaryKey", .needs = &.{.writable} }, checkInsert },
     .{ Check{ .name = "insert: strings are copied", .needs = &.{.writable} }, checkInsertCopies },
     .{ Check{ .name = "insertMany: count, error.DuplicatePrimaryKey", .needs_any = &.{ .batch_insert, .writable } }, checkInsertMany },
@@ -196,7 +231,7 @@ fn Fixture(comptime G: type, comptime F: type) type {
         fn init(self: *Self) !Relation {
             self.gateway = try F.create(testing.allocator);
             errdefer F.destroy(&self.gateway);
-            try seed(&self.gateway, &users);
+            try seed(&self.gateway, Users, &users);
             return Relation.init(&self.gateway);
         }
 
@@ -204,17 +239,17 @@ fn Fixture(comptime G: type, comptime F: type) type {
             F.destroy(&self.gateway);
         }
 
-        fn seed(g: *G, rows: []const User) !void {
-            if (@hasDecl(F, "seed")) return F.seed(g, Users, rows);
+        fn seed(g: *G, comptime S: type, rows: []const S.Tuple) !void {
+            if (@hasDecl(F, "seed")) return F.seed(g, S, rows);
             const A = adapter.Adapter(G);
-            const d = try g.dataset(Users);
-            if (comptime A.has(Users, .batch_insert)) {
+            const d = try g.dataset(S);
+            if (comptime A.has(S, .batch_insert)) {
                 try testing.expectEqual(rows.len, try d.insertMany(rows));
-            } else if (comptime A.insertTakesAllocator(Users)) {
+            } else if (comptime A.insertTakesAllocator(S)) {
                 for (rows) |row| {
                     const stored = try d.insert(row, testing.allocator);
-                    if (comptime A.stringOwnership(Users) == .caller)
-                        strings.freeFields(User, testing.allocator, stored, &.{});
+                    if (comptime A.stringOwnership(S) == .caller)
+                        strings.freeFields(S.Tuple, testing.allocator, stored, &.{});
                 }
             } else {
                 for (rows) |row| _ = try d.insert(row);
@@ -648,6 +683,21 @@ fn expectNames(rel: anytype, label: []const u8, want: []const []const u8) !void 
     }
     for (rows, want) |row, name| try testing.expectEqualStrings(name, row.name);
     try expectCount(rel, rows.len);
+}
+
+fn checkJoin(comptime G: type, comptime F: type) !void {
+    var fx: Fixture(G, F) = undefined;
+    const rel = try fx.init();
+    defer fx.deinit();
+    try Fixture(G, F).seed(&fx.gateway, Posts, &posts);
+    const post_rel = try RelationOf(Posts, G).init(&fx.gateway);
+
+    try expectIds(rel.join(.posts), "join posts: bob once, though he has two", .any, &.{ 2, 4, 6 });
+    try expectIds(rel.join(.posts).whereJoined(.posts, .published, .eq, true), "join posts, published", .any, &.{ 4, 6 });
+    try expectIds(rel.join(.posts).whereJoined(.posts, .title, .eq, "b2"), "join posts, title eq b2", .any, &.{4});
+    try expectIds(rel.where(.age, .gt, 30).join(.posts), "age gt 30 (bob, dee), join posts", .any, &.{4});
+    try expectIds(rel.join(.posts).order(.id, .asc).limit(2), "join posts, order id asc, limit 2", .as_read, &.{ 2, 4 });
+    try expectIds(post_rel.join(.author).whereJoined(.author, .role, .eq, .a), "posts join author, role eq .a", .any, &.{ 20, 21 });
 }
 
 fn checkInsert(comptime G: type, comptime F: type) !void {

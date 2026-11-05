@@ -320,15 +320,8 @@ fn PgDataset(comptime S: type) type {
         const Q = zom.Query(T);
         const table = S.name;
 
-        /// Everything zom-sql renders, except joins.
-        pub const supports: zom.Supports = .{
-            .@"or" = true,
-            .in = true,
-            .like = true,
-            .order_on = true,
-            .offset = true,
-            .projection = true,
-        };
+        /// Everything zom-sql renders, joins included.
+        pub const supports: zom.Supports = .all;
         /// See the top of this file.
         pub const strings: zom.StringOwnership = .caller;
 

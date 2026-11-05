@@ -276,3 +276,47 @@ test "README: Combine" {
     defer bylines.deinit();
     try testing.expectEqualStrings("Achieng", bylines.items[0].author.?.name);
 }
+
+test "README: Join" {
+    const zom = @import("zom");
+    const allocator = testing.allocator;
+    const User = struct { id: u32, name: []const u8, role: enum { admin, member } = .member };
+    const Post = struct { id: u32, user_id: ?u32, title: []const u8, published: bool };
+    const S = struct {
+        const UserSchema = zom.Schema(User, "users", .id, .{
+            .associations = struct {
+                pub const posts = zom.hasMany(PostSchema, .user_id);
+            },
+        });
+        const PostSchema = zom.Schema(Post, "posts", .id, .{
+            .associations = struct {
+                pub const author = zom.belongsTo(UserSchema, .user_id);
+            },
+        });
+    };
+    var gw = zom.memory.Gateway.init(allocator, .{});
+    defer gw.deinit();
+    const users = try zom.Relation(S.UserSchema, zom.memory.Gateway).init(&gw);
+    const posts = try zom.Relation(S.PostSchema, zom.memory.Gateway).init(&gw);
+    _ = try users.create(.{ .id = 1, .name = "Baraka", .role = .admin }).commit();
+    _ = try users.create(.{ .id = 2, .name = "Achieng" }).commit();
+    _ = try users.create(.{ .id = 3, .name = "Otieno" }).commit();
+    _ = try posts.create(.{ .id = 10, .user_id = 1, .title = "a", .published = true }).commit();
+    _ = try posts.create(.{ .id = 11, .user_id = 1, .title = "b", .published = true }).commit();
+    _ = try posts.create(.{ .id = 12, .user_id = 2, .title = "c", .published = false }).commit();
+
+    // The users with at least one published post, each once.
+    const authors = try users.join(.posts)
+        .whereJoined(.posts, .published, .eq, true)
+        .order(.name, .asc)
+        .toSlice(allocator);
+    defer users.free(allocator, authors);
+
+    // -- checks (not in the README) ---------------------------------------
+    try testing.expectEqual(1, authors.len);
+    try testing.expectEqualStrings("Baraka", authors[0].name);
+    try testing.expectEqual(2, try users.join(.posts).count());
+    const by_admins = try posts.join(.author).whereJoined(.author, .role, .eq, .admin).toSlice(allocator);
+    defer posts.free(allocator, by_admins);
+    try testing.expectEqual(2, by_admins.len);
+}

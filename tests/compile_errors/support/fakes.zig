@@ -7,6 +7,15 @@ const zom = @import("zom");
 pub const Item = struct { id: u32, name: []const u8 = "" };
 pub const ItemSchema = zom.Schema(Item, "items", .id, .{});
 
+/// Items with tags, for the join cases.
+pub const Tag = struct { id: u32, item_id: u32, label: []const u8, weight: u8 = 0 };
+pub const TaggedItemSchema = zom.Schema(Item, "tagged_items", .id, .{
+    .associations = struct {
+        pub const tags = zom.hasMany(TagSchema, .item_id);
+    },
+});
+pub const TagSchema = zom.Schema(Tag, "tags", .id, .{});
+
 /// Only `read` and `count`: the read-only adapter of plan.md section 3.1.
 pub const ReadOnlyGateway = Gateway("readonly", ReadOnlyDataset);
 /// `read`, `count` and `insert`, but no `update` or `delete`.
@@ -16,6 +25,8 @@ pub const NoInsertGateway = Gateway("noinsert", NoInsertDataset);
 /// Reads, with limited query support: `in` but not `like` or `or`, no
 /// `offset`, ordering by the key only, and filters on `id` only.
 pub const LimitedGateway = Gateway("limited", LimitedDataset);
+/// Reads, supporting joins but not `like`.
+pub const JoinNoLikeGateway = Gateway("joinnolike", JoinNoLikeDataset);
 /// Reads, supporting boolean groups but not `in`.
 pub const OrOnlyGateway = Gateway("oronly", OrOnlyDataset);
 /// `filterable` with the wrong signature.
@@ -102,6 +113,20 @@ fn LimitedDataset(comptime S: type) type {
             _ = op;
             return std.mem.eql(u8, field, "id");
         }
+        pub fn read(_: *@This(), _: Q, a: std.mem.Allocator) ![]S.Tuple {
+            return a.alloc(S.Tuple, 0);
+        }
+        pub fn count(_: *@This(), _: Q) !usize {
+            return 0;
+        }
+    };
+}
+
+fn JoinNoLikeDataset(comptime S: type) type {
+    const Q = zom.Query(S.Tuple);
+    return struct {
+        pub const supports: zom.Supports = .{ .join = true };
+
         pub fn read(_: *@This(), _: Q, a: std.mem.Allocator) ![]S.Tuple {
             return a.alloc(S.Tuple, 0);
         }

@@ -2,8 +2,8 @@
 //!
 //!     ZOM_PG_URL=postgres://postgres:postgres@127.0.0.1:5432/zom_test zig build test
 //!
-//! Every check drops and recreates the `lint_users` table, so point it at a
-//! database you don't mind losing that table in.
+//! Every check drops and recreates the `lint_users` and `lint_posts`
+//! tables, so point it at a database you don't mind losing them in.
 
 const std = @import("std");
 const zom = @import("zom");
@@ -26,6 +26,17 @@ const create_table =
     \\)
 ;
 
+/// For the join check. No foreign key constraint, so each check can drop
+/// and recreate either table on its own.
+const create_posts =
+    \\CREATE TABLE lint_posts (
+    \\  id bigint PRIMARY KEY,
+    \\  user_id bigint,
+    \\  title text NOT NULL,
+    \\  published boolean NOT NULL
+    \\)
+;
+
 fn url(allocator: Allocator) ![]u8 {
     return testing.environ.getAlloc(allocator, "ZOM_PG_URL") catch |err| switch (err) {
         error.EnvironmentVariableMissing => error.SkipZigTest,
@@ -40,11 +51,14 @@ const Factory = struct {
         var g = try G.init(allocator, .{ .io = testing.io, .url = u, .pool_size = 2 });
         errdefer g.deinit();
         try g.exec("DROP TABLE IF EXISTS lint_users");
+        try g.exec("DROP TABLE IF EXISTS lint_posts");
         try g.exec(create_table);
+        try g.exec(create_posts);
         return g;
     }
     pub fn destroy(g: *G) void {
         g.exec("DROP TABLE IF EXISTS lint_users") catch {};
+        g.exec("DROP TABLE IF EXISTS lint_posts") catch {};
         g.deinit();
     }
 };

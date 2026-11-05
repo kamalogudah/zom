@@ -9,7 +9,15 @@ const std = @import("std");
 const q = @import("../query.zig");
 const Supports = @import("../adapter.zig").Supports;
 const Mapper = @import("../mapper.zig").Mapper;
+const Association = @import("../schema.zig").Association;
 const Allocator = std.mem.Allocator;
+
+fn Unwrap(comptime T: type) type {
+    return switch (@typeInfo(T)) {
+        .optional => |o| o.child,
+        else => T,
+    };
+}
 
 pub const Gateway = struct {
     pub const adapter_name = "memory";
@@ -41,17 +49,24 @@ pub const Gateway = struct {
         return Store(S);
     }
 
+    /// The store for `S`, created empty on first use. The store keeps a
+    /// pointer back to this gateway, to read the other side of a join, so
+    /// the gateway must not move once relations use it (as with any
+    /// gateway; see container.zig).
     pub fn dataset(self: *Gateway, comptime S: type) !*Store(S) {
         const D = Store(S);
         const gop = try self.datasets.getOrPut(self.allocator, S.name);
         if (gop.found_existing) {
             if (!std.mem.eql(u8, gop.value_ptr.type_name, @typeName(S)))
                 return error.DatasetTypeMismatch;
-            return @ptrCast(@alignCast(gop.value_ptr.ptr));
+            const d: *D = @ptrCast(@alignCast(gop.value_ptr.ptr));
+            d.gateway = self;
+            return d;
         }
         errdefer self.datasets.removeByPtr(gop.key_ptr);
         const d = try self.allocator.create(D);
         d.* = D.init(self.allocator);
+        d.gateway = self;
         gop.value_ptr.* = .{ .ptr = d, .deinit_fn = destroyFn(D), .type_name = @typeName(S) };
         return d;
     }
@@ -81,6 +96,14 @@ pub const Gateway = struct {
 ///
 /// Rows are kept in insertion order. Treat the fields as private and use
 /// the methods.
+///
+/// A join (`relation.join(.posts)`) is a hash semi-join: the joined store's
+/// rows that match the `whereJoined` filters give a set of keys, and a row
+/// here is kept when its own key is in the set, so it comes back once
+/// however many joined rows it has. That is O(n + m), plus one set entry
+/// per distinct key. The joined store comes from the gateway, so a join on
+/// a store that no memory `Gateway` handed out is `error.JoinUnavailable`;
+/// the file adapters, which own their stores, turn `supports.join` off.
 pub fn Store(comptime S: type) type {
     return struct {
         const Self = @This();
@@ -94,6 +117,8 @@ pub fn Store(comptime S: type) type {
         allocator: Allocator,
         arena: std.heap.ArenaAllocator,
         list: std.ArrayList(T) = .empty,
+        /// Where joins find the other dataset; set by `Gateway.dataset`.
+        gateway: ?*Gateway = null,
 
         pub fn init(allocator: Allocator) Self {
             return .{ .allocator = allocator, .arena = std.heap.ArenaAllocator.init(allocator) };
@@ -189,7 +214,9 @@ pub fn Store(comptime S: type) type {
         fn matching(self: *Self, query: Q, allocator: Allocator) !std.ArrayList(T) {
             var hits: std.ArrayList(T) = .empty;
             errdefer hits.deinit(allocator);
-            for (self.list.items) |row| {
+            if (query.join) |*j| {
+                try self.joined(j, &query, allocator, &hits);
+            } else for (self.list.items) |row| {
                 if (query.matches(row)) try hits.append(allocator, row);
             }
             // std.mem.sort is stable (block sort; std.mem.sortUnstable is
@@ -197,6 +224,58 @@ pub fn Store(comptime S: type) type {
             // is no order, keep their insertion order.
             std.mem.sort(T, hits.items, query.orderSlice(), Q.lessThan);
             return hits;
+        }
+
+        /// Appends to `hits` the rows matching `query` that `j` keeps. The
+        /// association is looked up by name among `S`'s, so each one gets
+        /// its own typed semi-join.
+        fn joined(self: *Self, j: *const q.Join, query: *const Q, allocator: Allocator, hits: *std.ArrayList(T)) !void {
+            inline for (S.association_names) |name| {
+                if (std.mem.eql(u8, name, j.assoc))
+                    return self.semiJoin(@field(S.associations, name), j, query, allocator, hits);
+            }
+            // `relation.join` only stores names of `S`'s associations.
+            return error.UnknownAssociation;
+        }
+
+        fn semiJoin(
+            self: *Self,
+            comptime a: Association,
+            j: *const q.Join,
+            query: *const Q,
+            allocator: Allocator,
+            hits: *std.ArrayList(T),
+        ) !void {
+            const source_key = if (a.kind == .has_many) a.primary_key else a.foreign_key;
+            const target_key = if (a.kind == .has_many) a.foreign_key else a.primary_key;
+            const Key = Unwrap(@FieldType(a.Parent().Tuple, a.primary_key));
+            const Set = if (Key == []const u8)
+                std.StringHashMapUnmanaged(void)
+            else
+                std.AutoHashMapUnmanaged(Key, void);
+
+            const gateway = self.gateway orelse return error.JoinUnavailable;
+            const other = try gateway.dataset(a.target);
+            const filter = j.targetQuery(a.target.Tuple);
+
+            // The keys of the joined rows that pass the joined filters. A
+            // null foreign key matches nothing, as `NULL = x` in SQL.
+            var keys: Set = .empty;
+            defer keys.deinit(allocator);
+            for (other.list.items) |row| {
+                if (!filter.matches(row)) continue;
+                const key: Key = keyOf(Key, @field(row, target_key)) orelse continue;
+                try keys.put(allocator, key, {});
+            }
+            for (self.list.items) |row| {
+                if (!query.matches(row)) continue;
+                const key: Key = keyOf(Key, @field(row, source_key)) orelse continue;
+                if (keys.contains(key)) try hits.append(allocator, row);
+            }
+        }
+
+        fn keyOf(comptime Key: type, value: anytype) ?Key {
+            return value;
         }
 
         /// `sorted` with the query's offset and limit applied.
@@ -209,6 +288,12 @@ pub fn Store(comptime S: type) type {
         /// The number of rows `read` would return: `limit` and `offset`
         /// apply, as with SQL's `count(*)` over a limited subquery.
         pub fn count(self: *Self, query: Q) !usize {
+            if (query.join != null) {
+                // The semi-join needs scratch space for its key set.
+                var hits = try self.matching(query, self.allocator);
+                defer hits.deinit(self.allocator);
+                return page(query, hits.items).len;
+            }
             var n: usize = 0;
             for (self.list.items) |row| {
                 if (query.matches(row)) n += 1;
@@ -220,7 +305,10 @@ pub fn Store(comptime S: type) type {
         /// Converts every change (copying strings once) into `patch` before
         /// touching a row, so a bad value, a key clash or running out of
         /// memory leaves the store unchanged. Applying cannot fail.
+        /// `error.JoinedWrite` for a joined query, like `delete`: which rows
+        /// it keeps depends on another store.
         pub fn update(self: *Self, query: Q, changes: []const Q.Change) !usize {
+            if (query.join != null) return error.JoinedWrite;
             var patch: T = undefined;
             for (changes) |c| try self.prepare(&patch, c);
             for (changes) |c| {
@@ -236,6 +324,7 @@ pub fn Store(comptime S: type) type {
         }
 
         pub fn delete(self: *Self, query: Q) !usize {
+            if (query.join != null) return error.JoinedWrite;
             var kept: usize = 0;
             for (self.list.items) |row| {
                 if (!query.matches(row)) {

@@ -25,10 +25,32 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
   `belongsTo`. The result is a `zom.CombineResult(E)` whose arena owns the
   whole tree; free it with `deinit()`. Nested combines are not supported
   yet. See `src/combine.zig`.
+- `relation.join(.assoc)`, ROM's `users.join(:posts)`: the rows with at
+  least one row of the association's target, each once, as a relation of
+  the same type, so filters, order, paging, `select` and `combine` still
+  apply. `whereJoined(.assoc, field, op, value)` filters the joined rows,
+  typed like `where` on the target's tuple. Both are compile errors unless
+  the dataset has `supports.join`, in `.fallback` mode too. The join lives
+  in `query.join`, a `zom.Join` of static strings and a fixed array of up
+  to 8 filters, so queries stay copyable and allocation-free. zom-sql
+  renders `SELECT DISTINCT ... INNER JOIN ... ON ...` with every column
+  qualified (a projection reads from a derived table, so `DISTINCT` still
+  sees whole rows); zom-pg sets `supports.join`; the memory gateway runs a
+  hash semi-join. `zom.lint` has a join check, run when `supports.join` is
+  set, which also uses a second schema, `zom.lint.Posts` (`lint_posts`).
 - `zom.Mapper` options take `.skip`, fields the mapper leaves for the caller
   to fill, and a mapper exposes the `options` it was made with.
 
 ### Changed (breaking)
+
+- `update` and `delete` on a joined relation return `error.JoinedWrite`,
+  and `writeQuery` can now fail with it. zom-sql's `compileUpdate` and
+  `compileDelete` return it for a joined query (`WriteError` grows).
+- csv and yaml datasets no longer claim `supports.join`: their stores
+  can't reach another dataset.
+- `zom.lint.Users` declares a `posts` association. A factory for an
+  adapter with `supports.join` must also provide an empty `lint_posts`
+  dataset (zom-pg's creates the table).
 
 - `zom.Schema` takes a fourth argument, its options: write
   `zom.Schema(T, name, pk, .{})` where you wrote `zom.Schema(T, name, pk)`.
