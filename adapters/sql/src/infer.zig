@@ -14,7 +14,7 @@
 //!         name: []const u8,
 //!         deleted_at: ?i64 = null,
 //!     };
-//!     pub const UsersSchema = zom.Schema(Users, "users", .id);
+//!     pub const UsersSchema = zom.Schema(Users, "users", .id, .{});
 //!
 //! Nothing here knows SQL type names: the driver maps each column to a
 //! `Type`, or to null for a type its gateway can't decode, which `render`
@@ -226,7 +226,7 @@ fn writeSource(w: *Writer, catalog: Catalog, options: Options) Writer.Error!void
             try writeTypeName(w, t.name, "Schema");
             try w.print(" = {f}.Schema(", .{std.zig.fmtId(options.zom_import)});
             try writeTypeName(w, t.name, "");
-            try w.print(", \"{f}\", .{f});\n", .{ std.zig.fmtString(t.name), std.zig.fmtIdP(t.primary_key[0]) });
+            try w.print(", \"{f}\", .{f}, .{{}});\n", .{ std.zig.fmtString(t.name), std.zig.fmtIdP(t.primary_key[0]) });
         }
     }
 }

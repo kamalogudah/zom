@@ -15,7 +15,7 @@ const Item = struct {
     name: []const u8,
     qty: u8,
 };
-const Items = zom.Schema(Item, "tx_items", .id);
+const Items = zom.Schema(Item, "tx_items", .id, .{});
 const Rel = zom.Relation(Items, G);
 
 /// `qty` is a `u8` in a `smallint`, so 300 passes zom's checks on insert

@@ -18,7 +18,7 @@ const User = struct {
     active: bool,
     role: Role,
 };
-const Users = zom.Schema(User, "vf_users", .id);
+const Users = zom.Schema(User, "vf_users", .id, .{});
 
 /// Matches `User`, with the columns in another order and one the struct
 /// doesn't have.
@@ -131,7 +131,7 @@ test "verify: a missing table is one mismatch" {
 test "verify: one Diagnostics collects several calls" {
     var g = try open(good_table);
     defer close(&g);
-    const Bad = zom.Schema(struct { id: u32, nickname: []const u8 }, "vf_users", .id);
+    const Bad = zom.Schema(struct { id: u32, nickname: []const u8 }, "vf_users", .id, .{});
 
     var diag: zom_pg.Diagnostics = .init(testing.allocator);
     defer diag.deinit();

@@ -58,7 +58,7 @@ pub const User = struct {
     role: Role,
 };
 
-pub const Users = Schema(User, "lint_users", .id);
+pub const Users = Schema(User, "lint_users", .id, .{});
 
 /// The seed rows. They are stored out of key order, and the names do not
 /// sort the same way as the ids, so ordering by the wrong attribute (or not

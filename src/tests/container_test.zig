@@ -116,7 +116,7 @@ test "a gateway that keeps its dataset inline works, because init fills in place
 // -- fakes ----------------------------------------------------------------
 
 const Item = struct { id: u32, name: []const u8 = "" };
-const ItemSchema = zom.Schema(Item, "items", .id);
+const ItemSchema = zom.Schema(Item, "items", .id, .{});
 
 /// Records every gateway call, so tests can check what ran and in what order.
 const log = struct {

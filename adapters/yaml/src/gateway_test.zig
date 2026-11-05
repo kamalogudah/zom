@@ -93,9 +93,9 @@ const User = struct {
     age: ?u8,
     role: Role = .member,
 };
-const Users = zom.Schema(User, "users", .id);
+const Users = zom.Schema(User, "users", .id, .{});
 const Post = struct { id: u32, title: []const u8 };
-const Posts = zom.Schema(Post, "posts", .id);
+const Posts = zom.Schema(Post, "posts", .id, .{});
 
 /// A temp directory with `data.yaml` holding `text`, and a gateway over it.
 fn Fixture(comptime G: type) type {
@@ -245,7 +245,7 @@ test "null is error.UnexpectedNull on a non-optional field, and beats an optiona
     defer testing.allocator.free(rows);
     try testing.expectEqual(.null, rows[0].role);
 
-    const Defaulted = zom.Schema(struct { id: u32, n: ?u8 = 5 }, "d", .id);
+    const Defaulted = zom.Schema(struct { id: u32, n: ?u8 = 5 }, "d", .id, .{});
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "d.yaml", .data = "d:\n  - id: 1\n    n: ~\n  - id: 2\n" });
@@ -426,7 +426,7 @@ test "a single-file sync keeps the other datasets, their order and their quoting
     const users = try zom.Relation(Users, WritableGateway).init(&gw);
     try testing.expectEqual(1, try users.byPk(1).update().set(.age, 40).commit());
     // A dataset the file did not have goes last.
-    const Notes = zom.Schema(struct { id: u32 }, "notes", .id);
+    const Notes = zom.Schema(struct { id: u32 }, "notes", .id, .{});
     _ = try (try gw.dataset(Notes)).insert(.{ .id = 9 });
     try gw.sync();
     try expectFile(tmp.dir, "data.yaml",

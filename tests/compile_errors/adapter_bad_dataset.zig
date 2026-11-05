@@ -1,4 +1,4 @@
-// expect: zom: dataset 'adapter_bad_dataset.FakeGateway.Dataset(schema.Schema(adapter_bad_dataset.Item,"items"[0..5],.id))' of gateway 'adapter_bad_dataset.FakeGateway' does not satisfy the adapter contract:
+// expect: zom: dataset 'adapter_bad_dataset.FakeGateway.Dataset(schema.Schema(adapter_bad_dataset.Item,"items"[0..5],.id,.{}))' of gateway 'adapter_bad_dataset.FakeGateway' does not satisfy the adapter contract:
 // expect: - `read` must be `fn (*Self, zom.Query(Tuple), std.mem.Allocator) ![]Tuple`, found `fn (*adapter_bad_dataset.FakeGateway.Dataset(
 // expect: - missing `pub fn count`
 // expect: query.Query(adapter_bad_dataset.Item), mem.Allocator) !adapter_bad_dataset.Item`
@@ -38,5 +38,5 @@ const FakeGateway = struct {
 const Item = struct { id: u32 };
 
 comptime {
-    _ = zom.Adapter(FakeGateway).Dataset(zom.Schema(Item, "items", .id));
+    _ = zom.Adapter(FakeGateway).Dataset(zom.Schema(Item, "items", .id, .{}));
 }

@@ -26,7 +26,7 @@ test "primary key is unique on create and update" {
 }
 
 const Counter = struct { id: u64, n: u64 };
-const Counters = zom.Relation(zom.Schema(Counter, "counters", .id), zom.memory.Gateway);
+const Counters = zom.Relation(zom.Schema(Counter, "counters", .id, .{}), zom.memory.Gateway);
 
 test "u64 values above maxInt(i64) round-trip" {
     var gw = zom.memory.Gateway.init(testing.allocator, .{});
@@ -67,7 +67,7 @@ const Contact = struct {
     handle: []u8,
     nickname: ?[:0]const u8 = null,
 };
-const Contacts = zom.Relation(zom.Schema(Contact, "contacts", .id), zom.memory.Gateway);
+const Contacts = zom.Relation(zom.Schema(Contact, "contacts", .id, .{}), zom.memory.Gateway);
 
 test "every string type is copied on insert and update" {
     var gw = zom.memory.Gateway.init(testing.allocator, .{});

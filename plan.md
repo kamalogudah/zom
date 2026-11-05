@@ -14,7 +14,7 @@ paired with [rom-sql](https://github.com/hanakai-rb/rom-sql),
 
 | Area | State |
 |---|---|
-| Schema | `Schema(Tuple, name, pk)`: a struct, a dataset name, and a primary key. No associations, no attribute metadata. |
+| Schema | `Schema(Tuple, name, pk, options)`: a struct, a dataset name, a primary key, and associations (`hasMany`, `belongsTo`) checked at compile time. No attribute metadata. |
 | Query | `Query(T)`: AND-only filters (`eq neq lt lte gt gte`), one `order`, `limit`, `offset`. Fixed capacity of 16 filters. |
 | Value | `null`, `boolean`, `int` (i64), `uint` (u64), `float`, `string`. No `u128`, no timestamps, no bytes. |
 | Relation | Immutable and lazy. `where/order/limit/offset/byPk`, `toSlice/one/first/count`, `mapTo/mapWith`, `create/update/delete`. |

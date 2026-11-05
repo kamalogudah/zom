@@ -5,7 +5,7 @@ const zom = @import("../root.zig");
 const testing = std.testing;
 const UserTuple = @import("fixtures.zig").UserTuple;
 
-const S = zom.Schema(UserTuple, "users", .id);
+const S = zom.Schema(UserTuple, "users", .id, .{});
 const Store = zom.memory.Store(S);
 const Q = zom.Query(UserTuple);
 
@@ -125,7 +125,7 @@ test "a load that runs out of memory stores nothing" {
 // Sort keys `a` then `b`, with ties on `a` (including on null) broken by
 // `b`, nulls on either side, and rows 1 and 8 equal on both keys.
 const Pair = struct { id: u32, a: ?u8, b: ?u8 };
-const PairStore = zom.memory.Store(zom.Schema(Pair, "pairs", .id));
+const PairStore = zom.memory.Store(zom.Schema(Pair, "pairs", .id, .{}));
 const PairQ = zom.Query(Pair);
 const pairs = [_]Pair{
     .{ .id = 1, .a = 1, .b = null },

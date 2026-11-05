@@ -7,7 +7,7 @@ const testing = std.testing;
 const fixtures = @import("fixtures.zig");
 
 const UserTuple = fixtures.UserTuple;
-const UserSchema = zom.Schema(UserTuple, "users", .id);
+const UserSchema = zom.Schema(UserTuple, "users", .id, .{});
 const Q = zom.Query(UserTuple);
 
 /// A memory store behind a dataset that supports `supports`, and filters

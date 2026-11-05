@@ -17,8 +17,8 @@ const Author = struct { id: u32, name: []const u8, email: []const u8, posts: []c
 const App = zom.Container(.{
     .gateways = .{ .default = zom.memory.Gateway, .files = zom_csv.Gateway },
     .relations = .{
-        .users = .{ zom.Schema(User, "users", .id), .files },
-        .posts = .{ zom.Schema(Post, "posts", .id), .default },
+        .users = .{ zom.Schema(User, "users", .id, .{}), .files },
+        .posts = .{ zom.Schema(Post, "posts", .id, .{}), .default },
     },
 });
 

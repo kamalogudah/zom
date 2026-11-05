@@ -9,7 +9,7 @@ that each do one thing, and nothing is an "active record".
 |--------------------------------------------|----------------------------------------------------------------|
 | `ROM::Gateway` / adapter                   | `zom.memory.Gateway` (any type that passes `zom.Adapter`)      |
 | dataset                                    | `Gateway.Dataset(Schema)`: `read`, `count`, and optionally `insert`, `insertMany`, `update`, `delete` |
-| `schema(:users) do attribute ... end`      | `zom.Schema(UserTuple, "users", .id)`                          |
+| `schema(:users) do attribute ... end`      | `zom.Schema(UserTuple, "users", .id, .{})`                     |
 | `ROM::Relation`                            | `zom.Relation(Schema, Gateway)`, an immutable value             |
 | `users.where(...).order(...).limit(...)`   | `users.where(.age, .gt, 25).order(.name, .asc).limit(10)`      |
 | `users.by_pk(1).one`                       | `users.byPk(1).one(allocator)`                                 |
@@ -67,7 +67,7 @@ Each row below says whether that part exists today or is planned (see
 const zom = @import("zom");
 
 const User = struct { id: u32, name: []const u8, age: u8, deleted_at: ?i64 = null };
-const Users = zom.Relation(zom.Schema(User, "users", .id), zom.memory.Gateway);
+const Users = zom.Relation(zom.Schema(User, "users", .id, .{}), zom.memory.Gateway);
 
 var gw = zom.memory.Gateway.init(allocator, .{});
 defer gw.deinit();
@@ -89,7 +89,7 @@ Continuing from the block above:
 ```zig
 const Post = struct { id: u32, user_id: u32, title: []const u8 };
 const Author = struct { id: u32, full_name: []const u8, posts: []const Post = &.{} };
-const Posts = zom.Relation(zom.Schema(Post, "posts", .id), zom.memory.Gateway);
+const Posts = zom.Relation(zom.Schema(Post, "posts", .id, .{}), zom.memory.Gateway);
 const AuthorMapper = zom.Mapper(User, Author, .{
     .renames = &.{.{ .from = "name", .to = "full_name" }},
 });
@@ -126,7 +126,8 @@ breaking change needs a minor version bump and an entry in
 
 | Declaration | What it is |
 |---|---|
-| `zom.Schema(T, name, pk)` | Returns a schema type with `Tuple = T`, `name` (the dataset name) and `primary_key` (a field of `T`, as an enum literal). |
+| `zom.Schema(T, name, pk, options)` | Returns a schema type with `Tuple = T`, `name` (the dataset name), `primary_key` (a field of `T`, as an enum literal) and its associations. `options` is `.{}` or `.{ .associations = ... }`; see [Associations](#associations). |
+| `zom.hasMany(Target, .fk)`, `zom.belongsTo(Target, .fk)` | Declare an association on a schema. `S.association(.name)` and `S.associations.name` return a `zom.Association`: `name`, `kind` (`zom.AssociationKind`: `has_many` or `belongs_to`), `source`, `target`, `foreign_key` and `primary_key` (field names as strings), plus `Child()` and `Parent()`. |
 | `zom.Relation(S, Gateway)` | Returns an immutable relation type over schema `S` and an adapter's `Gateway`. Checks the [adapter contract](#the-adapter-contract) at compile time through `zom.Adapter(Gateway)`, which it exposes as `Relation.Adapter`. |
 | `zom.RelationOf(S, Gateway, Output)` | The strict relation type whose reads return `Output`. `Relation(S, G)` is `RelationOf(S, G, S.Tuple)`, and `select` returns `RelationOf(S, G, Project(S.Tuple, fields))`. Exposes `Tuple`, `Output`, `projected` and `mode`. |
 | `zom.RelationWith(S, Gateway, Output, mode)` | The relation type with every parameter. `RelationOf(S, G, Out)` is `RelationWith(S, G, Out, .strict)`, and `allowFallback()` returns `RelationWith(S, G, Out, .fallback)`. |
@@ -292,8 +293,8 @@ one place, like `ROM.container`. Each relation names its gateway with an enum
 literal:
 
 ```zig
-const UserSchema = zom.Schema(User, "users", .id);
-const PostSchema = zom.Schema(Post, "posts", .id);
+const UserSchema = zom.Schema(User, "users", .id, .{});
+const PostSchema = zom.Schema(Post, "posts", .id, .{});
 
 const App = zom.Container(.{
     .gateways = .{ .default = zom.memory.Gateway, .archive = zom.memory.Gateway },
@@ -341,6 +342,49 @@ one container: users read from `data/users.csv` through `zom_csv.Gateway`,
 posts held in `zom.memory.Gateway`, joined with `zom.combineMany`. Run it
 with `cd examples/csv_users && zig build run`; `zig build test` at the root
 runs it too and checks its output.
+
+### Associations
+
+A schema declares its associations once, in its options, instead of spelling
+out keys at every `combineMany` call:
+
+```zig
+const UserSchema = zom.Schema(User, "users", .id, .{
+    .associations = struct {
+        pub const posts = zom.hasMany(PostSchema, .user_id);
+    },
+});
+const PostSchema = zom.Schema(Post, "posts", .id, .{
+    .associations = struct {
+        pub const author = zom.belongsTo(UserSchema, .user_id);
+    },
+});
+
+const posts = UserSchema.association(.posts); // or UserSchema.associations.posts
+// posts.kind == .has_many, posts.target == PostSchema,
+// posts.foreign_key == "user_id", posts.primary_key == "id"
+```
+
+`hasMany(Target, .fk)` means `Target`'s rows hold `fk`, pointing at this
+schema's primary key. `belongsTo(Target, .fk)` means this schema's rows hold
+`fk`, pointing at `Target`'s primary key. These are checked when the schema
+is compiled, whether or not anything uses the association yet: the foreign key
+must be a field of the right tuple, and its type must be the key's type or
+that type made optional (`?u32` for a `u32` id). `S.association(.postz)` is a
+compile error that lists the schema's associations.
+
+**Why `struct { pub const ... }`.** Zig evaluates a function's arguments
+before calling it, so with `.associations = .{ .posts = zom.hasMany(PostSchema, .user_id) }`
+building `UserSchema` needs `PostSchema`, and if `PostSchema` names
+`UserSchema` back, the compiler reports a dependency loop. A struct's
+declarations are only evaluated when used, so the struct form lets both
+schemas exist first and resolves the associations afterwards. The
+anonymous-struct form `.{ .posts = ... }` is also accepted, for associations
+that don't lead back to the schema declaring them.
+
+Loading associated rows with `combine` is planned for Phase 4; until then,
+`combineMany` takes the keys from the descriptor as well as from strings:
+`.{ .into = "posts", .parent_key = posts.primary_key, .child_key = posts.foreign_key }`.
 
 ### Value
 
@@ -835,7 +879,7 @@ const std = @import("std");
 const zom = @import("zom");
 
 const User = struct { id: u32, age: u8 };
-const Users = zom.Relation(zom.Schema(User, "users", .id), zom.memory.Gateway);
+const Users = zom.Relation(zom.Schema(User, "users", .id, .{}), zom.memory.Gateway);
 
 export fn entry() void {
     var gw = zom.memory.Gateway.init(std.heap.page_allocator, .{});

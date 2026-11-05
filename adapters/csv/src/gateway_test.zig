@@ -72,7 +72,7 @@ const User = struct {
     age: ?u8,
     role: Role = .member,
 };
-const Users = zom.Schema(User, "users", .id);
+const Users = zom.Schema(User, "users", .id, .{});
 
 /// A temp directory with `users.csv` holding `text`, and a gateway over it.
 const Fixture = struct {
@@ -213,7 +213,7 @@ test "path may be a single file named after the dataset" {
     const users = try zom.Relation(Users, Gateway).init(&gw);
     try testing.expectEqual(1, try users.count());
 
-    const Posts = zom.Schema(struct { id: u32 }, "posts", .id);
+    const Posts = zom.Schema(struct { id: u32 }, "posts", .id, .{});
     try testing.expectError(error.NotFound, gw.dataset(Posts));
     try testing.expectEqualStrings("data/users.csv: holds the dataset 'users', not 'posts'", gw.diagnostic.message());
 }
@@ -341,7 +341,7 @@ test "sync writes only dirty datasets, and only once" {
     var gw = writable(tmp.dir);
     defer gw.deinit();
     const d = try gw.dataset(Users);
-    const Posts = zom.Schema(struct { id: u32 }, "posts", .id);
+    const Posts = zom.Schema(struct { id: u32 }, "posts", .id, .{});
     const posts = try gw.dataset(Posts);
 
     // A missing file is an empty dataset, and with no writes stays missing.

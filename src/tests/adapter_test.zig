@@ -3,7 +3,7 @@ const zom = @import("../root.zig");
 const testing = std.testing;
 
 const Item = struct { id: u32, name: []const u8 };
-const Items = zom.Schema(Item, "items", .id);
+const Items = zom.Schema(Item, "items", .id, .{});
 
 /// The required gateway declarations around a dataset type function. Zig
 /// cannot declare something conditionally, so each capability mix below is

@@ -5,7 +5,7 @@ const std = @import("std");
 const zom = @import("zom");
 
 pub const Item = struct { id: u32, name: []const u8 = "" };
-pub const ItemSchema = zom.Schema(Item, "items", .id);
+pub const ItemSchema = zom.Schema(Item, "items", .id, .{});
 
 /// Only `read` and `count`: the read-only adapter of plan.md section 3.1.
 pub const ReadOnlyGateway = Gateway("readonly", ReadOnlyDataset);

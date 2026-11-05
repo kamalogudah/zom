@@ -4,7 +4,7 @@ const zom = @import("zom");
 const fakes = @import("support/fakes.zig");
 
 const Item = struct { id: []const u8, n: u32 = 0 };
-const Items = zom.Relation(zom.Schema(Item, "items", .id), fakes.LimitedGateway);
+const Items = zom.Relation(zom.Schema(Item, "items", .id, .{}), fakes.LimitedGateway);
 
 export fn entry() void {
     var gw = fakes.LimitedGateway.init(std.heap.page_allocator, .{});

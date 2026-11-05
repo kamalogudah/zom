@@ -78,7 +78,7 @@ const Task = struct {
     priority: Priority,
     escalated_to: ?Priority = null,
 };
-const Tasks = zom.Relation(zom.Schema(Task, "tasks", .id), zom.memory.Gateway);
+const Tasks = zom.Relation(zom.Schema(Task, "tasks", .id, .{}), zom.memory.Gateway);
 
 test "enums order and compare in declaration order" {
     var gw = zom.memory.Gateway.init(testing.allocator, .{});

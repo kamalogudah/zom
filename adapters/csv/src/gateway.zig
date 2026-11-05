@@ -278,7 +278,7 @@ test "sync survives running out of memory, leaving the file as it was" {
 
 fn insertAndSync(allocator: Allocator, dir: Io.Dir) !void {
     const testing = std.testing;
-    const S = zom.Schema(struct { id: u32, name: []const u8 }, "users", .id);
+    const S = zom.Schema(struct { id: u32, name: []const u8 }, "users", .id, .{});
     const original = "name,id\nAda,1\n";
     try dir.writeFile(testing.io, .{ .sub_path = "users.csv", .data = original });
 

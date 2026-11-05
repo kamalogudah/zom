@@ -19,7 +19,13 @@ pub const any = query.any;
 pub const all = query.all;
 pub const not = query.not;
 
-pub const Schema = @import("schema.zig").Schema;
+pub const schema = @import("schema.zig");
+pub const Schema = schema.Schema;
+/// Associations declared on a schema; see schema.zig.
+pub const hasMany = schema.hasMany;
+pub const belongsTo = schema.belongsTo;
+pub const Association = schema.Association;
+pub const AssociationKind = schema.AssociationKind;
 pub const Relation = @import("relation.zig").Relation;
 /// A relation whose reads return `Output`; see `Relation.select`.
 pub const RelationOf = @import("relation.zig").RelationOf;
@@ -74,4 +80,5 @@ test {
     _ = @import("tests/projection_test.zig");
     _ = @import("tests/fallback_test.zig");
     _ = @import("tests/owned_test.zig");
+    _ = @import("tests/schema_test.zig");
 }

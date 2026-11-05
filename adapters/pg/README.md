@@ -147,7 +147,7 @@ pub const Users = struct {
     deleted_at: ?i64 = null,
     // skipped created_at: no Zig type for timestamp with time zone
 };
-pub const UsersSchema = zom.Schema(Users, "users", .id);
+pub const UsersSchema = zom.Schema(Users, "users", .id, .{});
 ```
 
 Commit the file and run the step again when the tables change. The step

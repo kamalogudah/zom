@@ -227,7 +227,7 @@ test "a limit or offset past bigint is clamped to its largest value" {
 test "projections read only the selected columns" {
     var gw = zom.memory.Gateway.init(testing.allocator, .{});
     defer gw.deinit();
-    const Users = zom.Relation(zom.Schema(User, "users", .id), zom.memory.Gateway);
+    const Users = zom.Relation(zom.Schema(User, "users", .id, .{}), zom.memory.Gateway);
     const users = try Users.init(&gw);
 
     // Filters and orders may use columns that were not selected.
@@ -334,7 +334,7 @@ test "README: zom-sql" {
     const allocator = testing.allocator;
     var gw = zom.memory.Gateway.init(allocator, .{});
     defer gw.deinit();
-    const users = try zom.Relation(zom.Schema(User, "users", .id), zom.memory.Gateway).init(&gw);
+    const users = try zom.Relation(zom.Schema(User, "users", .id, .{}), zom.memory.Gateway).init(&gw);
 
     // -- README: zom-sql (verbatim, minus the import) ----------------------
     const compiled = try zom_sql.compileRelation(.postgres, allocator, users.where(.age, .gte, 18).select(.{ .id, .name }));

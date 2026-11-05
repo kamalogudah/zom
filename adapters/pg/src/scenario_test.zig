@@ -24,7 +24,7 @@ const Book = struct {
     rating: ?u8,
 };
 
-const Books = zom.Schema(Book, "sc_books", .id);
+const Books = zom.Schema(Book, "sc_books", .id, .{});
 
 const create_table =
     \\CREATE TABLE sc_books (

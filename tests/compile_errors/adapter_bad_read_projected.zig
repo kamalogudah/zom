@@ -36,5 +36,5 @@ const FakeGateway = struct {
 };
 
 export fn entry() void {
-    _ = zom.Adapter(FakeGateway).Dataset(zom.Schema(Item, "items", .id));
+    _ = zom.Adapter(FakeGateway).Dataset(zom.Schema(Item, "items", .id, .{}));
 }

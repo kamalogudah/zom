@@ -19,14 +19,14 @@ pub const Users = struct {
     deleted_at: ?i64 = null,
     // skipped created_at: no Zig type for timestamp with time zone
 };
-pub const UsersSchema = zom.Schema(Users, "users", .id);
+pub const UsersSchema = zom.Schema(Users, "users", .id, .{});
 
 pub const @"2faCodes" = struct {
     @"user id": i32,
     type: []const u8,
     u8: i16,
 };
-pub const @"2faCodesSchema" = zom.Schema(@"2faCodes", "2fa codes", .@"user id");
+pub const @"2faCodesSchema" = zom.Schema(@"2faCodes", "2fa codes", .@"user id", .{});
 
 pub const Events = struct {
     body: ?[]const u8 = null,

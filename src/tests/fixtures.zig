@@ -18,8 +18,8 @@ pub const PostTuple = struct {
     published: bool,
 };
 
-pub const Users = zom.Relation(zom.Schema(UserTuple, "users", .id), zom.memory.Gateway);
-pub const Posts = zom.Relation(zom.Schema(PostTuple, "posts", .id), zom.memory.Gateway);
+pub const Users = zom.Relation(zom.Schema(UserTuple, "users", .id, .{}), zom.memory.Gateway);
+pub const Posts = zom.Relation(zom.Schema(PostTuple, "posts", .id, .{}), zom.memory.Gateway);
 
 // Domain structs, decoupled from the tuples.
 pub const Post = struct { id: u32, user_id: u32, title: []const u8 };

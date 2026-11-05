@@ -7,8 +7,23 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ## [Unreleased]
 
+### Added
+
+- Associations on schemas: `zom.hasMany(Target, .fk)` and
+  `zom.belongsTo(Target, .fk)` in `.associations`, read back with
+  `S.association(.name)` or `S.associations.name` as a `zom.Association`.
+  Foreign keys are checked at compile time (the field exists on the right
+  tuple, and its type is the key's type or that type made optional), and so
+  are association names. Schemas that refer to each other declare their
+  associations as `struct { pub const posts = ...; }`, which Zig evaluates
+  only after both schemas exist; see `src/schema.zig`.
+
 ### Changed (breaking)
 
+- `zom.Schema` takes a fourth argument, its options: write
+  `zom.Schema(T, name, pk, .{})` where you wrote `zom.Schema(T, name, pk)`.
+  Zig has no default arguments or overloading, so the 3-argument form can't
+  stay under the same name. zom-sql infer generates the new form.
 - The adapters are modules of the zom package instead of separate packages.
   `adapters/<name>/build.zig` and `build.zig.zon` are gone; the root
   `build.zig` exports `zom_csv`, `zom_yaml`, `zom_sql` and, with

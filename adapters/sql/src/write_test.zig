@@ -300,7 +300,7 @@ test "an empty whereIn is still a filter: DELETE ... WHERE 1=0 deletes nothing" 
 test "a relation's delete and update queries compile with its schema's table" {
     var gw = zom.memory.Gateway.init(testing.allocator, .{});
     defer gw.deinit();
-    const Users = zom.Relation(zom.Schema(User, "users", .id), zom.memory.Gateway);
+    const Users = zom.Relation(zom.Schema(User, "users", .id, .{}), zom.memory.Gateway);
     const users = try Users.init(&gw);
 
     const rel = users.byPk(7);
