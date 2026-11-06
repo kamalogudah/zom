@@ -57,6 +57,9 @@ pub const changeset = @import("changeset.zig");
 /// Schema plugins (`.plugins = .{ zom.plugins.timestamps(.{}) }`) and how to
 /// write one; see plugins.zig.
 pub const plugins = @import("plugins.zig");
+/// The types behind `relation.page(n).perPage(k)` and its `paginate`
+/// result; see pagination.zig.
+pub const pagination = @import("pagination.zig");
 
 pub const Container = @import("container.zig").Container;
 /// A root relation with command shortcuts over a container's relations.
@@ -99,4 +102,6 @@ test {
     _ = @import("tests/associate_test.zig");
     _ = @import("tests/repository_test.zig");
     _ = @import("tests/plugins_test.zig");
+    _ = @import("tests/pagination_test.zig");
+    _ = @import("tests/instrumentation_test.zig");
 }

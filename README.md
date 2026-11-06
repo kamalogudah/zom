@@ -177,6 +177,7 @@ relation and never touch the dataset. `field` is always an enum literal, and
 | `order(field, direction)` | `Relation` | Adds a sort key after those already set: `.order(.role, .asc).order(.age, .desc)` is `ORDER BY role ASC, age DESC`. At most `Query.max_orders = 4` keys; a fifth panics. |
 | `reorder(.{ .{ field, direction }, ... })` | `Relation` | Replaces every sort key; `reorder(.{})` removes the order. More than `max_orders` keys is a compile error. |
 | `limit(n)`, `offset(n)` | `Relation` | `n: usize`. |
+| `page(n).perPage(k)` | `zom.pagination.Page(Relation)` | Page `n` (from 1) of `k` rows: `offset((n - 1) * k).limit(k)`. Its `toSlice(allocator)` reads the rows, and `paginate(allocator)` the rows with the total. See [Pagination](#pagination). |
 | `select(.{ field, ... })` | a projected relation | Reads return `zom.Project(Tuple, fields)` instead of `Tuple`. See [Projections](#projections). |
 | `allowFallback()` | a `.fallback` relation | Query features the dataset does not support compile, and run in memory. See [Query support](#query-support-strict-and-fallback). |
 | `onScan(hook)` | `Relation` | The same relation, reporting in-memory reads to `hook` (a `zom.ScanHook`, or null). A `Container` sets it for you. |
@@ -253,6 +254,35 @@ defer allocator.free(names);
   `readProjected`. Any other dataset reads whole tuples, which zom maps down
   with `zom.Mapper` and frees, so `select` works with every adapter.
 
+#### Pagination
+
+`page(n).perPage(k)` is page `n` of `k` rows, counting from 1, and
+`paginate` reads it along with the total:
+
+```zig
+const p = try users.order(.id, .asc).page(2).perPage(20).paginate(allocator);
+defer p.free(allocator);
+// p.rows: rows 21 to 40 (fewer on the last page, none past it)
+// p.total: every row of `users`, p.pages: ceil(total / 20)
+// p.page == 2, p.per_page == 20
+```
+
+- The page's query is `offset((n - 1) * k).limit(k)`, replacing any
+  `limit` and `offset` set before. `total` is `count()` on the same query
+  without them, so filters count and paging doesn't. A page past the end
+  has no rows and the same total.
+- `page(0)` or `perPage(0)` is a compile error with a literal, and a panic
+  with a runtime value: check user input first. When `(n - 1) * k` does
+  not fit in `usize`, the read returns `error.ValueOutOfRange`.
+- `paginate` is two dataset calls, a count then a read; run it in a
+  transaction if a write in between would matter. `toSlice(allocator)`
+  reads the rows alone, and `paged()` returns the relation with the
+  offset and limit applied.
+- Every relation has it, including projected and `.fallback` ones, and it
+  needs `supports.offset` like `offset` does. It is a relation method,
+  not a schema plugin: plugins hook into changesets, and paging only
+  composes `limit`, `offset` and `count`.
+
 #### Query support: strict and fallback
 
 A dataset says which query features it evaluates with `supports` and,
@@ -268,7 +298,7 @@ zom: adapter 'limited' cannot evaluate `where(.name, .eq, ...)` on relation 'ite
 
 `where`, `whereIn`, `whereNotIn` and `whereAny` / `whereNot` (every
 condition inside them too) check filters, `order` and `reorder` check sort
-keys, and `offset` checks `supports.offset`. `select` and `limit` work on
+keys, and `offset` and `page` check `supports.offset`. `select` and `limit` work on
 every dataset.
 
 `users.allowFallback()` returns the same relation in `.fallback` mode, where
@@ -494,9 +524,62 @@ const Frozen = struct {
 
 `ChangeList` has `slice()`, `find(field)` and `append(field, value)`, which
 type-checks the value like `set` and returns `error.TooManyChanges` when
-full. A type in `.plugins` with none of the three declarations is a compile
-error, which catches a misspelt hook. Read the time only through
-`ctx.clock`, so that tests stay deterministic.
+full. A plugin may also declare the `before` and `after` hooks of
+[Instrumentation](#instrumentation). A type in `.plugins` with none of
+these declarations is a compile error, which catches a misspelt hook. Read
+the time only through `ctx.clock`, so that tests stay deterministic.
+
+#### Instrumentation
+
+A plugin with `before` and/or `after` hooks is called around every call
+the relation and its changesets make to the dataset, for logging and
+metrics. `zom.plugins.instrumentation.log` is a ready-made one:
+
+```zig
+const Event = zom.plugins.instrumentation.Event;
+const Outcome = zom.plugins.instrumentation.Outcome;
+
+// Counts the rows each read returns.
+const RowCounter = struct {
+    var rows_read: usize = 0;
+    pub fn before(_: Event) void {}
+    pub fn after(e: Event, o: Outcome) void {
+        if (e.op == .read) rows_read += o.rows orelse 0;
+    }
+};
+
+const Note = struct { id: u32, title: []const u8 };
+const NoteSchema = zom.Schema(Note, "notes", .id, .{
+    // Logs each call to `std.log.scoped(.zom)`: successes at .debug,
+    // errors at .warn.
+    .plugins = .{ zom.plugins.instrumentation.log(std.log.scoped(.zom)), RowCounter },
+});
+const notes = try zom.Relation(NoteSchema, zom.memory.Gateway).init(&gw);
+
+_ = try notes.create(.{ .id = 1, .title = "Draft" }).commit(); // .insert, 1 row
+const all = try notes.toSlice(allocator); // .read, 1 row
+defer notes.free(allocator, all);
+// RowCounter.rows_read == 1
+```
+
+- `Event` has `adapter` and `dataset` (names), `op` (`.read`, `.count`,
+  `.insert`, `.insert_many`, `.update` or `.delete`) and `query`, the
+  query handed to the dataset (null for inserts), which
+  `event.queryOf(Note)` reads as a `*const zom.Query(Note)`.
+- `Outcome` has `rows` (the slice length, the count, or 1 for an insert),
+  `err` (the `@errorName` of the dataset's error, or null) and
+  `duration_ns`. `after` runs on errors too, and the error still reaches
+  the caller.
+- The duration is measured with the plugin context's clock (see above),
+  using the monotonic clock for `.{ .io = io }`. It is null when the
+  relation has no clock, and exact with a `.func` test clock.
+- What counts is dataset calls, not relation methods: `paginate` is a
+  `.count` then a `.read`, a `createMany` without `insertMany` one
+  `.insert` per row, and a `.fallback` read that filters in memory a
+  `.read` whose `rows` is every row the dataset returned, the rows scanned.
+- A schema without `before` or `after` pays nothing: each call's span is
+  an empty struct, and nothing is measured or called. The hooks belong to
+  the schema; a container cannot add them to schemas that lack them.
 
 ### Associations
 

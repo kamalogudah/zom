@@ -101,7 +101,9 @@ pub fn Create(comptime Rel: type) type {
                 @compileError("zom: adapter '" ++ Rel.Adapter.name ++ "' returns the stored tuple of relation '" ++
                     Rel.schema.name ++ "' with strings in an allocator; use `commitAlloc(allocator)` and free " ++
                     "the result with the relation's `freeOne(allocator, tuple)`");
-            return self.relation.dataset.insert(try self.prepared());
+            const tuple = try self.prepared();
+            const span = self.relation.instrument(.insert, null);
+            return span.end(self.relation.dataset.insert(tuple));
         }
 
         /// The tuple after the schema's `beforeCreate` hooks.
@@ -118,9 +120,11 @@ pub fn Create(comptime Rel: type) type {
         /// tuple)`, which is a no-op elsewhere.
         pub fn commitAlloc(self: Self, allocator: std.mem.Allocator) !Rel.Tuple {
             comptime Rel.Adapter.require(Rel.schema, .writable, "create");
+            const tuple = try self.prepared();
+            const span = self.relation.instrument(.insert, null);
             if (comptime Rel.Adapter.insertTakesAllocator(Rel.schema))
-                return self.relation.dataset.insert(try self.prepared(), allocator);
-            return self.relation.dataset.insert(try self.prepared());
+                return span.end(self.relation.dataset.insert(tuple, allocator));
+            return span.end(self.relation.dataset.insert(tuple));
         }
     };
 }
@@ -339,12 +343,17 @@ fn requireBatch(comptime Rel: type) void {
 fn insertAll(comptime Rel: type, relation: Rel, tuples: []const Rel.Tuple) !usize {
     comptime requireBatch(Rel);
     if (tuples.len == 0) return 0;
-    if (comptime Rel.Adapter.has(Rel.schema, .batch_insert))
-        return relation.dataset.insertMany(tuples);
+    if (comptime Rel.Adapter.has(Rel.schema, .batch_insert)) {
+        const span = relation.instrument(.insert_many, null);
+        return span.end(relation.dataset.insertMany(tuples));
+    }
     if (comptime Rel.Adapter.insertTakesAllocator(Rel.schema))
         @compileError("zom: `createMany` on relation '" ++ Rel.schema.name ++ "' would loop over adapter '" ++
             Rel.Adapter.name ++ "'s `insert`, which allocates the tuple it returns; the dataset needs `insertMany`");
-    for (tuples) |t| _ = try relation.dataset.insert(t);
+    for (tuples) |t| {
+        const span = relation.instrument(.insert, null);
+        _ = try span.end(relation.dataset.insert(t));
+    }
     return tuples.len;
 }
 
@@ -375,11 +384,14 @@ pub fn Update(comptime Rel: type) type {
             comptime Rel.Adapter.require(Rel.schema, .updatable, "update");
             if (self.change_count == 0) return 0;
             const query = try self.relation.writeQuery();
-            if (comptime !plugins.hasHook(Rel.schema, "beforeUpdate"))
-                return self.relation.dataset.update(query, self.changes[0..self.change_count]);
+            if (comptime !plugins.hasHook(Rel.schema, "beforeUpdate")) {
+                const span = self.relation.instrument(.update, &query);
+                return span.end(self.relation.dataset.update(query, self.changes[0..self.change_count]));
+            }
             var list: plugins.ChangeList(Rel.Tuple) = .{ .items = self.changes, .len = self.change_count };
             try plugins.beforeUpdate(Rel.schema, &list, &self.relation.plugin_context);
-            return self.relation.dataset.update(query, list.slice());
+            const span = self.relation.instrument(.update, &query);
+            return span.end(self.relation.dataset.update(query, list.slice()));
         }
     };
 }

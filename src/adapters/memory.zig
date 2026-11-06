@@ -398,7 +398,8 @@ pub fn Store(comptime S: type) type {
         /// `sorted` with the query's offset and limit applied.
         fn page(query: Q, sorted: []const T) []const T {
             const start = @min(query.offset, sorted.len);
-            const end = if (query.limit) |l| @min(start + l, sorted.len) else sorted.len;
+            // `start + l` could overflow for a huge limit.
+            const end = if (query.limit) |l| start + @min(l, sorted.len - start) else sorted.len;
             return sorted[start..end];
         }
 

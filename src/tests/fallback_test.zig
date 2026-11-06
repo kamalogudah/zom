@@ -251,6 +251,19 @@ test "without offset support, the dataset reads offset + limit rows and zom skip
     try testing.expectEqual(2, last_scan.?.rows_returned);
 }
 
+test "pagination on a .fallback relation: paged and counted in memory" {
+    var f: Fixture(.{ .offset = false }) = undefined;
+    const users = try f.init();
+    defer f.deinit();
+
+    // Ages >= 24: ids 1, 2, 3, 5, 6. The `gte` filter runs in memory.
+    const p = try users.allowFallback().where(.age, .gte, 24).order(.id, .asc).page(2).perPage(2).paginate(testing.allocator);
+    defer p.free(testing.allocator);
+    try expectIds(&.{ 3, 5 }, p.rows);
+    try testing.expectEqual(5, p.total);
+    try testing.expectEqual(3, p.pages);
+}
+
 test "boolean groups run in memory without `or` support" {
     var f: Fixture(.{}) = undefined;
     const users = try f.init();

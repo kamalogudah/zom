@@ -1,4 +1,4 @@
-// expect: zom.Schema("notes"): plugin `plugin_no_hooks.Typo` declares none of the plugin hooks (validate, beforeCreate, beforeUpdate)
+// expect: zom.Schema("notes"): plugin `plugin_no_hooks.Typo` declares none of the plugin hooks (validate, beforeCreate, beforeUpdate, before, after)
 const zom = @import("zom");
 
 const Typo = struct {

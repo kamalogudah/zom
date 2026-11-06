@@ -9,6 +9,32 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- `relation.page(n).perPage(k)`: page `n` (from 1) of `k` rows, read as
+  `offset((n - 1) * k).limit(k)`. Its `paginate(allocator)` returns
+  `zom.pagination.Result` with `rows`, `total` (the count without limit
+  and offset), `page`, `per_page` and `pages`. A literal `page(0)` or
+  `perPage(0)` is a compile error, a runtime one a panic, and an offset
+  past `usize` is `error.ValueOutOfRange`. On every relation rather than
+  a schema plugin, since it adds no changeset hook. ([#50])
+- `relation.freeRows(allocator, rows)`: `free` without a relation value. ([#50])
+- Instrumentation plugins: a plugin with `before(event)` and/or
+  `after(event, outcome)` hooks is called around every dataset call that
+  relations and changesets make (`read`, `count`, `insert`, `insert_many`,
+  `update`, `delete`), with the adapter, dataset, op and query, then the
+  row count, the `@errorName` of any error and the duration from the
+  plugin context's clock (`Clock.ticks`, monotonic for an `.io` clock).
+  `zom.plugins.instrumentation.log(std.log.scoped(.zom))` is a ready-made
+  hook. A `.fallback` read reports every row the dataset returned. A
+  schema without these hooks gets an empty span: no clock read, no call.
+  ([#51])
+
+### Fixed
+
+- The memory adapter no longer overflows on `offset(n).limit(k)` when
+  `n + k` is past `usize`, e.g. `limit(maxInt(usize))`. ([#50])
+
+### Added
+
 - Schema plugins: `zom.Schema(T, name, pk, .{ .plugins = .{ ... } })` takes
   comptime mixins with optional `validate`, `beforeCreate` and
   `beforeUpdate` hooks, which `Create.commit`, `CreateMany.commitAlloc` and
@@ -619,3 +645,5 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#46]: https://github.com/kamalogudah/zom/issues/46
 [#48]: https://github.com/kamalogudah/zom/issues/48
 [#49]: https://github.com/kamalogudah/zom/issues/49
+[#50]: https://github.com/kamalogudah/zom/issues/50
+[#51]: https://github.com/kamalogudah/zom/issues/51

@@ -46,6 +46,7 @@ const adapter = @import("adapter.zig");
 const projection = @import("projection.zig");
 const strings = @import("strings.zig");
 const combine_mod = @import("combine.zig");
+const pagination = @import("pagination.zig");
 
 /// What a relation does with a query feature its dataset does not support.
 pub const Mode = enum {
@@ -244,6 +245,15 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
             return next;
         }
 
+        /// Page `n` of the relation, counting from 1: `page(n).perPage(k)`
+        /// reads `offset((n - 1) * k).limit(k)`, and its `paginate(allocator)`
+        /// also returns the total. See pagination.zig.
+        pub fn page(self: Self, n: anytype) pagination.Pager(Self) {
+            if (comptime mode == .strict and !supported.offset)
+                unsupported("page(...)", "`supports.offset` is false");
+            return .{ .relation = self, .page = pagination.positive(Self, n, "page") };
+        }
+
         /// ROM's `select(:id, :name)`: the same relation, reading only
         /// `fields`, a tuple of attribute names such as `.{ .id, .name }`.
         /// Reads return `zom.Project(Tuple, fields)`, which has only those
@@ -413,7 +423,8 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
         /// then, when `p.in_memory`, filtered, sorted and paged by `p.rest`.
         /// Caller frees the result with `allocator`.
         fn readTuples(self: Self, p: Plan, allocator: std.mem.Allocator) ![]Tuple {
-            const rows = try self.dataset.read(p.pushed, allocator);
+            const span = self.instrument(.read, &p.pushed);
+            const rows = try span.end(self.dataset.read(p.pushed, allocator));
             if (!p.in_memory) return rows;
             errdefer allocator.free(rows);
 
@@ -489,7 +500,10 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
             const p = self.plan();
             if (comptime !projected) return self.readTuples(p, allocator);
             if (comptime supported.projection) {
-                if (!p.in_memory) return self.dataset.readProjected(p.pushed, Output, allocator);
+                if (!p.in_memory) {
+                    const span = self.instrument(.read, &p.pushed);
+                    return span.end(self.dataset.readProjected(p.pushed, Output, allocator));
+                }
             }
             const rows = try self.readTuples(p, allocator);
             errdefer freeTuples(allocator, rows);
@@ -527,6 +541,12 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
         /// on memory and Postgres alike frees reads with it.
         pub fn free(self: Self, allocator: std.mem.Allocator, rows: []const Output) void {
             _ = self;
+            freeRows(allocator, rows);
+        }
+
+        /// `free` without a relation value, for types built on one (such as
+        /// a `paginate` result).
+        pub fn freeRows(allocator: std.mem.Allocator, rows: []const Output) void {
             if (comptime caller_owns) strings.freeAll(Output, allocator, rows) else allocator.free(rows);
         }
 
@@ -552,12 +572,16 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
         pub const count = if (mode == .strict) countStrict else countFallback;
 
         fn countStrict(self: Self) !usize {
-            return try self.dataset.count(self.query);
+            const span = self.instrument(.count, &self.query);
+            return try span.end(self.dataset.count(self.query));
         }
 
         fn countFallback(self: Self, allocator: std.mem.Allocator) !usize {
             const p = self.plan();
-            if (!p.in_memory) return try self.dataset.count(p.pushed);
+            if (!p.in_memory) {
+                const span = self.instrument(.count, &p.pushed);
+                return try span.end(self.dataset.count(p.pushed));
+            }
             const rows = try self.readTuples(p, allocator);
             defer freeTuples(allocator, rows);
             return rows.len;
@@ -724,7 +748,17 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
         /// ROM's `users.by_pk(1).command(:delete).call`.
         pub fn delete(self: Self) !usize {
             comptime Adapter.require(S, .deletable, "delete");
-            return try self.dataset.delete(try self.writeQuery());
+            const query = try self.writeQuery();
+            const span = self.instrument(.delete, &query);
+            return try span.end(self.dataset.delete(query));
+        }
+
+        /// Starts the instrumentation span of one dataset call, calling the
+        /// schema's `before` hooks; `span.end(result)` calls the `after`
+        /// ones. Zero-size and free without an instrumentation plugin. For
+        /// changesets: see plugins.zig.
+        pub inline fn instrument(self: *const Self, comptime op: plugins.instrumentation.Op, query: ?*const Q) plugins.Span(S) {
+            return plugins.begin(S, Adapter.name, op, query, &self.plugin_context);
         }
 
         fn requireWhole(comptime method: []const u8) void {

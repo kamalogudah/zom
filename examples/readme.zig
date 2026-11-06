@@ -310,6 +310,29 @@ test "README: Plugins" {
     try testing.expectEqual(note.created_at, note.updated_at);
 }
 
+test "README: Pagination" {
+    const zom = @import("zom");
+    const allocator = testing.allocator;
+    var gw = zom.memory.Gateway.init(allocator, .{});
+    defer gw.deinit();
+    const User = struct { id: u32 };
+    const users = try zom.Relation(zom.Schema(User, "users", .id, .{}), zom.memory.Gateway).init(&gw);
+    for (1..46) |i| _ = try users.create(.{ .id = @intCast(i) }).commit();
+
+    // -- README: Pagination -----------------------------------------------
+    const p = try users.order(.id, .asc).page(2).perPage(20).paginate(allocator);
+    defer p.free(allocator);
+    // p.rows: rows 21 to 40 (fewer on the last page, none past it)
+    // p.total: every row of `users`, p.pages: ceil(total / 20)
+    // p.page == 2, p.per_page == 20
+    // ---------------------------------------------------------------------
+
+    try testing.expectEqual(20, p.rows.len);
+    try testing.expectEqual(21, p.rows[0].id);
+    try testing.expectEqual(45, p.total);
+    try testing.expectEqual(3, p.pages);
+}
+
 test "README: Writing a plugin" {
     const zom = @import("zom");
 
@@ -442,4 +465,40 @@ test "README: Join" {
     const by_admins = try posts.join(.author).whereJoined(.author, .role, .eq, .admin).toSlice(allocator);
     defer posts.free(allocator, by_admins);
     try testing.expectEqual(2, by_admins.len);
+}
+
+test "README: Instrumentation" {
+    const zom = @import("zom");
+    const allocator = testing.allocator;
+    var gw = zom.memory.Gateway.init(allocator, .{});
+    defer gw.deinit();
+
+    // -- README: Instrumentation ------------------------------------------
+    const Event = zom.plugins.instrumentation.Event;
+    const Outcome = zom.plugins.instrumentation.Outcome;
+
+    // Counts the rows each read returns.
+    const RowCounter = struct {
+        var rows_read: usize = 0;
+        pub fn before(_: Event) void {}
+        pub fn after(e: Event, o: Outcome) void {
+            if (e.op == .read) rows_read += o.rows orelse 0;
+        }
+    };
+
+    const Note = struct { id: u32, title: []const u8 };
+    const NoteSchema = zom.Schema(Note, "notes", .id, .{
+        // Logs each call to `std.log.scoped(.zom)`: successes at .debug,
+        // errors at .warn.
+        .plugins = .{ zom.plugins.instrumentation.log(std.log.scoped(.zom)), RowCounter },
+    });
+    const notes = try zom.Relation(NoteSchema, zom.memory.Gateway).init(&gw);
+
+    _ = try notes.create(.{ .id = 1, .title = "Draft" }).commit(); // .insert, 1 row
+    const all = try notes.toSlice(allocator); // .read, 1 row
+    defer notes.free(allocator, all);
+    // RowCounter.rows_read == 1
+    // ---------------------------------------------------------------------
+
+    try testing.expectEqual(1, RowCounter.rows_read);
 }

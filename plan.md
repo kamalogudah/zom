@@ -308,9 +308,15 @@ for rom.
   - `timestamps` (sets `created_at`/`updated_at` in changesets). Done:
     hooks are found with `@hasDecl` and read a relation-held context with
     an injectable clock (`src/plugins.zig`).
-  - `pagination` (`page(n).perPage(k)` with a total count)
+  - `pagination` (`page(n).perPage(k)` with a total count). Done, as a
+    method on every relation rather than a plugin: it adds no changeset
+    hook, and a plugin cannot add methods to the relation type
+    (`src/pagination.zig`).
   - `instrumentation` (a hook called around each dataset call, for logging
-    and metrics)
+    and metrics). Done: `before` / `after` plugin hooks around every
+    dataset call, a ready-made `instrumentation.log`, and zero-size spans
+    without them (`src/plugins.zig`). Setting the hooks from a container,
+    for schemas that don't declare them, is left out (see #51).
 - **Done when** the README example uses a repository and a transaction
   against pg.
 
