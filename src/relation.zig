@@ -41,6 +41,7 @@ const std = @import("std");
 const q = @import("query.zig");
 const mapper = @import("mapper.zig");
 const changeset = @import("changeset.zig");
+const plugins = @import("plugins.zig");
 const adapter = @import("adapter.zig");
 const projection = @import("projection.zig");
 const strings = @import("strings.zig");
@@ -111,6 +112,12 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
         /// `.fallback` relation ever calls it, but a strict one carries it
         /// so `allowFallback()` keeps it. Set by `Container`, or `onScan`.
         on_scan: ?ScanHook = null,
+        /// What the schema's plugin hooks read, such as the clock. `void`
+        /// when the schema has no plugins, so it costs nothing there. Set by
+        /// `withPluginContext`, or `Container.setPluginContext`.
+        plugin_context: PluginContext = if (PluginContext == void) {} else .{},
+
+        pub const PluginContext = plugins.ContextField(S);
 
         pub fn init(gateway: *Gateway) !Self {
             return .{ .dataset = try gateway.dataset(S) };
@@ -123,7 +130,18 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
         /// for the cost). Call it before or after building the query; every
         /// relation chained from the result is `.fallback` too.
         pub fn allowFallback(self: Self) RelationWith(S, Gateway, Out, .fallback) {
-            return .{ .dataset = self.dataset, .query = self.query, .on_scan = self.on_scan };
+            return .{ .dataset = self.dataset, .query = self.query, .on_scan = self.on_scan, .plugin_context = self.plugin_context };
+        }
+
+        /// The same relation with `ctx` for its schema's plugins, e.g.
+        /// `users.withPluginContext(.{ .clock = .{ .io = io } })`. A
+        /// compile error when the schema has no plugins.
+        pub fn withPluginContext(self: Self, ctx: plugins.Context) Self {
+            if (PluginContext == void)
+                @compileError("zom: `withPluginContext` on relation '" ++ S.name ++ "', whose schema has no plugins");
+            var next = self;
+            next.plugin_context = ctx;
+            return next;
         }
 
         /// The same relation reporting in-memory reads to `hook` (null for
@@ -235,7 +253,7 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
         /// not have to be selected. A dataset without `supports.projection`
         /// still runs it: zom reads whole tuples and maps them down.
         pub fn select(self: Self, comptime fields: anytype) Selected(fields) {
-            return .{ .dataset = self.dataset, .query = self.query, .on_scan = self.on_scan };
+            return .{ .dataset = self.dataset, .query = self.query, .on_scan = self.on_scan, .plugin_context = self.plugin_context };
         }
 
         fn Selected(comptime fields: anytype) type {

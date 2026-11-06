@@ -9,6 +9,19 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- Schema plugins: `zom.Schema(T, name, pk, .{ .plugins = .{ ... } })` takes
+  comptime mixins with optional `validate`, `beforeCreate` and
+  `beforeUpdate` hooks, which `Create.commit`, `CreateMany.commitAlloc` and
+  `Update.commit` call in order. Hooks read a `zom.plugins.Context` set with
+  `relation.withPluginContext(ctx)` or `app.setPluginContext(ctx)`. A schema
+  without plugins compiles as before. ([#49])
+- `zom.plugins.timestamps(.{ .created = .created_at, .updated = .updated_at })`:
+  sets both `i64` fields on create and `updated_at` on update, from the
+  context's injectable `zom.plugins.Clock` (`.io`, `.fixed` or `.func`).
+  A missing or non-`i64` field is a compile error. ([#49])
+- `createMany(...).commit()` on a schema with a `beforeCreate` plugin is a
+  compile error: the hooks run on a copy, so use `commitAlloc`. ([#49])
+
 - `app.transaction(.gateway, ctx, f)` on `zom.Container`: runs `f(ctx, tx)`
   in that gateway's `transaction`, where `tx` is an `App.Relations` whose
   relations on that gateway are rebound to the transaction and the rest
@@ -605,3 +618,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#41]: https://github.com/kamalogudah/zom/issues/41
 [#46]: https://github.com/kamalogudah/zom/issues/46
 [#48]: https://github.com/kamalogudah/zom/issues/48
+[#49]: https://github.com/kamalogudah/zom/issues/49

@@ -33,6 +33,7 @@
 //! (directly or through other schemas) at the schema declaring it.
 
 const std = @import("std");
+const plugins_mod = @import("plugins.zig");
 
 const EnumLiteral = @TypeOf(.enum_literal);
 
@@ -100,7 +101,9 @@ pub fn belongsTo(comptime Target: type, comptime foreign_key: EnumLiteral) Assoc
 
 /// `zom.Schema(T, name, pk, .{})`, or with associations:
 /// `zom.Schema(T, name, pk, .{ .associations = struct { pub const posts = zom.hasMany(PostSchema, .user_id); } })`.
-/// See the file comment for the two forms `associations` takes.
+/// See the file comment for the two forms `associations` takes. The other
+/// option, `.plugins = .{ zom.plugins.timestamps(.{}) }`, is described in
+/// plugins.zig.
 pub fn Schema(
     comptime T: type,
     comptime dataset_name: []const u8,
@@ -114,10 +117,11 @@ pub fn Schema(
     if (@typeInfo(O) != .@"struct")
         @compileError(label ++ ": options must be a struct literal such as .{} or .{ .associations = ... }, found `" ++ @typeName(O) ++ "`");
     for (@typeInfo(O).@"struct".fields) |f| {
-        if (!std.mem.eql(u8, f.name, "associations"))
-            @compileError(label ++ ": unknown option '" ++ f.name ++ "' (options: associations)");
+        if (!std.mem.eql(u8, f.name, "associations") and !std.mem.eql(u8, f.name, "plugins"))
+            @compileError(label ++ ": unknown option '" ++ f.name ++ "' (options: associations, plugins)");
     }
     const defs = if (@hasField(O, "associations")) options.associations else struct {};
+    const plugin_list = if (@hasField(O, "plugins")) plugins_mod.checkList(dataset_name, options.plugins) else .{};
 
     return struct {
         const Self = @This();
@@ -129,6 +133,10 @@ pub fn Schema(
         /// Lets `zom.hasMany` / `zom.belongsTo` (and anything else) tell a
         /// schema type from any other type.
         pub const is_zom_schema = true;
+
+        /// The plugin types from `.plugins`, in order; `.{}` without any.
+        /// See plugins.zig.
+        pub const plugins = plugin_list;
 
         /// The names of the associations, in declaration order.
         pub const association_names: []const []const u8 = associationNames(defs);
@@ -196,6 +204,7 @@ pub fn Schema(
         // the schemas it names exist, so mutual references are fine here.
         comptime {
             for (association_names) |a| _ = resolve(a);
+            plugins_mod.validate(Self);
         }
     };
 }

@@ -24,6 +24,10 @@
 //! Relations chained from `app.relations.users`, including through
 //! `allowFallback()`, keep the hook.
 //!
+//! Plugins: `app.setPluginContext(.{ .clock = .{ .io = io } })` after
+//! `init` gives the relations whose schemas have plugins what their hooks
+//! read (see plugins.zig). Transactions keep it.
+//!
 //! Transactions: `app.transaction(.default, ctx, f)` runs `f(ctx, tx)` in
 //! the `default` gateway's `transaction`, where `tx` is an `App.Relations`
 //! whose relations on `default` run in the transaction:
@@ -46,6 +50,7 @@
 const std = @import("std");
 const adapter = @import("adapter.zig");
 const rel = @import("relation.zig");
+const plugins = @import("plugins.zig");
 const Relation = rel.Relation;
 const Allocator = std.mem.Allocator;
 
@@ -134,6 +139,16 @@ pub fn Container(comptime spec: anytype) type {
             }
         }
 
+        /// Sets `ctx` on every relation whose schema has plugins (see
+        /// plugins.zig), e.g. `app.setPluginContext(.{ .clock = .{ .io = io } })`
+        /// after `init`. Relations copied out before the call, such as a
+        /// `Repository`'s, keep the context they had.
+        pub fn setPluginContext(self: *Self, ctx: plugins.Context) void {
+            inline for (relation_names_final, relation_types_final) |name, R| {
+                if (R.PluginContext != void) @field(self.relations, name).plugin_context = ctx;
+            }
+        }
+
         /// Deinitialises every gateway in reverse declaration order.
         /// Relations, and rows read through them, must not be used after.
         pub fn deinit(self: *Self) void {
@@ -215,8 +230,10 @@ pub fn Container(comptime spec: anytype) type {
                     var relations = c.relations.*;
                     inline for (relation_names_final, relation_types_final, relation_gateways_final) |name, Rel, rg| {
                         if (comptime std.mem.eql(u8, rg, gateway)) {
+                            const outside = @field(relations, name);
                             @field(relations, name) = try Rel.init(tx);
                             @field(relations, name).on_scan = scan_hook;
+                            @field(relations, name).plugin_context = outside.plugin_context;
                         }
                     }
                     return f(c.ctx, relations);

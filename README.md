@@ -125,7 +125,7 @@ breaking change needs a minor version bump and an entry in
 
 | Declaration | What it is |
 |---|---|
-| `zom.Schema(T, name, pk, options)` | Returns a schema type with `Tuple = T`, `name` (the dataset name), `primary_key` (a field of `T`, as an enum literal) and its associations. `options` is `.{}` or `.{ .associations = ... }`; see [Associations](#associations). |
+| `zom.Schema(T, name, pk, options)` | Returns a schema type with `Tuple = T`, `name` (the dataset name), `primary_key` (a field of `T`, as an enum literal) and its associations. `options` is `.{}`, or has `.associations` (see [Associations](#associations)) and `.plugins` (see [Plugins](#plugins)). |
 | `zom.hasMany(Target, .fk)`, `zom.belongsTo(Target, .fk)` | Declare an association on a schema. `S.association(.name)` and `S.associations.name` return a `zom.Association`: `name`, `kind` (`zom.AssociationKind`: `has_many` or `belongs_to`), `source`, `target`, `foreign_key` and `primary_key` (field names as strings), plus `Child()` and `Parent()`. |
 | `zom.Relation(S, Gateway)` | Returns an immutable relation type over schema `S` and an adapter's `Gateway`. Checks the [adapter contract](#the-adapter-contract) at compile time through `zom.Adapter(Gateway)`, which it exposes as `Relation.Adapter`. |
 | `zom.RelationOf(S, Gateway, Output)` | The strict relation type whose reads return `Output`. `Relation(S, G)` is `RelationOf(S, G, S.Tuple)`, and `select` returns `RelationOf(S, G, Project(S.Tuple, fields))`. Exposes `Tuple`, `Output`, `projected` and `mode`. |
@@ -148,6 +148,7 @@ breaking change needs a minor version bump and an entry in
 | `zom.Direction` | `asc`, `desc`. |
 | `zom.Container(spec)` | Declares gateways and relations once; `init(self, allocator, Config)` / `deinit()` connect and disconnect them all. See [Container](#container). |
 | `zom.Repository(App, .{ .root, .relations })` | Groups some of a container's relations around a root relation: `init(&app)`, `relations` (one field per relation, or its wrapper struct), `root()`, and the root shortcuts `byPk`, `where`, `all`, `create`, `createMany`, `update`, `delete`. See [Repository](#repository). |
+| `zom.plugins` | Schema plugins: `timestamps(.{ .created, .updated, .unit })`, the `Context` and `Clock` hooks read, `ChangeList(T)` (what `beforeUpdate` hooks edit) and `max_changes`. See [Plugins](#plugins). |
 | `zom.changeset` | `Create(Rel)`, `CreateMany(Rel)`, `Update(Rel)` and `Scoped(Rel, keys)`, the types returned by `relation.create`, `relation.createMany`, `relation.update` and `relation.associate`. You don't name them yourself; `Scoped`'s `Input` is the struct its `create` takes. |
 | `zom.Mapper(Src, Dst, .{ .renames, .skip })` | A comptime mapper: `call(src) Dst` and `many(allocator, srcs) ![]Dst`. A `Dst` field takes the `Src` field of the same name (or its rename), else its default; neither is a compile error. Fields named in `skip` are left undefined for the caller to fill. `sources` lists the `Src` fields it copies, and `options` the options it was made with. |
 | `zom.Combined(Source, association, Target)`, `zom.CombineResult(E)` | What `relation.combine(.assoc, target)` returns, and what its `mapTo` / `mapWith` return: `items: []E` and the arena owning them, freed with `deinit()`. See [Associations](#associations). |
@@ -425,6 +426,77 @@ container's `deinit`. A relation the container lacks, a root that isn't in
 `.relations`, a wrapper without a `rel` field of the right type, and a
 relation named like one of the repository's own declarations (`create`,
 `all`, ...) are compile errors.
+
+### Plugins
+
+A plugin is a comptime mixin listed on the schema. zom calls its hooks from
+the changesets, in the order of `.plugins`. The first one is `timestamps`:
+
+```zig
+const Note = struct { id: u32, title: []const u8, created_at: i64 = 0, updated_at: i64 = 0 };
+const NoteSchema = zom.Schema(Note, "notes", .id, .{
+    .plugins = .{zom.plugins.timestamps(.{ .created = .created_at, .updated = .updated_at })},
+});
+const Notes = zom.Relation(NoteSchema, zom.memory.Gateway);
+
+// The clock comes from the relation's plugin context, never from the
+// plugin itself: `.{ .io = io }` in an app, a fixed time in tests.
+const notes = (try Notes.init(&gw)).withPluginContext(.{ .clock = .{ .fixed = 1_700_000_000_000_000_000 } });
+
+const note = try notes.create(.{ .id = 1, .title = "Draft" }).commit();
+// note.created_at == note.updated_at == 1_700_000_000_000_000_000
+_ = try notes.byPk(1).update().set(.title, "Final").commit(); // sets updated_at too
+```
+
+- Both fields must be `i64`, or `timestamps` gives a compile error naming
+  the schema and the field. They count nanoseconds since the Unix epoch
+  by default; pass `.unit = .seconds` (or `.milliseconds`,
+  `.microseconds`) for other columns, and `.created = null` or
+  `.updated = null` to set only one of them.
+- Create sets both fields, overwriting what the tuple held. An update that
+  changes something also sets `updated_at`, unless it sets it itself; an
+  update with no changes stays a no-op. The extra change counts towards
+  `max_changes` (16), so a 16th `set` makes `commit` return
+  `error.TooManyChanges`.
+- `createMany` runs `beforeCreate` on a copy of the borrowed rows, so it
+  commits with `commitAlloc(allocator)`; plain `commit` is a compile error.
+- In a container, `app.setPluginContext(.{ .clock = .{ .io = io } })` after
+  `init` sets the context on every relation with plugins, and
+  `app.transaction` keeps it. Without a clock, a timestamped commit panics
+  with the relation's name.
+- A schema without plugins pays nothing: its relation's `plugin_context`
+  field is `void`, and the hooks are an `inline for` over an empty tuple.
+
+#### Writing a plugin
+
+A plugin is any type with at least one of these declarations. zom finds
+them with `@hasDecl`, so leave out the ones you don't need. `S` is the
+schema, so one plugin works for every tuple:
+
+```zig
+const Frozen = struct {
+    /// When the schema is analysed: reject schemas the plugin can't handle.
+    pub fn validate(comptime S: type) void {
+        if (!@hasField(S.Tuple, "id")) @compileError("Frozen needs an id");
+    }
+    /// On the tuple about to be inserted (a copy).
+    pub fn beforeCreate(comptime S: type, tuple: *S.Tuple, ctx: *const zom.plugins.Context) void {
+        _ = .{ tuple, ctx };
+    }
+    /// On the changes about to be applied. May return an error union, whose
+    /// errors are added to `commit`'s.
+    pub fn beforeUpdate(comptime S: type, changes: *zom.plugins.ChangeList(S.Tuple), ctx: *const zom.plugins.Context) error{Frozen}!void {
+        _ = ctx;
+        if (changes.find(.id) != null) return error.Frozen;
+    }
+};
+```
+
+`ChangeList` has `slice()`, `find(field)` and `append(field, value)`, which
+type-checks the value like `set` and returns `error.TooManyChanges` when
+full. A type in `.plugins` with none of the three declarations is a compile
+error, which catches a misspelt hook. Read the time only through
+`ctx.clock`, so that tests stay deterministic.
 
 ### Associations
 
@@ -1018,6 +1090,8 @@ rom-yaml:
 4. Associations in the schema, and `combine` with one `IN (...)` query
    instead of the O(n·m) `combineMany`, now deprecated.
 5. Repositories, transactions and plugins (timestamps, pagination).
+   *Repositories, `container.transaction` and the `timestamps` plugin are
+   done.*
 6. `zom-tigerbeetle` on the native Zig client: immutable accounts and
    transfers, batched writes.
 

@@ -45,10 +45,18 @@
 //! takes whole tuples. Both build the stored tuples in a copy, since the
 //! rows are borrowed and const, so they commit with `commitAlloc(allocator)`
 //! (plain `commit` is a compile error there).
+//!
+//! ## Plugins
+//!
+//! `Create.commit` and `Update.commit` run the schema's plugin hooks
+//! (`beforeCreate`, `beforeUpdate`; see plugins.zig) just before the
+//! dataset call. A batch whose schema has a `beforeCreate` hook runs it on
+//! a copy of the borrowed rows, so it commits with `commitAlloc` too.
 
 const std = @import("std");
 const q = @import("query.zig");
 const Association = @import("schema.zig").Association;
+const plugins = @import("plugins.zig");
 
 const EnumLiteral = @TypeOf(.enum_literal);
 
@@ -93,7 +101,15 @@ pub fn Create(comptime Rel: type) type {
                 @compileError("zom: adapter '" ++ Rel.Adapter.name ++ "' returns the stored tuple of relation '" ++
                     Rel.schema.name ++ "' with strings in an allocator; use `commitAlloc(allocator)` and free " ++
                     "the result with the relation's `freeOne(allocator, tuple)`");
-            return self.relation.dataset.insert(self.tuple);
+            return self.relation.dataset.insert(try self.prepared());
+        }
+
+        /// The tuple after the schema's `beforeCreate` hooks.
+        inline fn prepared(self: Self) !Rel.Tuple {
+            if (comptime !plugins.hasHook(Rel.schema, "beforeCreate")) return self.tuple;
+            var t = self.tuple;
+            try plugins.beforeCreate(Rel.schema, &t, &self.relation.plugin_context);
+            return t;
         }
 
         /// `commit` on any adapter: the returned tuple's strings are
@@ -103,8 +119,8 @@ pub fn Create(comptime Rel: type) type {
         pub fn commitAlloc(self: Self, allocator: std.mem.Allocator) !Rel.Tuple {
             comptime Rel.Adapter.require(Rel.schema, .writable, "create");
             if (comptime Rel.Adapter.insertTakesAllocator(Rel.schema))
-                return self.relation.dataset.insert(self.tuple, allocator);
-            return self.relation.dataset.insert(self.tuple);
+                return self.relation.dataset.insert(try self.prepared(), allocator);
+            return self.relation.dataset.insert(try self.prepared());
         }
     };
 }
@@ -129,7 +145,9 @@ pub fn CreateMany(comptime Rel: type) type {
 pub fn CreateManyOf(comptime Rel: type, comptime Row: type, comptime keys: FieldSet(Rel)) type {
     return struct {
         const Self = @This();
-        const needs_copy = !isEmpty(Rel, keys);
+        const has_keys = !isEmpty(Rel, keys);
+        const has_hooks = plugins.hasHook(Rel.schema, "beforeCreate");
+        const needs_copy = has_keys or has_hooks;
 
         relation: Rel,
         tuples: []const Row,
@@ -151,22 +169,29 @@ pub fn CreateManyOf(comptime Rel: type, comptime Row: type, comptime keys: Field
 
         /// Returns the number of tuples inserted.
         pub fn commit(self: Self) !usize {
-            if (needs_copy)
+            if (has_keys)
                 @compileError("zom: `createMany` on relation '" ++ Rel.schema.name ++ "' after `associate` sets the " ++
                     "foreign key on a copy of the borrowed rows; commit it with `commitAlloc(allocator)`");
+            if (has_hooks)
+                @compileError("zom: `createMany` on relation '" ++ Rel.schema.name ++ "' runs its schema's `beforeCreate` " ++
+                    "plugin hooks on a copy of the borrowed rows; commit it with `commitAlloc(allocator)`");
             return insertAll(Rel, self.relation, self.tuples);
         }
 
-        /// `commit` for any batch: after `associate`, builds the stored
-        /// tuples in a copy allocated with `allocator`, freed before
-        /// returning. Without `associate` it allocates nothing.
+        /// `commit` for any batch: after `associate`, or with `beforeCreate`
+        /// plugin hooks, builds the stored tuples in a copy allocated with
+        /// `allocator`, freed before returning. Otherwise it allocates
+        /// nothing.
         pub fn commitAlloc(self: Self, allocator: std.mem.Allocator) !usize {
             if (!needs_copy) return insertAll(Rel, self.relation, self.tuples);
             comptime requireBatch(Rel);
             if (self.tuples.len == 0) return 0;
             const rows = try allocator.alloc(Rel.Tuple, self.tuples.len);
             defer allocator.free(rows);
-            for (rows, self.tuples) |*row, in| row.* = merge(Rel, keys, in, self.patch);
+            for (rows, self.tuples) |*row, in| {
+                row.* = merge(Rel, keys, in, self.patch);
+                if (has_hooks) try plugins.beforeCreate(Rel.schema, row, &self.relation.plugin_context);
+            }
             return insertAll(Rel, self.relation, rows);
         }
     };
@@ -326,7 +351,8 @@ fn insertAll(comptime Rel: type, relation: Rel, tuples: []const Rel.Tuple) !usiz
 pub fn Update(comptime Rel: type) type {
     return struct {
         const Self = @This();
-        pub const max_changes = 16;
+        /// Includes the changes plugins add at commit.
+        pub const max_changes = plugins.max_changes;
 
         relation: Rel,
         changes: [max_changes]Rel.Q.Change = undefined,
@@ -343,11 +369,17 @@ pub fn Update(comptime Rel: type) type {
             return next;
         }
 
-        /// Returns the number of tuples updated.
+        /// Returns the number of tuples updated. Runs the schema's
+        /// `beforeUpdate` plugin hooks first, unless there are no changes.
         pub fn commit(self: Self) !usize {
             comptime Rel.Adapter.require(Rel.schema, .updatable, "update");
             if (self.change_count == 0) return 0;
-            return self.relation.dataset.update(try self.relation.writeQuery(), self.changes[0..self.change_count]);
+            const query = try self.relation.writeQuery();
+            if (comptime !plugins.hasHook(Rel.schema, "beforeUpdate"))
+                return self.relation.dataset.update(query, self.changes[0..self.change_count]);
+            var list: plugins.ChangeList(Rel.Tuple) = .{ .items = self.changes, .len = self.change_count };
+            try plugins.beforeUpdate(Rel.schema, &list, &self.relation.plugin_context);
+            return self.relation.dataset.update(query, list.slice());
         }
     };
 }

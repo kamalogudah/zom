@@ -54,6 +54,9 @@ pub const StringOwnership = adapter.StringOwnership;
 pub const strings = @import("strings.zig");
 
 pub const changeset = @import("changeset.zig");
+/// Schema plugins (`.plugins = .{ zom.plugins.timestamps(.{}) }`) and how to
+/// write one; see plugins.zig.
+pub const plugins = @import("plugins.zig");
 
 pub const Container = @import("container.zig").Container;
 /// A root relation with command shortcuts over a container's relations.
@@ -95,4 +98,5 @@ test {
     _ = @import("tests/join_test.zig");
     _ = @import("tests/associate_test.zig");
     _ = @import("tests/repository_test.zig");
+    _ = @import("tests/plugins_test.zig");
 }

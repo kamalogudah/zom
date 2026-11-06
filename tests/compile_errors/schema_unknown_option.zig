@@ -1,4 +1,4 @@
-// expect: zom.Schema("users"): unknown option 'assocations' (options: associations)
+// expect: zom.Schema("users"): unknown option 'assocations' (options: associations, plugins)
 const zom = @import("zom");
 
 const User = struct { id: u32, name: []const u8 };

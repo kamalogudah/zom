@@ -305,7 +305,9 @@ for rom.
   `transaction` capability, and gives a compile error when a gateway lacks
   it.
 - Plugins as comptime mixins configured on the schema:
-  - `timestamps` (sets `created_at`/`updated_at` in changesets)
+  - `timestamps` (sets `created_at`/`updated_at` in changesets). Done:
+    hooks are found with `@hasDecl` and read a relation-held context with
+    an injectable clock (`src/plugins.zig`).
   - `pagination` (`page(n).perPage(k)` with a total count)
   - `instrumentation` (a hook called around each dataset call, for logging
     and metrics)

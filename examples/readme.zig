@@ -285,6 +285,62 @@ const assoc = struct {
     });
 };
 
+test "README: Plugins" {
+    const zom = @import("zom");
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
+    defer gw.deinit();
+
+    // -- README: Plugins --------------------------------------------------
+    const Note = struct { id: u32, title: []const u8, created_at: i64 = 0, updated_at: i64 = 0 };
+    const NoteSchema = zom.Schema(Note, "notes", .id, .{
+        .plugins = .{zom.plugins.timestamps(.{ .created = .created_at, .updated = .updated_at })},
+    });
+    const Notes = zom.Relation(NoteSchema, zom.memory.Gateway);
+
+    // The clock comes from the relation's plugin context, never from the
+    // plugin itself: `.{ .io = io }` in an app, a fixed time in tests.
+    const notes = (try Notes.init(&gw)).withPluginContext(.{ .clock = .{ .fixed = 1_700_000_000_000_000_000 } });
+
+    const note = try notes.create(.{ .id = 1, .title = "Draft" }).commit();
+    // note.created_at == note.updated_at == 1_700_000_000_000_000_000
+    _ = try notes.byPk(1).update().set(.title, "Final").commit(); // sets updated_at too
+    // ---------------------------------------------------------------------
+
+    try testing.expectEqual(@as(i64, 1_700_000_000_000_000_000), note.created_at);
+    try testing.expectEqual(note.created_at, note.updated_at);
+}
+
+test "README: Writing a plugin" {
+    const zom = @import("zom");
+
+    // -- README: Writing a plugin -----------------------------------------
+    const Frozen = struct {
+        /// When the schema is analysed: reject schemas the plugin can't handle.
+        pub fn validate(comptime S: type) void {
+            if (!@hasField(S.Tuple, "id")) @compileError("Frozen needs an id");
+        }
+        /// On the tuple about to be inserted (a copy).
+        pub fn beforeCreate(comptime S: type, tuple: *S.Tuple, ctx: *const zom.plugins.Context) void {
+            _ = .{ tuple, ctx };
+        }
+        /// On the changes about to be applied. May return an error union, whose
+        /// errors are added to `commit`'s.
+        pub fn beforeUpdate(comptime S: type, changes: *zom.plugins.ChangeList(S.Tuple), ctx: *const zom.plugins.Context) error{Frozen}!void {
+            _ = ctx;
+            if (changes.find(.id) != null) return error.Frozen;
+        }
+    };
+    // ---------------------------------------------------------------------
+
+    const Item = struct { id: u32, name: []const u8 };
+    const Items = zom.Relation(zom.Schema(Item, "items", .id, .{ .plugins = .{Frozen} }), zom.memory.Gateway);
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
+    defer gw.deinit();
+    const items = try Items.init(&gw);
+    _ = try items.create(.{ .id = 1, .name = "a" }).commit();
+    try testing.expectError(error.Frozen, items.byPk(1).update().set(.id, 2).commit());
+}
+
 test "README: Associations" {
     const posts = assoc.UserSchema.association(.posts);
     try testing.expect(posts.kind == .has_many);
