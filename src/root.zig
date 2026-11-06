@@ -60,6 +60,7 @@ pub const lint = @import("lint.zig");
 
 pub const mapper = @import("mapper.zig");
 pub const Mapper = mapper.Mapper;
+/// Deprecated: use `Relation.combine`; see `mapper.combineMany`.
 pub const combineMany = mapper.combineMany;
 /// What `relation.combine(.assoc, target)` returns, and what its `mapTo` gives.
 pub const Combined = @import("combine.zig").Combined;

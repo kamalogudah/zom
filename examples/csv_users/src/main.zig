@@ -1,4 +1,4 @@
-//! Joins users read from `data/users.csv` with posts held in memory, through
+//! Combines users read from `data/users.csv` with posts held in memory, through
 //! one `zom.Container`. Two adapters, one API: the relations differ only in
 //! the gateway they name.
 //!
@@ -14,11 +14,16 @@ const Post = struct { id: u32, user_id: u32, title: []const u8 };
 /// What gets printed: a user with their posts attached.
 const Author = struct { id: u32, name: []const u8, email: []const u8, posts: []const Post = &.{} };
 
+const PostSchema = zom.Schema(Post, "posts", .id, .{});
+const UserSchema = zom.Schema(User, "users", .id, .{
+    .associations = .{ .posts = zom.hasMany(PostSchema, .user_id) },
+});
+
 const App = zom.Container(.{
     .gateways = .{ .default = zom.memory.Gateway, .files = zom_csv.Gateway },
     .relations = .{
-        .users = .{ zom.Schema(User, "users", .id, .{}), .files },
-        .posts = .{ zom.Schema(Post, "posts", .id, .{}), .default },
+        .users = .{ UserSchema, .files },
+        .posts = .{ PostSchema, .default },
     },
 });
 
@@ -41,24 +46,16 @@ pub fn main(init: std.process.Init) !void {
         .{ .id = 12, .user_id = 1, .title = "Gateways side by side" },
     }).commit();
 
-    // combineMany allocates one slice per author, so give it an arena.
-    // Phase 4 replaces it with `combine`.
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    const authors = try users.order(.id, .asc).mapTo(Author, a);
-    try zom.combineMany(
-        .{ .into = "posts", .parent_key = "id", .child_key = "user_id" },
-        a,
-        authors,
-        try posts.order(.id, .asc).toSlice(a),
-    );
+    // The users come from the CSV file and their posts from memory: one
+    // read of each, whatever gateway they live in. `deinit` frees every
+    // author and post.
+    var authors = try users.order(.id, .asc).combine(.posts, posts.order(.id, .asc)).mapTo(Author, gpa);
+    defer authors.deinit();
 
     var buf: [1024]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(io, &buf);
     const out = &stdout.interface;
-    for (authors) |author| {
+    for (authors.items) |author| {
         try out.print("{s} <{s}>\n", .{ author.name, author.email });
         if (author.posts.len == 0) try out.writeAll("  (no posts)\n");
         for (author.posts) |post| try out.print("  - {s}\n", .{post.title});
