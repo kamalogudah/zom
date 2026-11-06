@@ -693,6 +693,9 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
 
         /// Joins never fall back to memory, so this is checked in either mode.
         fn requireJoin(comptime a: @import("schema.zig").Association, comptime call: []const u8) void {
+            if (a.kind == .custom)
+                @compileError("zom: `" ++ call ++ "` on relation '" ++ S.name ++ "': '" ++ a.name ++
+                    "' is a custom association, which has no foreign key to join on; use `combine(." ++ a.name ++ ", ...)` to load its rows");
             if (!supported.join)
                 @compileError("zom: adapter '" ++ Adapter.name ++ "' cannot evaluate `" ++ call ++ "` on relation '" ++
                     S.name ++ "': `supports.join` is false, and a join reads another dataset ('" ++ a.target.name ++

@@ -264,6 +264,8 @@ pub fn checkAssociate(comptime Rel: type, comptime assoc: EnumLiteral, comptime 
     const S = Rel.schema;
     const a = S.association(assoc);
     const where = "zom: `associate(." ++ a.name ++ ", ...)` on relation '" ++ S.name ++ "'";
+    if (a.kind == .custom)
+        @compileError(where ++ ": '" ++ a.name ++ "' is a custom association, which has no foreign key to set");
     if (a.kind == .has_many) {
         var other: []const u8 = "";
         for (a.target.association_names) |n| {

@@ -16,6 +16,17 @@
 //! whole mapping. TigerBeetle can't count, so `count` reads the matching
 //! rows and counts them: at most `Config.scan_max`, like any read.
 //!
+//! A third, read-only dataset, `zom_tigerbeetle.AccountBalance`, reads an
+//! account's balance history through `get_account_balances` (`BalanceDataset`).
+//!
+//! `combine` into accounts or transfers goes through the datasets'
+//! `loadAssociation` (see zom's combine.zig), which picks the request for
+//! the association at compile time: `get_account_transfers` for
+//! `Account.transfers` (a custom association: debit or credit account) and
+//! for a `hasMany` on `debit_account_id` / `credit_account_id`,
+//! `lookup_*` for a `belongsTo`, and one `query_*` per key for a `hasMany`
+//! on an indexed field (`user_data_*`, `ledger`, `code`).
+//!
 //! ## Threads and blocking
 //!
 //! The client runs its own thread, which does all the network I/O.
@@ -126,6 +137,7 @@ pub const Gateway = struct {
         requests: std.atomic.Value(u64) = .init(0),
         accounts: Dataset(schemas.Account),
         transfers: Dataset(schemas.Transfer),
+        balances: Dataset(schemas.AccountBalance),
 
         /// See `Gateway.batchLimit`. Never 0: a single event is never
         /// recorded as too big (`createBatch`), so `too_big >= 2`.
@@ -176,6 +188,66 @@ pub const Gateway = struct {
                 },
             };
         }
+
+        /// One read request (`lookup_*`, `query_*`, `get_account_*`) whose
+        /// reply is records of type `R`, at most `reply.len` of them.
+        fn submitRecords(self: *Shared, comptime R: type, op: c.TB_OPERATION, events: []const u8, reply: []R) Error![]R {
+            const len = self.submit(op, events, std.mem.sliceAsBytes(reply)) catch |err| switch (err) {
+                // One filter, or at most 64 ids, is far below any cluster's
+                // smallest request (see `reads.lookup_max`).
+                error.TooMuchData => return error.Unexpected,
+                else => |e| return e,
+            };
+            if (len % @sizeOf(R) != 0) {
+                log.debug("a read reply of {d} bytes isn't whole records", .{len});
+                return error.Unexpected;
+            }
+            return reply[0 .. len / @sizeOf(R)];
+        }
+
+        /// `op` (`query_*` or `get_account_*`) from `base`, its filter, a
+        /// page at a time: each page starts past the last timestamp of the
+        /// one before (`reads.advance`). Calls `sink.take(row)` for every
+        /// row, in the order they come, which returns whether it kept it,
+        /// until `want` are kept (null: all of them). At most `scan_max`
+        /// rows are fetched, or `error.ScanLimitExceeded`.
+        fn scanPages(self: *Shared, comptime R: type, op: c.TB_OPERATION, base: anytype, want: ?usize, sink: anytype) Error!void {
+            if (want == 0) return;
+            const page_max: u32 = @intCast(@min(want orelse reads.query_max, reads.query_max, self.scan_max));
+            const page = try self.allocator.alloc(R, page_max);
+            defer self.allocator.free(page);
+
+            var filter = base;
+            var kept: usize = 0;
+            var fetched: u64 = 0;
+            // Once a row is dropped, pages may need more rows than the
+            // matches still missing.
+            var dropped = false;
+            // Every page but the last is full, so `fetched` grows by at
+            // least one per page, and `scan_max` bounds the loop. A page is
+            // never bigger than what is left of `scan_max`, so a read that
+            // stops there fetched exactly `scan_max` rows.
+            while (fetched < self.scan_max) {
+                const missing: u64 = if (want) |w| (if (dropped) page_max else w - kept) else page_max;
+                const asked: u32 = @intCast(@min(page_max, missing, self.scan_max - fetched));
+                std.debug.assert(asked > 0);
+                filter.limit = asked;
+                const rows = try self.submitRecords(R, op, std.mem.asBytes(&filter), page[0..asked]);
+                fetched += rows.len;
+                for (rows) |row| {
+                    if (!try sink.take(row)) {
+                        dropped = true;
+                        continue;
+                    }
+                    kept += 1;
+                    if (kept == want) return;
+                }
+                // A short page is the last (see `reads.query_max`).
+                if (rows.len < asked) return;
+                if (!reads.advance(&filter, rows[rows.len - 1].timestamp)) return;
+            }
+            return error.ScanLimitExceeded;
+        }
     };
 
     /// Starts the client. It connects in the background: an unreachable
@@ -193,6 +265,7 @@ pub const Gateway = struct {
             .scan_max = config.scan_max,
             .accounts = .{ .shared = shared },
             .transfers = .{ .shared = shared },
+            .balances = .{ .shared = shared },
         };
 
         const cluster_id: [16]u8 = @bitCast(std.mem.nativeToLittle(u128, config.cluster_id));
@@ -220,18 +293,24 @@ pub const Gateway = struct {
         self.* = undefined;
     }
 
-    /// One of zom-tigerbeetle's two datasets. `S` must be a `zom.Schema`
-    /// of `tb.Account` or `tb.Transfer` keyed by `.id`, such as
-    /// `zom_tigerbeetle.Account`; the dataset name is not used, since
-    /// TigerBeetle's are fixed.
+    /// One of zom-tigerbeetle's datasets. `S` must be a `zom.Schema` of
+    /// `tb.Account` or `tb.Transfer` keyed by `.id`, such as
+    /// `zom_tigerbeetle.Account`, or of `tb.AccountBalance` keyed by
+    /// `.timestamp` (the read-only balance view); the dataset name is not
+    /// used, since TigerBeetle's are fixed. Every schema over a tuple shares
+    /// that tuple's one dataset, so this is the fixed schema's dataset type.
     pub fn Dataset(comptime S: type) type {
         comptime checkSchema(S);
-        return TbDataset(S);
+        if (S.Tuple == tb.Account) return TbDataset(schemas.Account);
+        if (S.Tuple == tb.Transfer) return TbDataset(schemas.Transfer);
+        return BalanceDataset(schemas.AccountBalance);
     }
 
     /// The dataset for `S`. The pointer stays valid until `deinit`.
     pub fn dataset(self: *Gateway, comptime S: type) error{}!*Dataset(S) {
-        return if (S.Tuple == tb.Account) &self.shared.accounts else &self.shared.transfers;
+        if (comptime S.Tuple == tb.Account) return &self.shared.accounts;
+        if (comptime S.Tuple == tb.Transfer) return &self.shared.transfers;
+        return &self.shared.balances;
     }
 
     /// How many requests this gateway has sent to the cluster, e.g. to see
@@ -278,11 +357,13 @@ pub const Gateway = struct {
 fn checkSchema(comptime S: type) void {
     if (!@hasDecl(S, "is_zom_schema"))
         @compileError("zom-tigerbeetle: Dataset takes a zom.Schema, found `" ++ @typeName(S) ++ "`");
-    if (S.Tuple != tb.Account and S.Tuple != tb.Transfer)
+    if (S.Tuple != tb.Account and S.Tuple != tb.Transfer and S.Tuple != tb.AccountBalance)
         @compileError("zom-tigerbeetle: TigerBeetle's schemas are fixed; schema \"" ++ S.name ++ "\" must be a zom.Schema of " ++
-            "zom_tigerbeetle.tb.Account or .Transfer (or use zom_tigerbeetle.Account / .Transfer), found `" ++ @typeName(S.Tuple) ++ "`");
-    if (S.primary_key != .id)
-        @compileError("zom-tigerbeetle: schema \"" ++ S.name ++ "\" must have `.id` as its primary key, found `." ++ @tagName(S.primary_key) ++ "`");
+            "zom_tigerbeetle.tb.Account, .Transfer or .AccountBalance (or use zom_tigerbeetle.Account / .Transfer / .AccountBalance), found `" ++
+            @typeName(S.Tuple) ++ "`");
+    const pk = if (S.Tuple == tb.AccountBalance) "timestamp" else "id";
+    if (!std.mem.eql(u8, @tagName(S.primary_key), pk))
+        @compileError("zom-tigerbeetle: schema \"" ++ S.name ++ "\" must have `." ++ pk ++ "` as its primary key, found `." ++ @tagName(S.primary_key) ++ "`");
 }
 
 fn TbDataset(comptime S: type) type {
@@ -388,35 +469,22 @@ fn TbDataset(comptime S: type) type {
         /// is applied by reading the skipped rows.
         pub fn read(self: *Self, query: Q, allocator: Allocator) Gateway.Error![]T {
             const p = reads.plan(T, &query);
-            var rows: Collect = .{ .allocator = allocator };
+            var rows: Collect(T) = .{ .allocator = allocator };
             errdefer rows.items.deinit(allocator);
             // Sorting needs every match; otherwise the first offset + limit do.
-            try self.scan(&query, p, if (p.sort) null else wanted(&query), &rows);
-
-            const items = rows.items.items;
-            if (p.sort) std.mem.sort(T, items, query.orderSlice(), Q.lessThan);
-            const start, const end = reads.window(items.len, query.offset, query.limit);
-            std.mem.copyForwards(T, items[0 .. end - start], items[start..end]);
-            rows.items.shrinkRetainingCapacity(end - start);
-            return rows.items.toOwnedSlice(allocator);
+            try self.scan(&query, p, if (p.sort) null else wanted(Q, &query), &rows);
+            return finish(T, &rows, &query, p.sort);
         }
 
         /// How many rows `read` would return. TigerBeetle has no count, so
         /// this reads them, page by page, and keeps none: up to `offset +
         /// limit` rows, or every match, at most `Config.scan_max`.
         pub fn count(self: *Self, query: Q) Gateway.Error!usize {
-            var counter: Counter = .{};
+            var counter: Counter(T) = .{};
             // The order changes which rows, not how many.
-            try self.scan(&query, reads.plan(T, &query), wanted(&query), &counter);
+            try self.scan(&query, reads.plan(T, &query), wanted(Q, &query), &counter);
             const start, const end = reads.window(counter.n, query.offset, query.limit);
             return end - start;
-        }
-
-        /// The matches a read needs, null for all: `offset + limit`.
-        fn wanted(query: *const Q) ?usize {
-            const l = query.limit orelse return null;
-            if (l == 0) return 0;
-            return std.math.add(usize, l, query.offset) catch null;
         }
 
         /// Sends `p`'s requests and calls `sink.add(row)` for each row
@@ -428,7 +496,7 @@ fn TbDataset(comptime S: type) type {
                 .none => {},
                 .lookup => |ids| {
                     var reply: [reads.lookup_max]T = undefined;
-                    const rows = try self.submitRead(lookup_operation, std.mem.sliceAsBytes(ids.slice()), reply[0..ids.len]);
+                    const rows = try self.shared.submitRecords(T, lookup_operation, std.mem.sliceAsBytes(ids.slice()), reply[0..ids.len]);
                     var matched: usize = 0;
                     for (rows) |row| {
                         if (!query.matches(row)) continue;
@@ -437,82 +505,104 @@ fn TbDataset(comptime S: type) type {
                         if (matched == want) return;
                     }
                 },
-                .query => |filter| try self.scanQuery(query, filter, want, sink),
+                .query => |filter| try self.shared.scanPages(T, query_operation, filter, want, Matching(T, @TypeOf(sink)){ .query = query, .inner = sink }),
             }
         }
 
-        /// `query_*` from `base`, a page at a time: each page starts past
-        /// the last timestamp of the one before (`reads.advance`).
-        fn scanQuery(self: *Self, query: *const Q, base: c.tb_query_filter_t, want: ?usize, sink: anytype) Gateway.Error!void {
-            const shared = self.shared;
-            const page_max: u32 = @intCast(@min(want orelse reads.query_max, reads.query_max, shared.scan_max));
-            const page = try shared.allocator.alloc(T, page_max);
-            defer shared.allocator.free(page);
-
-            var filter = base;
-            var matched: usize = 0;
-            var fetched: u64 = 0;
-            // Once a row is filtered out here, pages may need more rows
-            // than the matches still missing.
-            var dropped = false;
-            // Every page but the last is full, so `fetched` grows by at
-            // least one per page, and `scan_max` bounds the loop. A page is
-            // never bigger than what is left of `scan_max`, so a read that
-            // stops there fetched exactly `scan_max` rows.
-            while (fetched < shared.scan_max) {
-                const missing: u64 = if (want) |w| (if (dropped) page_max else w - matched) else page_max;
-                const asked: u32 = @intCast(@min(page_max, missing, shared.scan_max - fetched));
-                std.debug.assert(asked > 0);
-                filter.limit = asked;
-                const rows = try self.submitRead(query_operation, std.mem.asBytes(&filter), page[0..asked]);
-                fetched += rows.len;
-                for (rows) |row| {
-                    if (!query.matches(row)) {
-                        dropped = true;
-                        continue;
-                    }
-                    try sink.add(row);
-                    matched += 1;
-                    if (matched == want) return;
-                }
-                // A short page is the last (see `reads.query_max`).
-                if (rows.len < asked) return;
-                if (!reads.advance(&filter, rows[rows.len - 1].timestamp)) return;
-            }
-            return error.ScanLimitExceeded;
-        }
-
-        /// One `lookup_*` or `query_*` request; the reply is records.
-        fn submitRead(self: *Self, op: c.TB_OPERATION, events: []const u8, reply: []T) Gateway.Error![]T {
-            const len = self.shared.submit(op, events, std.mem.sliceAsBytes(reply)) catch |err| switch (err) {
-                // One filter, or at most 64 ids, is far below any cluster's
-                // smallest request (see `reads.lookup_max`).
-                error.TooMuchData => return error.Unexpected,
-                else => |e| return e,
-            };
-            if (len % @sizeOf(T) != 0) {
-                log.debug("a read reply of {d} bytes isn't whole records", .{len});
-                return error.Unexpected;
-            }
-            return reply[0 .. len / @sizeOf(T)];
-        }
-
-        const Collect = struct {
+        /// Each key's rows of association `a` (declared on another schema,
+        /// pointing at this one), for zom's `combine` (see combine.zig): one
+        /// slice per key, in the order of `keys`, each read with `query`
+        /// (the combined relation's) and allocated with `allocator`. How is
+        /// chosen at compile time:
+        ///
+        /// - `Account.transfers` (`zom.customAssociation(.., .account_transfers, ..)`)
+        ///   and a `hasMany` on `debit_account_id` / `credit_account_id`:
+        ///   `get_account_transfers` for each account, both sides or the one
+        ///   named. A transfer between two of the accounts is in both slices.
+        /// - a `belongsTo`: `lookup_*` of the ids, `lookup_max` at a time.
+        /// - a `hasMany` on `user_data_128/64/32`, `ledger` or `code`: one
+        ///   read per key, `query.where(fk, .eq, key)`, through `query_*`.
+        ///
+        /// Anything else is a compile error. Each read is bounded by
+        /// `Config.scan_max` on its own. The query's filters and order apply
+        /// to each slice, whatever TigerBeetle evaluated (`Query.matches`
+        /// checks every row, an order other than `timestamp` sorts it).
+        pub fn loadAssociation(
+            self: *Self,
+            comptime a: zom.Association,
+            keys: []const a.Key(),
+            query: Q,
             allocator: Allocator,
-            items: std.ArrayList(T) = .empty,
-
-            fn add(self: *Collect, row: T) Allocator.Error!void {
-                try self.items.append(self.allocator, row);
+        ) Gateway.Error![]const []const T {
+            const how = comptime loadHow(a);
+            const groups = try allocator.alloc([]const T, keys.len);
+            switch (how) {
+                .account_transfers => |sides| for (keys, groups) |id, *g| {
+                    g.* = try self.accountTransfers(&query, id, sides, allocator);
+                },
+                .lookup => {
+                    @memset(groups, &.{});
+                    var start: usize = 0;
+                    while (start < keys.len) : (start += reads.lookup_max) {
+                        const chunk = keys[start..@min(start + reads.lookup_max, keys.len)];
+                        const rows = try self.read(query.whereIn(.id, chunk), allocator);
+                        // At most one row per id, so a key's group is that row.
+                        for (rows, 0..) |row, r| for (chunk, start..) |id, k| {
+                            if (row.id == id) groups[k] = rows[r..][0..1];
+                        };
+                    }
+                },
+                .by_field => |field| for (keys, groups) |key, *g| {
+                    g.* = try self.read(query.where(field, .eq, key), allocator);
+                },
             }
+            return groups;
+        }
+
+        const How = union(enum) {
+            account_transfers: u32,
+            lookup,
+            by_field: Q.Field,
         };
 
-        const Counter = struct {
-            n: usize = 0,
-
-            fn add(self: *Counter, _: T) error{}!void {
-                self.n += 1;
+        fn loadHow(comptime a: zom.Association) How {
+            const where = "zom-tigerbeetle: combine(." ++ a.name ++ ") from \"" ++ a.source.name ++ "\" into \"" ++ S.name ++ "\"";
+            switch (a.kind) {
+                .custom => {
+                    if (is_account or !std.mem.eql(u8, a.tag, "account_transfers"))
+                        @compileError(where ++ ": unknown custom association `." ++ a.tag ++ "` (the transfers dataset loads `.account_transfers`)");
+                    if (a.Key() != u128)
+                        @compileError(where ++ ": `.account_transfers` needs a u128 account id key, found `" ++ @typeName(a.Key()) ++ "`");
+                    return .{ .account_transfers = c.TB_ACCOUNT_FILTER_DEBITS | c.TB_ACCOUNT_FILTER_CREDITS };
+                },
+                .belongs_to => return .lookup,
+                .has_many => {
+                    if (!is_account) {
+                        if (std.mem.eql(u8, a.foreign_key, "debit_account_id")) return .{ .account_transfers = c.TB_ACCOUNT_FILTER_DEBITS };
+                        if (std.mem.eql(u8, a.foreign_key, "credit_account_id")) return .{ .account_transfers = c.TB_ACCOUNT_FILTER_CREDITS };
+                    }
+                    for (reads.query_fields) |f| {
+                        if (std.mem.eql(u8, a.foreign_key, f)) return .{ .by_field = std.meta.stringToEnum(Q.Field, f).? };
+                    }
+                    @compileError(where ++ ": TigerBeetle can't find rows by '" ++ a.foreign_key ++ "'; a hasMany needs " ++
+                        (if (is_account) "" else "debit_account_id, credit_account_id, ") ++
+                        "user_data_128, user_data_64, user_data_32, ledger or code as its foreign key");
+                },
             }
-        };
+        }
+
+        /// `get_account_transfers` of one account, filtered and ordered by
+        /// `query` (and windowed by its offset and limit, though `combine`
+        /// passes none).
+        fn accountTransfers(self: *Self, query: *const Q, account_id: u128, sides: u32, allocator: Allocator) Gateway.Error![]const T {
+            const filter = reads.accountFilter(T, query, account_id, sides) orelse return &.{};
+            const sort = reads.sorts(T, query);
+            var rows: Collect(T) = .{ .allocator = allocator };
+            errdefer rows.items.deinit(allocator);
+            const sink: Matching(T, *Collect(T)) = .{ .query = query, .inner = &rows };
+            try self.shared.scanPages(T, c.TB_OPERATION_GET_ACCOUNT_TRANSFERS, filter, if (sort) null else wanted(Q, query), sink);
+            return finish(T, &rows, query, sort);
+        }
 
         fn errorFor(status: u32) ?InsertError {
             const code: Code = @enumFromInt(status);
@@ -603,6 +693,151 @@ fn TbDataset(comptime S: type) type {
                 try self.items.append(self.allocator, .{ .index = index, .code = code });
             }
         };
+    };
+}
+
+/// The read-only balance view: `zom_tigerbeetle.AccountBalance`, rows of
+/// `tb.AccountBalance`, read through `get_account_balances`, one account
+/// at a time. A read needs a top-level `account_id` filter (`eq` or `in`,
+/// so `whereIn` and `combine(.balances, ...)` work); without one it is
+/// `error.AccountIdRequired`, since TigerBeetle can't list every account's
+/// history. `timestamp` ranges and a `timestamp` order go to the cluster;
+/// the other filters (balances by value) are `allowFallback()` ones, and
+/// `offset` too. Only accounts created with `flags.history` have rows.
+fn BalanceDataset(comptime S: type) type {
+    const T = S.Tuple;
+    const Q = zom.Query(T);
+    return struct {
+        const Self = @This();
+
+        shared: *Gateway.Shared,
+
+        pub const ReadError = Gateway.Error || error{
+            /// The query has no `account_id` filter by `eq` or `in`.
+            AccountIdRequired,
+        };
+
+        pub const supports: zom.Supports = .{ .in = true, .offset = false };
+
+        /// `account_id` by `eq` / `in`; `timestamp` by `eq`, `lt`, `lte`,
+        /// `gt`, `gte` and `between`.
+        pub fn filterable(comptime field: []const u8, comptime op: zom.Op) bool {
+            if (comptime std.mem.eql(u8, field, "account_id")) return op == .eq or op == .in;
+            if (comptime std.mem.eql(u8, field, "timestamp")) return reads.filterable(field, op);
+            return false;
+        }
+
+        /// `timestamp` only.
+        pub const orderable = reads.orderable;
+
+        /// The balances matching `query`, account by account in the order
+        /// of its `account_id` filter, each by `timestamp` (descending with
+        /// `order(.timestamp, .desc)`). Several accounts with an order, or
+        /// an order by anything but `timestamp`, are sorted in memory.
+        pub fn read(self: *Self, query: Q, allocator: Allocator) ReadError![]T {
+            var rows: Collect(T) = .{ .allocator = allocator };
+            errdefer rows.items.deinit(allocator);
+            const sort = try self.scan(&query, true, &rows);
+            return finish(T, &rows, &query, sort);
+        }
+
+        /// How many rows `read` would return; it reads them, as `count`
+        /// does on the other datasets.
+        pub fn count(self: *Self, query: Q) ReadError!usize {
+            var counter: Counter(T) = .{};
+            _ = try self.scan(&query, false, &counter);
+            const start, const end = reads.window(counter.n, query.offset, query.limit);
+            return end - start;
+        }
+
+        /// One `get_account_balances` scan per account. Returns whether the
+        /// rows must still be sorted, which only a read (`ordered`) does: a
+        /// count doesn't care about order.
+        fn scan(self: *Self, query: *const Q, ordered: bool, sink: anytype) ReadError!bool {
+            const ids = reads.idsOf(T, query, .account_id) orelse return error.AccountIdRequired;
+            const sort = ordered and query.orderSlice().len > 0 and (ids.len > 1 or reads.sorts(T, query));
+            // Without a sort, the first offset + limit matches are enough.
+            const want = if (sort) null else wanted(Q, query);
+            var kept: usize = 0;
+            for (ids.slice()) |id| {
+                const remaining = if (want) |w| w - kept else null;
+                if (remaining == 0) break;
+                const filter = reads.accountFilter(T, query, id, c.TB_ACCOUNT_FILTER_DEBITS | c.TB_ACCOUNT_FILTER_CREDITS) orelse continue;
+                const each: BalanceSink(@TypeOf(sink)) = .{ .account_id = id, .query = query, .inner = sink, .kept = &kept };
+                try self.shared.scanPages(c.tb_account_balance_t, c.TB_OPERATION_GET_ACCOUNT_BALANCES, filter, remaining, each);
+            }
+            return sort;
+        }
+
+        fn BalanceSink(comptime Inner: type) type {
+            return struct {
+                account_id: u128,
+                query: *const Q,
+                inner: Inner,
+                kept: *usize,
+
+                fn take(self: @This(), raw: c.tb_account_balance_t) !bool {
+                    const row = T.of(self.account_id, raw);
+                    if (!self.query.matches(row)) return false;
+                    try self.inner.add(row);
+                    self.kept.* += 1;
+                    return true;
+                }
+            };
+        }
+    };
+}
+
+/// The matches a read needs, null for all: `offset + limit`.
+fn wanted(comptime Q: type, query: *const Q) ?usize {
+    const l = query.limit orelse return null;
+    if (l == 0) return 0;
+    return std.math.add(usize, l, query.offset) catch null;
+}
+
+/// The rows a read collected, sorted by `query` when `sort`, then cut to its
+/// offset and limit, as an owned slice.
+fn finish(comptime T: type, rows: *Collect(T), query: *const zom.Query(T), sort: bool) Allocator.Error![]T {
+    const items = rows.items.items;
+    if (sort) std.mem.sort(T, items, query.orderSlice(), zom.Query(T).lessThan);
+    const start, const end = reads.window(items.len, query.offset, query.limit);
+    std.mem.copyForwards(T, items[0 .. end - start], items[start..end]);
+    rows.items.shrinkRetainingCapacity(end - start);
+    return rows.items.toOwnedSlice(rows.allocator);
+}
+
+fn Collect(comptime T: type) type {
+    return struct {
+        allocator: Allocator,
+        items: std.ArrayList(T) = .empty,
+
+        fn add(self: *@This(), row: T) Allocator.Error!void {
+            try self.items.append(self.allocator, row);
+        }
+    };
+}
+
+fn Counter(comptime T: type) type {
+    return struct {
+        n: usize = 0,
+
+        fn add(self: *@This(), _: T) error{}!void {
+            self.n += 1;
+        }
+    };
+}
+
+/// A `scanPages` sink keeping the rows that match `query`, into `inner`.
+fn Matching(comptime T: type, comptime Inner: type) type {
+    return struct {
+        query: *const zom.Query(T),
+        inner: Inner,
+
+        fn take(self: @This(), row: T) !bool {
+            if (!self.query.matches(row)) return false;
+            try self.inner.add(row);
+            return true;
+        }
     };
 }
 
@@ -1088,4 +1323,159 @@ test "lint read checks: every query agrees with the same one in memory" {
         const count = if (@TypeOf(case).mode == .fallback) try case.count(testing.allocator) else try case.count();
         try testing.expectEqual(want.items.len, count);
     }
+}
+
+const Balances = zom.Relation(schemas.AccountBalance, Gateway);
+
+/// Two accounts with history and three transfers between them, created one
+/// at a time so their timestamps go up in this order: 10 from a to b, 3
+/// from b to a (code 2), 5 from a to b.
+fn seedHistory(accounts: Accounts, transfers: Transfers) !struct { u128, u128, [3]tb.Transfer } {
+    const base = freshIds();
+    const history = tb.AccountFlags.bits(.{ .history = true });
+    const a = base + 1;
+    const b = base + 2;
+    _ = try accounts.createMany(&.{
+        .{ .id = a, .ledger = 700, .code = 10, .flags = history },
+        .{ .id = b, .ledger = 700, .code = 10, .flags = history },
+    }).commit();
+    var stored: [3]tb.Transfer = undefined;
+    const rows = [_]tb.Transfer{
+        .{ .id = base + 10, .debit_account_id = a, .credit_account_id = b, .amount = 10, .ledger = 700, .code = 1 },
+        .{ .id = base + 11, .debit_account_id = b, .credit_account_id = a, .amount = 3, .ledger = 700, .code = 2 },
+        .{ .id = base + 12, .debit_account_id = a, .credit_account_id = b, .amount = 5, .ledger = 700, .code = 1 },
+    };
+    for (&stored, rows) |*s, row| s.* = try transfers.create(row).commit();
+    return .{ a, b, stored };
+}
+
+fn expectTransfers(want: []const tb.Transfer, got: []const tb.Transfer) !void {
+    try testing.expectEqual(want.len, got.len);
+    for (want, got) |w, g| try testing.expectEqual(w, g);
+}
+
+test "combine(.transfers) and combine(.balances): an account's history" {
+    var gateway = try testGateway(.{});
+    defer gateway.deinit();
+    const accounts = try Accounts.init(&gateway);
+    const transfers = try Transfers.init(&gateway);
+    const balances = try Balances.init(&gateway);
+    const a, const b, const t = try seedHistory(accounts, transfers);
+    const alloc = testing.allocator;
+
+    // The transfers of `a`, as debit and as credit account: one lookup for
+    // the account, one get_account_transfers.
+    const WithTransfers = struct { id: u128, transfers: []const tb.Transfer };
+    var before = gateway.requestCount();
+    var history = try accounts.byPk(a).combine(.transfers, transfers).mapTo(WithTransfers, alloc);
+    defer history.deinit();
+    try testing.expectEqual(2, gateway.requestCount() - before);
+    try testing.expectEqual(1, history.items.len);
+    try testing.expectEqual(a, history.items[0].id);
+    try expectTransfers(&t, history.items[0].transfers);
+
+    // And its balances after each of them: one lookup, one get_account_balances.
+    const WithBalances = struct { id: u128, balances: []const tb.AccountBalance };
+    before = gateway.requestCount();
+    var balanced = try accounts.byPk(a).combine(.balances, balances).mapTo(WithBalances, alloc);
+    defer balanced.deinit();
+    try testing.expectEqual(2, gateway.requestCount() - before);
+    const rows = balanced.items[0].balances;
+    try testing.expectEqual(3, rows.len);
+    const debits = [_]u128{ 10, 10, 15 };
+    const credits = [_]u128{ 0, 3, 3 };
+    for (rows, t, debits, credits) |row, transfer, d, c_| {
+        try testing.expectEqual(a, row.account_id);
+        try testing.expectEqual(transfer.timestamp, row.timestamp);
+        try testing.expectEqual(d, row.debits_posted);
+        try testing.expectEqual(c_, row.credits_posted);
+        try testing.expectEqual(0, row.debits_pending);
+    }
+
+    // The combined relation's filters and order: code is in the
+    // AccountFilter, a timestamp desc order is its reversed flag, and
+    // ledger (not in it) is checked on the rows.
+    var coded = try accounts.byPk(a).combine(.transfers, transfers.where(.code, .eq, 1).where(.ledger, .eq, 700).order(.timestamp, .desc)).mapTo(WithTransfers, alloc);
+    defer coded.deinit();
+    try expectTransfers(&.{ t[2], t[0] }, coded.items[0].transfers);
+
+    // Two accounts: every transfer is in both, each once per account.
+    var both = try accounts.whereIn(.id, &[_]u128{ b, a }).combine(.transfers, transfers).mapTo(WithTransfers, alloc);
+    defer both.deinit();
+    try testing.expectEqual(2, both.items.len);
+    for (both.items) |item| try expectTransfers(&t, item.transfers);
+
+    // A paged target is refused, as for any combine.
+    try testing.expectError(error.PagedCombineTarget, accounts.byPk(a).combine(.transfers, transfers.limit(1)).mapTo(WithTransfers, alloc));
+}
+
+test "belongsTo into accounts is a lookup; hasMany by debit or credit account picks one side" {
+    var gateway = try testGateway(.{});
+    defer gateway.deinit();
+    const accounts = try Accounts.init(&gateway);
+    const transfers = try Transfers.init(&gateway);
+    const a, const b, const t = try seedHistory(accounts, transfers);
+    const alloc = testing.allocator;
+
+    const WithDebit = struct { id: u128, debit_account: ?tb.Account };
+    const before = gateway.requestCount();
+    var paid = try transfers.whereIn(.id, &[_]u128{ t[0].id, t[1].id }).combine(.debit_account, accounts).mapTo(WithDebit, alloc);
+    defer paid.deinit();
+    // One lookup of the transfers, one of their two debit accounts.
+    try testing.expectEqual(2, gateway.requestCount() - before);
+    try testing.expectEqual(a, paid.items[0].debit_account.?.id);
+    try testing.expectEqual(b, paid.items[1].debit_account.?.id);
+
+    // A schema of the caller's own, over the same accounts, with a hasMany
+    // on either side, and one on an indexed field.
+    const Sided = zom.Schema(tb.Account, "sided_accounts", .id, .{
+        .associations = struct {
+            pub const debits = zom.hasMany(schemas.Transfer, .debit_account_id);
+            pub const credits = zom.hasMany(schemas.Transfer, .credit_account_id);
+            pub const tagged = zom.hasMany(schemas.Transfer, .user_data_128);
+        },
+    });
+    const sided = try zom.Relation(Sided, Gateway).init(&gateway);
+    const both = sided.whereIn(.id, &[_]u128{ a, b }).order(.timestamp, .asc);
+    var debits = try both.combine(.debits, transfers).mapTo(struct { id: u128, debits: []const tb.Transfer }, alloc);
+    defer debits.deinit();
+    try expectTransfers(&.{ t[0], t[2] }, debits.items[0].debits);
+    try expectTransfers(&.{t[1]}, debits.items[1].debits);
+    var credits = try both.combine(.credits, transfers).mapTo(struct { id: u128, credits: []const tb.Transfer }, alloc);
+    defer credits.deinit();
+    try expectTransfers(&.{t[1]}, credits.items[0].credits);
+    try expectTransfers(&.{ t[0], t[2] }, credits.items[1].credits);
+    // One query_transfers per account: none of the seeded transfers has
+    // user_data_128 = a or b.
+    const reads_before = gateway.requestCount();
+    var tagged = try both.combine(.tagged, transfers).mapTo(struct { id: u128, tagged: []const tb.Transfer }, alloc);
+    defer tagged.deinit();
+    try testing.expectEqual(3, gateway.requestCount() - reads_before);
+    try testing.expectEqual(0, tagged.items[0].tagged.len + tagged.items[1].tagged.len);
+}
+
+test "AccountBalance: read by account_id, ordered and limited; without one, AccountIdRequired" {
+    var gateway = try testGateway(.{});
+    defer gateway.deinit();
+    const accounts = try Accounts.init(&gateway);
+    const transfers = try Transfers.init(&gateway);
+    const balances = try Balances.init(&gateway);
+    const a, const b, const t = try seedHistory(accounts, transfers);
+    const alloc = testing.allocator;
+
+    const latest = (try balances.where(.account_id, .eq, b).order(.timestamp, .desc).first(alloc)).?;
+    try testing.expectEqual(t[2].timestamp, latest.timestamp);
+    try testing.expectEqual(3, latest.debits_posted);
+    try testing.expectEqual(15, latest.credits_posted);
+
+    try testing.expectEqual(3, try balances.where(.account_id, .eq, a).count());
+    try testing.expectEqual(1, try balances.where(.account_id, .eq, a).where(.timestamp, .gt, t[1].timestamp).count());
+    // Two accounts, newest first across both: sorted in memory.
+    const newest = try balances.whereIn(.account_id, &[_]u128{ a, b }).order(.timestamp, .desc).limit(2).toSlice(alloc);
+    defer alloc.free(newest);
+    try testing.expectEqual(2, newest.len);
+    try testing.expectEqual(t[2].timestamp, newest[0].timestamp);
+    try testing.expectEqual(t[2].timestamp, newest[1].timestamp);
+
+    try testing.expectError(error.AccountIdRequired, balances.byPk(t[0].timestamp).toSlice(alloc));
 }

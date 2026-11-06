@@ -21,6 +21,33 @@ pub const c = @import("tb_client");
 pub const Account = c.tb_account_t;
 pub const Transfer = c.tb_transfer_t;
 
+/// One row of an account's balance history, as `get_account_balances`
+/// returns it (`tb_account_balance_t`: the account's four balances just
+/// after the transfer with this `timestamp`), plus the account it is of,
+/// which the C struct leaves out because the request names it. The tuple of
+/// the `zom_tigerbeetle.AccountBalance` view; only accounts created with
+/// `flags.history` have rows.
+pub const AccountBalance = struct {
+    account_id: u128 = 0,
+    timestamp: u64 = 0,
+    debits_pending: u128 = 0,
+    debits_posted: u128 = 0,
+    credits_pending: u128 = 0,
+    credits_posted: u128 = 0,
+
+    /// `balance` (a reply record) of `account_id`.
+    pub fn of(account_id: u128, balance: c.tb_account_balance_t) AccountBalance {
+        return .{
+            .account_id = account_id,
+            .timestamp = balance.timestamp,
+            .debits_pending = balance.debits_pending,
+            .debits_posted = balance.debits_posted,
+            .credits_pending = balance.credits_pending,
+            .credits_posted = balance.credits_posted,
+        };
+    }
+};
+
 /// The most events one `create_accounts` / `create_transfers` request takes
 /// in TigerBeetle's default configuration (docs/coding/requests.md). The
 /// cluster sets the real limit (a `--development` one takes 253), and the
@@ -86,6 +113,8 @@ comptime {
         std.debug.assert(@alignOf(T) == 16);
         std.debug.assert(@typeInfo(T).@"struct".layout == .@"extern");
     }
+    // A balance reply record is as big as the others, so a page holds as many.
+    std.debug.assert(@sizeOf(c.tb_account_balance_t) == 128);
     std.debug.assert(@FieldType(Account, "flags") == u16);
     std.debug.assert(@FieldType(Transfer, "flags") == u16);
     std.debug.assert(c.TB_ACCOUNT_LINKED == c.TB_TRANSFER_LINKED);

@@ -9,6 +9,30 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- zom-tigerbeetle account history: `accounts.combine(.transfers, transfers)`
+  loads each account's transfers through `get_account_transfers` (debit
+  and credit side), and `.combine(.balances, balances)` its balance history
+  through `get_account_balances`. `Account` declares `transfers` (a custom
+  association) and `balances` (`hasMany` on `account_id`), and `Transfer`
+  declares `debit_account` and `credit_account` (`belongsTo`, read through
+  `lookup_accounts`). The new read-only `zom_tigerbeetle.AccountBalance`
+  view (rows of `tb.AccountBalance`, keyed by `timestamp`) needs an
+  `account_id` filter, else `error.AccountIdRequired`. The record datasets'
+  `loadAssociation` picks the request per association at compile time: a
+  `hasMany` on `debit_account_id` / `credit_account_id` reads one side, one
+  on an indexed field is one `query_*` per key, and any other is a compile
+  error. ([#57])
+- Custom associations: `zom.customAssociation(Target, .tag, .many | .one)`
+  declares an association with no foreign key zom can use
+  (`AssociationKind.custom`). `Association` gains `cardinality`
+  (`zom.Cardinality`), `tag` and `Key()`. A custom association can't be
+  joined or associated (compile errors). ([#57])
+- Adapter contract: an optional `loadAssociation(comptime a, keys, query,
+  allocator)` on a dataset takes over every `combine` into it, in place of
+  the `in` queries and hash-map grouping. It returns one slice of rows per
+  key, allocated in the result's arena. Combining a custom association
+  needs it. ([#57])
+
 - zom-tigerbeetle reads: `byPk` and `where(.id, .in, ...)` are one
   `lookup_accounts` / `lookup_transfers`; `eq` on `user_data_128/64/32`,
   `ledger` and `code` and `timestamp` ranges (`eq`, `lt`, `lte`, `gt`,
@@ -102,6 +126,9 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Fixed
 
+- zom-tigerbeetle: a relation over a `zom.Schema` of your own over
+  `tb.Account` or `tb.Transfer` compiles. `Gateway.Dataset(S)` is now the
+  fixed schema's dataset type, which `gateway.dataset(S)` returns. ([#57])
 - The memory adapter no longer overflows on `offset(n).limit(k)` when
   `n + k` is past `usize`, e.g. `limit(maxInt(usize))`. ([#50])
 
@@ -724,3 +751,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#54]: https://github.com/kamalogudah/zom/issues/54
 [#55]: https://github.com/kamalogudah/zom/issues/55
 [#56]: https://github.com/kamalogudah/zom/issues/56
+[#57]: https://github.com/kamalogudah/zom/issues/57

@@ -1,4 +1,4 @@
-// expect: zom.Schema: association 'posts' must be zom.hasMany(...) or zom.belongsTo(...), found `@EnumLiteral()`
+// expect: zom.Schema: association 'posts' must be zom.hasMany(...), zom.belongsTo(...) or zom.customAssociation(...), found `@EnumLiteral()`
 const zom = @import("zom");
 
 const User = struct { id: u32 };

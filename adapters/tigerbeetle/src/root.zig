@@ -9,7 +9,9 @@
 //!     const accounts = try zom.Relation(zom_tigerbeetle.Account, zom_tigerbeetle.Gateway).init(&gateway);
 //!
 //! The schemas are fixed: `Account` and `Transfer`, over the client's own
-//! `tb.Account` and `tb.Transfer` structs, keyed by `id`. Records are
+//! `tb.Account` and `tb.Transfer` structs, keyed by `id`, and the read-only
+//! `AccountBalance` view. `accounts.combine(.transfers, transfers)` and
+//! `.combine(.balances, balances)` load an account's history. Records are
 //! immutable, so there is no update or delete: `create` and `createMany`
 //! are the writes, and fail with the result code's error
 //! (`error.ExceedsCredits`, ...; see results.zig). See gateway.zig, and
@@ -21,6 +23,9 @@ pub const tb = @import("tb.zig");
 
 pub const Account = @import("schemas.zig").Account;
 pub const Transfer = @import("schemas.zig").Transfer;
+/// The read-only view of an account's balance history
+/// (`get_account_balances`): rows of `tb.AccountBalance`.
+pub const AccountBalance = @import("schemas.zig").AccountBalance;
 
 pub const Gateway = @import("gateway.zig").Gateway;
 

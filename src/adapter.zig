@@ -42,6 +42,12 @@
 //!   pub fn filterable(comptime field: []const u8, comptime op: zom.Op) bool
 //!   pub fn orderable(comptime field: []const u8) bool
 //!   pub const strings: zom.StringOwnership           // .dataset when left out
+//!   pub fn loadAssociation(*Self, comptime a: zom.Association,
+//!       []const a.Key(), Q, std.mem.Allocator) ![]const []const S.Tuple
+//!
+//! `loadAssociation` takes over `combine` into this dataset: one call with
+//! every source key, one slice of rows per key back (see combine.zig). A
+//! `zom.customAssociation` can only be combined through it.
 //!
 //! `strings` says who owns the strings in the tuples `read`, `readProjected`
 //! and `insert` return (see strings.zig). With `.dataset` they point into

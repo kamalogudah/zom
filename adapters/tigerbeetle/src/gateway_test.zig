@@ -69,3 +69,41 @@ test "init rejects an address that doesn't parse" {
         .addresses = "not an address",
     }));
 }
+
+test "AccountBalance is a read-only view keyed by timestamp" {
+    const caps = A.capabilities(zom_tigerbeetle.AccountBalance);
+    try testing.expect(!caps.writable and !caps.batch_insert and !caps.updatable and !caps.deletable);
+    try testing.expectEqual(.timestamp, zom_tigerbeetle.AccountBalance.primary_key);
+    const Balances = Gateway.Dataset(zom_tigerbeetle.AccountBalance);
+    comptime {
+        std.debug.assert(Balances.filterable("account_id", .eq) and Balances.filterable("account_id", .in));
+        std.debug.assert(Balances.filterable("timestamp", .between) and !Balances.filterable("debits_posted", .gt));
+        std.debug.assert(Balances.orderable("timestamp") and !Balances.orderable("account_id"));
+    }
+    const missing: Balances.ReadError = error.AccountIdRequired;
+    try testing.expectEqual(error.AccountIdRequired, missing);
+}
+
+test "the fixed schemas' associations" {
+    const transfers = zom_tigerbeetle.Account.association(.transfers);
+    try testing.expectEqual(.custom, transfers.kind);
+    try testing.expectEqualStrings("account_transfers", transfers.tag);
+    try testing.expect(transfers.target == zom_tigerbeetle.Transfer);
+    try testing.expect(transfers.Key() == u128);
+    const balances = zom_tigerbeetle.Account.association(.balances);
+    try testing.expectEqual(.has_many, balances.kind);
+    try testing.expectEqualStrings("account_id", balances.foreign_key);
+    try testing.expectEqual(.belongs_to, zom_tigerbeetle.Transfer.association(.debit_account).kind);
+    try testing.expectEqual(.belongs_to, zom_tigerbeetle.Transfer.association(.credit_account).kind);
+    try testing.expectEqual(.belongs_to, zom_tigerbeetle.AccountBalance.association(.account).kind);
+    // Both record datasets load associations themselves; the balance view
+    // uses zom's generic `in` path.
+    try testing.expect(@hasDecl(Gateway.Dataset(zom_tigerbeetle.Transfer), "loadAssociation"));
+    try testing.expect(@hasDecl(Gateway.Dataset(zom_tigerbeetle.Account), "loadAssociation"));
+    try testing.expect(!@hasDecl(Gateway.Dataset(zom_tigerbeetle.AccountBalance), "loadAssociation"));
+}
+
+test "a schema of your own over a record shares the record's dataset" {
+    const Mine = zom.Schema(zom_tigerbeetle.tb.Account, "my_accounts", .id, .{});
+    try testing.expect(Gateway.Dataset(Mine) == Gateway.Dataset(zom_tigerbeetle.Account));
+}

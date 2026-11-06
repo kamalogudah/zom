@@ -28,6 +28,9 @@ pub const Schema = schema.Schema;
 /// Associations declared on a schema; see schema.zig.
 pub const hasMany = schema.hasMany;
 pub const belongsTo = schema.belongsTo;
+/// An association its target's dataset loads itself (`loadAssociation`).
+pub const customAssociation = schema.customAssociation;
+pub const Cardinality = schema.Cardinality;
 pub const Association = schema.Association;
 pub const AssociationKind = schema.AssociationKind;
 pub const Relation = @import("relation.zig").Relation;
@@ -98,6 +101,7 @@ test {
     _ = @import("tests/owned_test.zig");
     _ = @import("tests/schema_test.zig");
     _ = @import("tests/combine_test.zig");
+    _ = @import("tests/load_association_test.zig");
     _ = @import("tests/join_test.zig");
     _ = @import("tests/associate_test.zig");
     _ = @import("tests/repository_test.zig");

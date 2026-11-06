@@ -36,8 +36,9 @@ const c = tb.c;
 pub const query_max: u32 = 8189;
 
 /// The attributes `query_*` filters on by equality, as named in both
-/// `tb.Account`, `tb.Transfer` and `tb_query_filter_t`.
-const query_fields = [_][]const u8{ "user_data_128", "user_data_64", "user_data_32", "ledger", "code" };
+/// `tb.Account`, `tb.Transfer` and `tb_query_filter_t`. The
+/// `tb_account_filter_t` of `get_account_*` has them all but `ledger`.
+pub const query_fields = [_][]const u8{ "user_data_128", "user_data_64", "user_data_32", "ledger", "code" };
 
 /// The dataset's `filterable` (see adapter.zig): which `field op ...`
 /// filters TigerBeetle evaluates.
@@ -111,17 +112,31 @@ pub const Ids = struct {
 /// The plan for `query`. Only its top-level filters are looked at (the
 /// rest is left to `Query.matches`), so any query has a plan.
 pub fn plan(comptime T: type, query: *const zom.Query(T)) Plan {
-    const Q = zom.Query(T);
     const orders = query.orderSlice();
-    const by_timestamp = orders.len > 0 and orders[0].field == .timestamp;
-
     // The id filter with the fewest ids picks the rows; the others, and
     // every other filter, are checked on what the lookup returns.
+    if (idsOf(T, query, .id)) |ids| {
+        if (ids.len == 0) return .{ .source = .none };
+        return .{ .source = .{ .lookup = ids }, .sort = orders.len > 0 };
+    }
+
+    var filter = std.mem.zeroes(c.tb_query_filter_t);
+    if (!fillFilter(c.tb_query_filter_t, T, query, &filter)) return .{ .source = .none };
+    if (descending(T, query)) filter.flags = c.TB_QUERY_FILTER_REVERSED;
+    return .{ .source = .{ .query = filter }, .sort = sorts(T, query) };
+}
+
+/// The ids of the top-level `field` filter (`eq` or `in`) with the fewest,
+/// each once, in the order given; null when there is no such filter. Ids
+/// that aren't a `u128` are dropped, so the result may be empty: then
+/// nothing matches.
+pub fn idsOf(comptime T: type, query: *const zom.Query(T), comptime field: zom.Query(T).Field) ?Ids {
+    const Q = zom.Query(T);
     var best: ?Q.Filter = null;
     var it = query.topNodes();
     while (it.next()) |i| {
         const f = topFilter(T, query, i) orelse continue;
-        if (f.field != .id) continue;
+        if (f.field != field) continue;
         switch (f.op) {
             .eq, .in => if (best == null or idCount(best.?) > idCount(f)) {
                 best = f;
@@ -129,54 +144,85 @@ pub fn plan(comptime T: type, query: *const zom.Query(T)) Plan {
             else => {},
         }
     }
-    if (best) |f| {
-        var ids: Ids = .{};
-        switch (f.operand) {
-            .one => |v| if (toInt(u128, v)) |id| ids.add(id),
-            .many => |list| for (0..list.len) |i| {
-                if (toInt(u128, list.at(i))) |id| ids.add(id);
-            },
-            else => unreachable, // `eq` and `in` carry one value or a list
-        }
-        if (ids.len == 0) return .{ .source = .none };
-        return .{ .source = .{ .lookup = ids }, .sort = orders.len > 0 };
+    const f = best orelse return null;
+    var ids: Ids = .{};
+    switch (f.operand) {
+        .one => |v| if (toInt(u128, v)) |id| ids.add(id),
+        .many => |list| for (0..list.len) |i| {
+            if (toInt(u128, list.at(i))) |id| ids.add(id);
+        },
+        else => unreachable, // `eq` and `in` carry one value or a list
     }
+    return ids;
+}
 
-    var filter = std.mem.zeroes(c.tb_query_filter_t);
-    // The timestamp range, inclusive. `QueryFilter` takes 1 ..= maxInt(u63),
-    // with 0 meaning no bound.
+/// The `get_account_transfers` / `get_account_balances` filter for one
+/// account: `sides` is `TB_ACCOUNT_FILTER_DEBITS`, `_CREDITS` or both,
+/// and `query`'s top-level `eq` on `user_data_128/64/32` and `code`, its
+/// timestamp range and a `timestamp` desc order narrow it as for `plan`.
+/// Null when nothing can match. `limit` is set per page.
+pub fn accountFilter(comptime T: type, query: *const zom.Query(T), account_id: u128, sides: u32) ?c.tb_account_filter_t {
+    var filter = std.mem.zeroes(c.tb_account_filter_t);
+    filter.account_id = account_id;
+    if (!fillFilter(c.tb_account_filter_t, T, query, &filter)) return null;
+    filter.flags = sides | if (descending(T, query)) @as(u32, c.TB_ACCOUNT_FILTER_REVERSED) else 0;
+    return filter;
+}
+
+/// True when `query`'s order isn't led by `timestamp`, which is the only
+/// order TigerBeetle returns rows in: they must be sorted in memory.
+pub fn sorts(comptime T: type, query: *const zom.Query(T)) bool {
+    const orders = query.orderSlice();
+    return orders.len > 0 and orders[0].field != .timestamp;
+}
+
+fn descending(comptime T: type, query: *const zom.Query(T)) bool {
+    const orders = query.orderSlice();
+    return orders.len > 0 and orders[0].field == .timestamp and orders[0].direction == .desc;
+}
+
+/// Sets `filter`'s (a `tb_query_filter_t` or `tb_account_filter_t`)
+/// equality fields and timestamp range from `query`'s top-level filters,
+/// for every field both `T` and the filter have. False when they provably
+/// match nothing.
+fn fillFilter(comptime F: type, comptime T: type, query: *const zom.Query(T), filter: *F) bool {
+    const Q = zom.Query(T);
+    // The timestamp range, inclusive. Filters take 1 ..= maxInt(u63), with
+    // 0 meaning no bound.
     var lo: i129 = 1;
     var hi: i129 = std.math.maxInt(u63);
-    it = query.topNodes();
+    var it = query.topNodes();
     while (it.next()) |i| {
         const f = topFilter(T, query, i) orelse continue;
-        switch (f.field) {
-            .timestamp => {
-                const range = timestampRange(f) orelse continue;
-                lo = @max(lo, range[0]);
-                hi = @min(hi, range[1]);
-            },
-            inline .user_data_128, .user_data_64, .user_data_32, .ledger, .code => |field| {
-                if (f.op != .eq) continue;
-                const F = @FieldType(c.tb_query_filter_t, @tagName(field));
-                const v = f.operand.one;
-                if (!isInteger(v)) continue; // a float: left to `matches`
-                // An integer the field can't hold matches no row.
-                const want = toInt(F, v) orelse return .{ .source = .none };
-                // 0 turns the filter off, so it is left to `matches`.
-                if (want == 0) continue;
-                const have = &@field(filter, @tagName(field));
-                if (have.* != 0 and have.* != want) return .{ .source = .none };
-                have.* = want;
-            },
-            else => {},
+        if (f.field == .timestamp) {
+            const range = timestampRange(f) orelse continue;
+            lo = @max(lo, range[0]);
+            hi = @min(hi, range[1]);
+            continue;
+        }
+        inline for (query_fields) |name| {
+            if (comptime @hasField(T, name) and @hasField(F, name)) {
+                if (f.field == @field(Q.Field, name) and f.op == .eq) {
+                    const v = f.operand.one;
+                    // A float: left to `matches`.
+                    if (isInteger(v)) {
+                        // An integer the field can't hold matches no row.
+                        const want = toInt(@FieldType(F, name), v) orelse return false;
+                        // 0 turns the filter off, so it is left to `matches`.
+                        if (want != 0) {
+                            const have = &@field(filter, name);
+                            if (have.* != 0 and have.* != want) return false;
+                            have.* = want;
+                        }
+                    }
+                }
+            }
         }
     }
-    if (lo > hi) return .{ .source = .none };
+    if (lo > hi) return false;
     filter.timestamp_min = if (lo <= 1) 0 else @intCast(lo);
     filter.timestamp_max = if (hi >= std.math.maxInt(u63)) 0 else @intCast(hi);
-    if (by_timestamp and orders[0].direction == .desc) filter.flags = c.TB_QUERY_FILTER_REVERSED;
-    return .{ .source = .{ .query = filter }, .sort = orders.len > 0 and !by_timestamp };
+    return true;
 }
 
 /// Node `i` when it is a top-level filter, else null (a group, which is
@@ -239,12 +285,18 @@ fn toInt(comptime F: type, v: zom.Value) ?F {
     return std.math.cast(F, integer(v) orelse return null);
 }
 
-/// Moves `filter`'s timestamp range past `last`, the timestamp of the last
-/// row of a full page, in the filter's direction. False when no timestamp
-/// is left in the range, so there is no next page.
-pub fn advance(filter: *c.tb_query_filter_t, last: u64) bool {
+/// Moves `filter`'s (a `tb_query_filter_t` or `tb_account_filter_t`)
+/// timestamp range past `last`, the timestamp of the last row of a full
+/// page, in the filter's direction. False when no timestamp is left in the
+/// range, so there is no next page.
+pub fn advance(filter: anytype, last: u64) bool {
+    const reversed: u32 = switch (@TypeOf(filter.*)) {
+        c.tb_query_filter_t => c.TB_QUERY_FILTER_REVERSED,
+        c.tb_account_filter_t => c.TB_ACCOUNT_FILTER_REVERSED,
+        else => |F| @compileError("advance: not a TigerBeetle filter: " ++ @typeName(F)),
+    };
     std.debug.assert(last >= 1 and last <= std.math.maxInt(u63));
-    if (filter.flags & c.TB_QUERY_FILTER_REVERSED != 0) {
+    if (filter.flags & reversed != 0) {
         if (last <= 1 or (filter.timestamp_min != 0 and last - 1 < filter.timestamp_min)) return false;
         filter.timestamp_max = last - 1;
     } else {
@@ -381,4 +433,44 @@ test "window applies offset and limit" {
     try testing.expectEqual(.{ 2, 4 }, window(5, 2, 2));
     try testing.expectEqual(.{ 5, 5 }, window(5, 9, 2));
     try testing.expectEqual(.{ 0, 0 }, window(5, 0, 0));
+}
+
+test "accountFilter: user_data, code and the timestamp range narrow it; ledger is left to matches" {
+    const f = accountFilter(tb.Transfer, &(QT{})
+        .where(.code, .eq, 2)
+        .where(.user_data_64, .eq, 7)
+        .where(.ledger, .eq, 700)
+        .where(.timestamp, .between, .{ 10, 20 })
+        .order(.timestamp, .desc), 42, c.TB_ACCOUNT_FILTER_DEBITS).?;
+    try testing.expectEqual(42, f.account_id);
+    try testing.expectEqual(2, f.code);
+    try testing.expectEqual(7, f.user_data_64);
+    try testing.expectEqual(10, f.timestamp_min);
+    try testing.expectEqual(20, f.timestamp_max);
+    try testing.expectEqual(@as(u32, c.TB_ACCOUNT_FILTER_DEBITS | c.TB_ACCOUNT_FILTER_REVERSED), f.flags);
+
+    // Balances have only the timestamp to filter on.
+    const QB = zom.Query(tb.AccountBalance);
+    const b = accountFilter(tb.AccountBalance, &(QB{}).where(.account_id, .eq, 9).where(.timestamp, .gt, 5), 9, c.TB_ACCOUNT_FILTER_CREDITS).?;
+    try testing.expectEqual(6, b.timestamp_min);
+    try testing.expectEqual(@as(u32, c.TB_ACCOUNT_FILTER_CREDITS), b.flags);
+
+    // A contradiction is null; so is an empty range.
+    try testing.expectEqual(null, accountFilter(tb.Transfer, &(QT{}).where(.code, .eq, 1).where(.code, .eq, 2), 1, c.TB_ACCOUNT_FILTER_DEBITS));
+    try testing.expectEqual(null, accountFilter(tb.Transfer, &(QT{}).where(.timestamp, .lt, 1), 1, c.TB_ACCOUNT_FILTER_DEBITS));
+}
+
+test "advance pages an account filter too, in its direction" {
+    var f = std.mem.zeroes(c.tb_account_filter_t);
+    f.flags = c.TB_ACCOUNT_FILTER_DEBITS | c.TB_ACCOUNT_FILTER_REVERSED;
+    try testing.expect(advance(&f, 50));
+    try testing.expectEqual(49, f.timestamp_max);
+    try testing.expectEqual(0, f.timestamp_min);
+}
+
+test "idsOf: the smallest eq / in filter on a field, or null without one" {
+    const QB = zom.Query(tb.AccountBalance);
+    try testing.expectEqual(null, idsOf(tb.AccountBalance, &(QB{}).where(.timestamp, .eq, 1), .account_id));
+    const ids = idsOf(tb.AccountBalance, &(QB{}).where(.account_id, .in, .{ 4, 5, 4 }), .account_id).?;
+    try testing.expectEqualSlices(u128, &.{ 4, 5 }, ids.slice());
 }

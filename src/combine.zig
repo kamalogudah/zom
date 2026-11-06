@@ -47,6 +47,43 @@
 //! batched query, not to each group, so a paged associated relation is
 //! `error.PagedCombineTarget`.
 //!
+//! ## A dataset that loads associations itself: `loadAssociation`
+//!
+//! Steps 3 and 4 are an `in` query and a hash map, which only work when
+//! each associated row holds one key. A dataset can do them its own way
+//! by declaring
+//!
+//!     pub fn loadAssociation(
+//!         self: *Self,
+//!         comptime a: zom.Association,
+//!         keys: []const a.Key(),
+//!         query: zom.Query(S.Tuple),
+//!         allocator: std.mem.Allocator,
+//!     ) ![]const []const S.Tuple
+//!
+//! `@hasDecl(Dataset, "loadAssociation")` decides, at compile time: when it
+//! is declared, every combine *into* that dataset calls it once, with the
+//! distinct source keys from step 2 (any number of them) and the
+//! associated relation's whole query, and the generic steps 3 and 4 don't
+//! run. It returns one slice per key, in the order of `keys`: that key's
+//! rows, ordered as the query says. It must honour every filter and order
+//! of `query`, including those a `.fallback` relation would have evaluated
+//! in memory (`Query.matches` and `Query.lessThan` do both). A row may be
+//! in several keys' slices. Everything returned is allocated with
+//! `allocator`, the result's arena, so the dataset frees nothing.
+//!
+//! For `a.cardinality == .one` the first row of each slice is the parent.
+//! The call is one instrumentation span (`.read`, with the associated
+//! query); a `.fallback` target's scan hook is not called, since the
+//! dataset ran the whole query.
+//!
+//! A `zom.customAssociation`, which has no foreign key for steps 3 and 4,
+//! can only be combined through `loadAssociation`; without one it is a
+//! compile error. zom-tigerbeetle's transfers dataset loads
+//! `Account.transfers` this way: a transfer belongs to an account as its
+//! debit *or* its credit account, and `get_account_transfers` finds both,
+//! where an `in` query on one key field could not.
+//!
 //! ## Memory
 //!
 //! The result is a tree: entities pointing at slices of entities, pointing
@@ -91,14 +128,26 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
         @compileError(label ++ ": the second argument must be a relation over schema \"" ++ a.target.name ++
             "\", found one over \"" ++ Target.schema.name ++ "\"");
 
+    // The target's dataset loads the rows itself, or the rows are read with
+    // `whereIn` and grouped here. A custom association has no other way.
+    const hooked = @hasDecl(Target.DatasetT, "loadAssociation");
+    if (a.kind == .custom and !hooked)
+        @compileError(label ++ ": '" ++ a.name ++ "' is a custom association (`." ++ a.tag ++ "`), which the dataset of \"" ++
+            a.target.name ++ "\" must load, but adapter '" ++ Target.Adapter.name ++ "' declares no `loadAssociation` on it");
+
     // The key field on each side: has-many joins the source's primary key to
     // the target's foreign key, belongs-to the source's foreign key to the
-    // target's primary key.
-    const source_key = if (a.kind == .has_many) a.primary_key else a.foreign_key;
-    const target_key = if (a.kind == .has_many) a.foreign_key else a.primary_key;
+    // target's primary key. A custom association groups by the source's
+    // primary key, and only its dataset knows the target's side.
+    const source_key = if (a.kind == .belongs_to) a.foreign_key else a.primary_key;
+    const target_key = switch (a.kind) {
+        .has_many => a.foreign_key,
+        .belongs_to => a.primary_key,
+        .custom => "",
+    };
     requireField(Source.Output, source_key, label, "the relation it is called on");
-    requireField(Target.Output, target_key, label, "the relation passed to it");
-    const Key = Unwrap(@FieldType(a.Parent().Tuple, a.primary_key));
+    if (!hooked) requireField(Target.Output, target_key, label, "the relation passed to it");
+    const Key = a.Key();
 
     return struct {
         const Self = @This();
@@ -162,6 +211,13 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
                 }
             }
 
+            const items = try arena.alloc(E, sources.len);
+            if (comptime hooked) {
+                try self.fillLoaded(M, X, sources, items, keys.items, &index, arena);
+                result.items = items;
+                return result;
+            }
+
             // One target query per `max_in` keys.
             var batches: std.ArrayList([]const Target.Output) = .empty;
             defer batches.deinit(allocator);
@@ -173,9 +229,8 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
                 try batches.append(allocator, try self.target.whereIn(field, chunk).toSlice(arena));
             }
 
-            const items = try arena.alloc(E, sources.len);
-            switch (a.kind) {
-                .has_many => {
+            switch (a.cardinality) {
+                .many => {
                     // Count each group, give it a range of one slice, fill it.
                     const offsets = try allocator.alloc(u32, keys.items.len + 1);
                     defer allocator.free(offsets);
@@ -201,7 +256,7 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
                         @field(item.*, a.name) = if (g) |i| children[offsets[i]..offsets[i + 1]] else &.{};
                     }
                 },
-                .belongs_to => {
+                .one => {
                     // One parent per key; the first one read wins.
                     const parents = try allocator.alloc(?X, keys.items.len);
                     defer allocator.free(parents);
@@ -221,21 +276,78 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
             return result;
         }
 
+        /// Steps 3 to 5 through the target dataset's `loadAssociation`:
+        /// one call for every key, then each source row gets its key's
+        /// rows (the first of them for `.one`).
+        fn fillLoaded(
+            self: Self,
+            comptime M: type,
+            comptime X: type,
+            sources: []const Source.Output,
+            items: []M.Output,
+            keys: []const Key,
+            index: *const KeyMap(u32),
+            arena: std.mem.Allocator,
+        ) !void {
+            const query = self.target.query;
+            const span = self.target.instrument(.read, &query);
+            const loaded = try span.end(self.target.dataset.loadAssociation(a, keys, query, arena));
+            if (loaded.len != keys.len)
+                std.debug.panic("zom: adapter '{s}': loadAssociation(.{s}) returned {d} groups for {d} keys", .{
+                    Target.Adapter.name, a.name, loaded.len, keys.len,
+                });
+            switch (a.cardinality) {
+                .many => {
+                    const groups = try arena.alloc([]const X, keys.len);
+                    for (loaded, groups) |rows, *g| {
+                        if (X == Target.Tuple) {
+                            g.* = rows;
+                        } else {
+                            const mapped = try arena.alloc(X, rows.len);
+                            for (rows, mapped) |row, *m| m.* = fromTuple(X, row);
+                            g.* = mapped;
+                        }
+                    }
+                    for (sources, items) |row, *item| {
+                        item.* = M.call(row);
+                        const g = group(index, @field(row, source_key));
+                        @field(item.*, a.name) = if (g) |i| groups[i] else &.{};
+                    }
+                },
+                .one => for (sources, items) |row, *item| {
+                    item.* = M.call(row);
+                    const g = group(index, @field(row, source_key)) orelse {
+                        @field(item.*, a.name) = null;
+                        continue;
+                    };
+                    @field(item.*, a.name) = if (loaded[g].len > 0) fromTuple(X, loaded[g][0]) else null;
+                },
+            }
+        }
+
+        /// A whole tuple from `loadAssociation` as the association field's
+        /// element. A `select` on the target narrows `Target.Output`; any
+        /// `X` mapped from that maps the same from the whole tuple.
+        fn fromTuple(comptime X: type, row: Target.Tuple) X {
+            if (X == Target.Tuple) return row;
+            return mapper.Mapper(Target.Tuple, X, .{}).call(row);
+        }
+
         /// The association field's element type in `E`, checked.
         fn AssocElem(comptime E: type) type {
             const where = label ++ ": `" ++ @typeName(E) ++ "`";
             if (@typeInfo(E) != .@"struct" or !@hasField(E, a.name))
                 @compileError(where ++ " needs a field `" ++ a.name ++ "` to hold the association");
             const F = @FieldType(E, a.name);
-            const want = if (a.kind == .has_many) "a slice `[]const T`" else "an optional `?T`";
+            const want = if (a.cardinality == .many) "a slice `[]const T`" else "an optional `?T`";
             const info = @typeInfo(F);
-            const fits = switch (a.kind) {
-                .has_many => info == .pointer and info.pointer.size == .slice,
-                .belongs_to => info == .optional,
+            const fits = switch (a.cardinality) {
+                .many => info == .pointer and info.pointer.size == .slice,
+                .one => info == .optional,
             };
             if (!fits)
                 @compileError(where ++ "." ++ a.name ++ " must be " ++ want ++ ", found `" ++ @typeName(F) ++ "`");
-            const X = if (a.kind == .has_many) info.pointer.child else info.optional.child;
+            const X = if (a.cardinality == .many) info.pointer.child else info.optional.child;
             if (@typeInfo(X) != .@"struct")
                 @compileError(where ++ "." ++ a.name ++ " must be " ++ want ++ " of a struct, found `" ++ @typeName(F) ++ "`");
             return X;
@@ -271,14 +383,7 @@ fn requireField(comptime T: type, comptime name: []const u8, comptime label: []c
             " (it reads `" ++ @typeName(T) ++ "`); add it to its `select`");
 }
 
-fn Unwrap(comptime T: type) type {
-    return switch (@typeInfo(T)) {
-        .optional => |o| o.child,
-        else => T,
-    };
-}
-
 fn isRelation(comptime T: type) bool {
     return @typeInfo(T) == .@"struct" and @hasDecl(T, "schema") and @hasDecl(T, "Output") and
-        @hasDecl(T, "Q") and @hasField(T, "query");
+        @hasDecl(T, "Q") and @hasDecl(T, "DatasetT") and @hasField(T, "query");
 }

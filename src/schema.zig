@@ -44,7 +44,18 @@ pub const AssociationKind = enum {
     /// The source's rows hold the foreign key: a post belongs to a user,
     /// `posts.user_id` -> `users.id`.
     belongs_to,
+    /// No foreign key zom can see: the target's dataset finds the rows for
+    /// each source key itself, through its `loadAssociation` (see
+    /// combine.zig). A TigerBeetle transfer belongs to an account as its
+    /// `debit_account_id` *or* its `credit_account_id`, which neither of
+    /// the other kinds can say. Declared with `zom.customAssociation`.
+    custom,
 };
+
+/// How many target rows each source row has: a slice in the combined
+/// entity for `.many`, an optional for `.one`. `hasMany` is `.many` and
+/// `belongsTo` `.one`; a custom association says which.
+pub const Cardinality = enum { many, one };
 
 /// What `zom.hasMany` and `zom.belongsTo` return: an association as written,
 /// before the schema declaring it fills in its own side. Comptime only (it
@@ -52,7 +63,11 @@ pub const AssociationKind = enum {
 pub const AssociationDef = struct {
     kind: AssociationKind,
     target: type,
+    /// Empty for `.custom`.
     foreign_key: []const u8,
+    cardinality: Cardinality,
+    /// `.custom` only: the name the target's dataset knows it by.
+    tag: []const u8 = "",
 };
 
 /// An association resolved by the schema that declares it, as returned by
@@ -64,6 +79,10 @@ pub const AssociationDef = struct {
 /// source's tuple for `.belongs_to`. `primary_key` is the field it points
 /// at: the source's primary key for `.has_many`, the target's for
 /// `.belongs_to`.
+///
+/// A `.custom` association has no `foreign_key` (it is empty), and its
+/// `primary_key` is the source's: the key handed to the target dataset's
+/// `loadAssociation`. `tag` is what that dataset knows it by.
 pub const Association = struct {
     name: []const u8,
     kind: AssociationKind,
@@ -71,15 +90,32 @@ pub const Association = struct {
     target: type,
     foreign_key: []const u8,
     primary_key: []const u8,
+    cardinality: Cardinality = .many,
+    tag: []const u8 = "",
 
-    /// The schema whose tuple holds `foreign_key`.
+    /// The schema whose tuple holds `foreign_key`. None for `.custom`.
     pub fn Child(comptime a: Association) type {
-        return if (a.kind == .has_many) a.target else a.source;
+        return switch (a.kind) {
+            .has_many => a.target,
+            .belongs_to => a.source,
+            .custom => @compileError("zom: custom association '" ++ a.name ++ "' has no foreign key, so no child schema"),
+        };
     }
 
     /// The schema whose tuple holds `primary_key`.
     pub fn Parent(comptime a: Association) type {
-        return if (a.kind == .has_many) a.source else a.target;
+        return if (a.kind == .belongs_to) a.target else a.source;
+    }
+
+    /// The type of the keys a combine groups by: `primary_key`'s type in
+    /// the parent's tuple, without `?`. `loadAssociation` takes a slice of
+    /// them.
+    pub fn Key(comptime a: Association) type {
+        const K = @FieldType(a.Parent().Tuple, a.primary_key);
+        return switch (@typeInfo(K)) {
+            .optional => |o| o.child,
+            else => K,
+        };
     }
 };
 
@@ -87,7 +123,7 @@ pub const Association = struct {
 /// key: `.posts = zom.hasMany(PostSchema, .user_id)` on the users schema.
 pub fn hasMany(comptime Target: type, comptime foreign_key: EnumLiteral) AssociationDef {
     checkTarget("zom.hasMany", Target);
-    return .{ .kind = .has_many, .target = Target, .foreign_key = @tagName(foreign_key) };
+    return .{ .kind = .has_many, .target = Target, .foreign_key = @tagName(foreign_key), .cardinality = .many };
 }
 
 /// This schema's rows hold `foreign_key`, pointing at `Target`'s primary
@@ -96,7 +132,21 @@ pub fn hasMany(comptime Target: type, comptime foreign_key: EnumLiteral) Associa
 /// belongs to nothing.
 pub fn belongsTo(comptime Target: type, comptime foreign_key: EnumLiteral) AssociationDef {
     checkTarget("zom.belongsTo", Target);
-    return .{ .kind = .belongs_to, .target = Target, .foreign_key = @tagName(foreign_key) };
+    return .{ .kind = .belongs_to, .target = Target, .foreign_key = @tagName(foreign_key), .cardinality = .one };
+}
+
+/// An association whose rows `Target`'s dataset finds itself: `combine`
+/// hands it the source rows' primary keys and it returns each key's rows,
+/// through its `loadAssociation` (see combine.zig). `tag` names the
+/// association to that dataset; `cardinality` says whether each source row
+/// has a slice (`.many`) or an optional (`.one`) of them. zom-tigerbeetle's
+/// `Account` declares
+/// `.transfers = zom.customAssociation(Transfer, .account_transfers, .many)`.
+/// A custom association can't be joined or associated, and combining it
+/// needs a target dataset that declares `loadAssociation`.
+pub fn customAssociation(comptime Target: type, comptime tag: EnumLiteral, comptime cardinality: Cardinality) AssociationDef {
+    checkTarget("zom.customAssociation", Target);
+    return .{ .kind = .custom, .target = Target, .foreign_key = "", .cardinality = cardinality, .tag = @tagName(tag) };
 }
 
 /// `zom.Schema(T, name, pk, .{})`, or with associations:
@@ -172,12 +222,23 @@ pub fn Schema(
 
         fn resolve(comptime assoc: []const u8) Association {
             const def = @field(defs, assoc);
+            const Target = def.target;
+            if (def.kind == .custom) return .{
+                .name = assoc,
+                .kind = .custom,
+                .source = Self,
+                .target = Target,
+                .foreign_key = "",
+                .primary_key = @tagName(pk),
+                .cardinality = def.cardinality,
+                .tag = def.tag,
+            };
             const where = (if (def.kind == .has_many) "zom.hasMany" else "zom.belongsTo") ++
                 ": association '" ++ assoc ++ "' of schema \"" ++ dataset_name ++ "\"";
-            const Target = def.target;
             const Child, const Parent, const parent_pk = switch (def.kind) {
                 .has_many => .{ Target.Tuple, T, @tagName(pk) },
                 .belongs_to => .{ T, Target.Tuple, @tagName(Target.primary_key) },
+                .custom => unreachable,
             };
             const fk = def.foreign_key;
             if (!@hasField(Child, fk))
@@ -196,6 +257,7 @@ pub fn Schema(
                 .target = Target,
                 .foreign_key = def.foreign_key,
                 .primary_key = parent_pk,
+                .cardinality = def.cardinality,
             };
         }
 
@@ -224,7 +286,7 @@ fn associationNames(comptime defs: anytype) []const []const u8 {
     for (names) |n| {
         const V = @TypeOf(@field(defs, n));
         if (V != AssociationDef)
-            @compileError("zom.Schema: association '" ++ n ++ "' must be zom.hasMany(...) or zom.belongsTo(...), found `" ++
+            @compileError("zom.Schema: association '" ++ n ++ "' must be zom.hasMany(...), zom.belongsTo(...) or zom.customAssociation(...), found `" ++
                 @typeName(V) ++ "`");
     }
     return names;

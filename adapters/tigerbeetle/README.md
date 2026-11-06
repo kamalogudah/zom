@@ -5,17 +5,31 @@ on its C client (`tb_client`). TigerBeetle tests zom's adapter contract
 hardest: two fixed schemas, 128-bit ids, immutable records, batched writes
 and limited queries (plan.md, Phase 6).
 
-**Status:** inserts (#55) and reads (#56). `create` and `createMany` work,
-with typed errors for TigerBeetle's result codes, and relations read
-through `lookup_*` and `query_*`.
+**Status:** inserts (#55), reads (#56) and account history (#57).
+`create` and `createMany` work, with typed errors for TigerBeetle's result
+codes, relations read through `lookup_*` and `query_*`, and `combine` loads
+an account's transfers and balances through `get_account_transfers` and
+`get_account_balances`.
 
 ## Schemas
 
 The schemas are fixed, and they use the client's own structs, not copies:
 
 ```zig
-pub const Account = zom.Schema(tb.Account, "accounts", .id, .{});
-pub const Transfer = zom.Schema(tb.Transfer, "transfers", .id, .{});
+pub const Account = zom.Schema(tb.Account, "accounts", .id, .{
+    .associations = struct {
+        pub const transfers = zom.customAssociation(Transfer, .account_transfers, .many);
+        pub const balances = zom.hasMany(AccountBalance, .account_id);
+    },
+});
+pub const Transfer = zom.Schema(tb.Transfer, "transfers", .id, .{
+    .associations = struct {
+        pub const debit_account = zom.belongsTo(Account, .debit_account_id);
+        pub const credit_account = zom.belongsTo(Account, .credit_account_id);
+    },
+});
+// Read only: see "Account history".
+pub const AccountBalance = zom.Schema(tb.AccountBalance, "account_balances", .timestamp, .{ ... });
 ```
 
 `tb.Account` and `tb.Transfer` are `tb_account_t` and `tb_transfer_t` from
@@ -44,8 +58,9 @@ constant. The struct sizes, alignments and `extern` layout are asserted at
 compile time, so a newer header that changes them won't build.
 
 `Gateway.Dataset` also accepts a `zom.Schema` of your own over `tb.Account`
-or `tb.Transfer` keyed by `.id`, for example to add plugins. Any other
-struct is a compile error.
+or `tb.Transfer` keyed by `.id`, for example to add plugins or
+associations. It shares the fixed schema's dataset. Any other struct is a
+compile error.
 
 No `update`, no `delete`, no `transaction`: TigerBeetle records are
 immutable, so `relation.update()` and `relation.delete()` don't compile
@@ -193,6 +208,79 @@ rest in memory. TigerBeetle orders only by `timestamp`, so a `.fallback`
   limit. A count, or a read without a limit, fetches every match.
 - **Atomicity.** Pages are separate requests. Rows created between them
   can show up in a later page, as TigerBeetle's docs warn for lookups too.
+
+## Account history
+
+An account's transfers and its balance after each of them come through
+`combine`:
+
+```zig
+const accounts = try zom.Relation(zom_tigerbeetle.Account, zom_tigerbeetle.Gateway).init(&gateway);
+const transfers = try zom.Relation(zom_tigerbeetle.Transfer, zom_tigerbeetle.Gateway).init(&gateway);
+const balances = try zom.Relation(zom_tigerbeetle.AccountBalance, zom_tigerbeetle.Gateway).init(&gateway);
+
+const History = struct {
+    id: u128,
+    transfers: []const zom_tigerbeetle.tb.Transfer,
+    balances: []const zom_tigerbeetle.tb.AccountBalance,
+};
+var with_transfers = try accounts.byPk(id)
+    .combine(.transfers, transfers.where(.code, .eq, 1).order(.timestamp, .desc))
+    .mapTo(struct { id: u128, transfers: []const zom_tigerbeetle.tb.Transfer }, allocator);
+defer with_transfers.deinit();
+var with_balances = try accounts.byPk(id).combine(.balances, balances).mapTo(struct {
+    id: u128,
+    balances: []const zom_tigerbeetle.tb.AccountBalance,
+}, allocator);
+defer with_balances.deinit();
+```
+
+**Transfers.** A transfer belongs to an account as its debit *or* credit
+account, which no single foreign key expresses, so `Account.transfers` is a
+`zom.customAssociation`. The transfers dataset declares `loadAssociation`
+(zom's hook for a dataset that loads associations itself), and sends one
+`get_account_transfers` per account, both sides. Each account gets every
+transfer it is on, so a transfer between two of the combined accounts is in
+both slices. The combined relation's `eq` on `user_data_128/64/32` and
+`code`, its timestamp range, and `order(.timestamp, .desc)` go into the
+`AccountFilter`. Anything else (such as `ledger`, which the filter doesn't
+have) is checked on the rows, as for any read. Pages and `scan_max` work as
+in [Reads](#reads), per account.
+
+**Balances.** `AccountBalance` is a read-only view. Its rows,
+`tb.AccountBalance`, are `tb_account_balance_t` (the four balances just
+after the transfer with that `timestamp`) plus the `account_id` the request
+named. Only accounts created with `flags.history` have any.
+`Account.balances` is a plain `hasMany` on `account_id`, so zom's own
+combine reads it with `whereIn(.account_id, keys)`. The balance dataset
+sends one `get_account_balances` per id. It can be read directly too:
+
+```zig
+const latest = try balances.where(.account_id, .eq, id).order(.timestamp, .desc).first(allocator);
+```
+
+A read needs an `account_id` filter (`eq` or `in`). Without one,
+TigerBeetle has nothing to ask for, so it fails with
+`error.AccountIdRequired`, and so does `byPk(timestamp)` alone. The view is
+keyed by `timestamp`, which is unique within one account but not across
+them, because a transfer moves both its accounts' balances. `timestamp`
+ranges and order are the filter's. Several accounts with an order, or
+filters on the balances themselves (with `allowFallback()`), are done in
+memory.
+
+**Other associations.** The record datasets load every association into
+them with the request that fits, chosen at compile time:
+
+| Association into transfers / accounts | Request |
+|---|---|
+| `Account.transfers` | `get_account_transfers`, debits and credits |
+| `hasMany` on `debit_account_id` / `credit_account_id` (your own schema) | `get_account_transfers`, that side only |
+| `belongsTo`, e.g. `Transfer.debit_account` | `lookup_*`, 64 ids at a time |
+| `hasMany` on `user_data_128/64/32`, `ledger` or `code` | one `query_*` per key |
+| anything else, e.g. `hasMany` on `pending_id` | a compile error |
+
+As with any combine, a `limit` or `offset` on the combined relation is
+`error.PagedCombineTarget`.
 
 ### zom.lint
 

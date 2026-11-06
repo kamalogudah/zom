@@ -348,6 +348,9 @@ pub fn Store(comptime S: type) type {
         /// its own typed semi-join.
         fn joined(self: *Self, j: *const q.Join, query: *const Q, allocator: Allocator, hits: *std.ArrayList(T)) !void {
             inline for (S.association_names) |name| {
+                // A custom association can't be joined (`relation.join`
+                // refuses it), and has no keys to semi-join on.
+                if (comptime @field(S.associations, name).kind == .custom) continue;
                 if (std.mem.eql(u8, name, j.assoc))
                     return self.semiJoin(@field(S.associations, name), j, query, allocator, hits);
             }

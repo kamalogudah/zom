@@ -304,7 +304,8 @@ breaking change needs a minor version bump and an entry in
 | Declaration | What it is |
 |---|---|
 | `zom.Schema(T, name, pk, options)` | Returns a schema type with `Tuple = T`, `name` (the dataset name), `primary_key` (a field of `T`, as an enum literal) and its associations. `options` is `.{}`, or has `.associations` (see [Associations](#associations)) and `.plugins` (see [Plugins](#plugins)). |
-| `zom.hasMany(Target, .fk)`, `zom.belongsTo(Target, .fk)` | Declare an association on a schema. `S.association(.name)` and `S.associations.name` return a `zom.Association`: `name`, `kind` (`zom.AssociationKind`: `has_many` or `belongs_to`), `source`, `target`, `foreign_key` and `primary_key` (field names as strings), plus `Child()` and `Parent()`. |
+| `zom.hasMany(Target, .fk)`, `zom.belongsTo(Target, .fk)` | Declare an association on a schema. `S.association(.name)` and `S.associations.name` return a `zom.Association`: `name`, `kind` (`zom.AssociationKind`: `has_many`, `belongs_to` or `custom`), `source`, `target`, `foreign_key` and `primary_key` (field names as strings), `cardinality` (`zom.Cardinality`: `.many` or `.one`) and `tag`, plus `Child()`, `Parent()` and `Key()` (the key type a combine groups by). |
+| `zom.customAssociation(Target, .tag, .many)` | Declare an association with no foreign key zom can use, whose rows `Target`'s dataset finds itself through `loadAssociation`. `.one` instead of `.many` for an optional. See [Custom associations](#custom-associations-and-loadassociation). |
 | `zom.Relation(S, Gateway)` | Returns an immutable relation type over schema `S` and an adapter's `Gateway`. Checks the [adapter contract](#the-adapter-contract) at compile time through `zom.Adapter(Gateway)`, which it exposes as `Relation.Adapter`. |
 | `zom.RelationOf(S, Gateway, Output)` | The strict relation type whose reads return `Output`. `Relation(S, G)` is `RelationOf(S, G, S.Tuple)`, and `select` returns `RelationOf(S, G, Project(S.Tuple, fields))`. Exposes `Tuple`, `Output`, `projected` and `mode`. |
 | `zom.RelationWith(S, Gateway, Output, mode)` | The relation type with every parameter. `RelationOf(S, G, Out)` is `RelationWith(S, G, Out, .strict)`, and `allowFallback()` returns `RelationWith(S, G, Out, .fallback)`. |
@@ -861,6 +862,47 @@ The result is a tree of allocations, so `mapTo` returns a
 string in it, including the strings of a caller-owned adapter like zom-pg.
 One `deinit()` frees it all.
 
+#### Custom associations and `loadAssociation`
+
+Steps 2 and 3 assume each child row holds one foreign key. Some don't: a
+TigerBeetle transfer belongs to an account as its `debit_account_id` *or*
+its `credit_account_id`. `zom.customAssociation` declares such an
+association by what the target's dataset calls it, and whether each source
+row gets a slice (`.many`) or an optional (`.one`):
+
+```zig
+pub const Account = zom.Schema(tb.Account, "accounts", .id, .{
+    .associations = struct {
+        pub const transfers = zom.customAssociation(Transfer, .account_transfers, .many);
+    },
+});
+
+var history = try accounts.byPk(id).combine(.transfers, transfers).mapTo(AccountWithTransfers, allocator);
+```
+
+The target's dataset then loads the rows itself, with an optional
+declaration that `combine` looks for with `@hasDecl` at compile time:
+
+```zig
+pub fn loadAssociation(
+    self: *Self,
+    comptime a: zom.Association,
+    keys: []const a.Key(),     // the source rows' distinct keys
+    query: zom.Query(S.Tuple), // the combined relation's whole query
+    allocator: std.mem.Allocator, // the result's arena
+) ![]const []const S.Tuple    // one slice per key, in the order of `keys`
+```
+
+When a dataset declares it, *every* combine into that dataset calls it once
+instead of steps 2 and 3, for `hasMany` and `belongsTo` too, so a backend
+can pick a better request than an `in` query (zom-tigerbeetle uses
+`get_account_transfers`). It must apply all of `query`, including filters a
+`.fallback` relation would have run in memory, and order each slice by it;
+a row may be in several slices. Everything it returns lives in the arena,
+so it frees nothing. A custom association combined into a dataset without
+`loadAssociation` is a compile error, and so are `join` and `associate` on
+one, which need a foreign key.
+
 #### Join
 
 `users.join(.posts)` keeps the users that have at least one post, ROM's
@@ -1053,6 +1095,7 @@ In full, with `Q = zom.Query(S.Tuple)`:
 | `filterable` | `fn (comptime field: []const u8, comptime op: zom.Op) bool` | no | Narrows `supports` per attribute, for a backend that only filters on some (TigerBeetle filters transfers on `ledger` and `code`, not `amount`). Called at compile time, only for ops `supports` allows; false makes that filter unsupported. Without it, every attribute is filterable. |
 | `orderable` | `fn (comptime field: []const u8) bool` | no | Narrows ordering per attribute, the same way: called for a field `supports.order_on` (or being the primary key) allows; false makes `order` by it unsupported. TigerBeetle orders by `timestamp` only, not by its key. |
 | `strings` | `zom.StringOwnership` | no | `.dataset` (the default): returned strings point into the dataset. `.caller`: `read`, `readProjected` and `insert` allocate them with the allocator passed in, and every string attribute must be a slice. |
+| `loadAssociation` | `fn (*Dataset, comptime a: zom.Association, keys: []const a.Key(), Q, Allocator) ![]const []const S.Tuple` | no | Loads the rows of association `a` (declared on another schema, targeting this one) for each key, instead of zom's `in` query and grouping; required to combine a `zom.customAssociation`. See [Custom associations](#custom-associations-and-loadassociation). |
 | `readProjected` | `fn (*Dataset, Q, comptime P: type, Allocator) ![]P` | when `supports.projection` | The rows `read` would return, as `P`, a `zom.Project(S.Tuple, ...)` with some of the tuple's fields (copy them by name, e.g. with `zom.Mapper(S.Tuple, P, .{})`). Used by `select`. Without it, zom reads whole tuples and maps them down. |
 
 A method may take `self` by value, `*Self` or `*const Self`. Every dataset
