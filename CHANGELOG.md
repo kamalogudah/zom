@@ -9,6 +9,14 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- `zom.Repository(App, .{ .root = .users, .relations = .{ .users, .posts } })`,
+  rom-repository's root repository: `init(&app)` copies the listed relations
+  out of a container into `repo.relations`, and `byPk`, `where`, `all`,
+  `create`, `createMany`, `update` and `delete` forward to the root
+  relation, keeping its capability compile errors. Custom views live on a
+  wrapper struct with a `rel` field, named in `.relations` (`.{ .users =
+  Users, .posts = .plain }`). An unknown relation, or a root that isn't
+  listed, is a compile error.
 - A `no-deprecated` build option. With `-Dno-deprecated`, using a
   deprecated declaration is a compile error that names its replacement.
   zom's source reads it as `@import("build_options").no_deprecated`.

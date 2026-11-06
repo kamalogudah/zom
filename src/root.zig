@@ -6,6 +6,7 @@
 //!   Relation           -> immutable, chainable query over a dataset
 //!   Changeset          -> create / update data, committed explicitly
 //!   Mapper / combine   -> tuples to domain structs, nested associations
+//!   Repository         -> a root relation, views and command shortcuts
 
 const std = @import("std");
 
@@ -55,6 +56,8 @@ pub const strings = @import("strings.zig");
 pub const changeset = @import("changeset.zig");
 
 pub const Container = @import("container.zig").Container;
+/// A root relation with command shortcuts over a container's relations.
+pub const Repository = @import("repository.zig").Repository;
 
 pub const lint = @import("lint.zig");
 
@@ -91,4 +94,5 @@ test {
     _ = @import("tests/combine_test.zig");
     _ = @import("tests/join_test.zig");
     _ = @import("tests/associate_test.zig");
+    _ = @import("tests/repository_test.zig");
 }

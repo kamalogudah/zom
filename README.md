@@ -147,6 +147,7 @@ breaking change needs a minor version bump and an entry in
 | `zom.Op` | Filter operators: `eq`, `neq`, `lt`, `lte`, `gt`, `gte`, `in`, `not_in`, `like`, `ilike`, `between`, `is_null`, `is_not_null`. `op.operand()` returns the `Operand` variant it takes. |
 | `zom.Direction` | `asc`, `desc`. |
 | `zom.Container(spec)` | Declares gateways and relations once; `init(self, allocator, Config)` / `deinit()` connect and disconnect them all. See [Container](#container). |
+| `zom.Repository(App, .{ .root, .relations })` | Groups some of a container's relations around a root relation: `init(&app)`, `relations` (one field per relation, or its wrapper struct), `root()`, and the root shortcuts `byPk`, `where`, `all`, `create`, `createMany`, `update`, `delete`. See [Repository](#repository). |
 | `zom.changeset` | `Create(Rel)`, `CreateMany(Rel)`, `Update(Rel)` and `Scoped(Rel, keys)`, the types returned by `relation.create`, `relation.createMany`, `relation.update` and `relation.associate`. You don't name them yourself; `Scoped`'s `Input` is the struct its `create` takes. |
 | `zom.Mapper(Src, Dst, .{ .renames, .skip })` | A comptime mapper: `call(src) Dst` and `many(allocator, srcs) ![]Dst`. A `Dst` field takes the `Src` field of the same name (or its rename), else its default; neither is a compile error. Fields named in `skip` are left undefined for the caller to fill. `sources` lists the `Src` fields it copies, and `options` the options it was made with. |
 | `zom.Combined(Source, association, Target)`, `zom.CombineResult(E)` | What `relation.combine(.assoc, target)` returns, and what its `mapTo` / `mapWith` return: `items: []E` and the arena owning them, freed with `deinit()`. See [Associations](#associations). |
@@ -348,6 +349,62 @@ one container: users read from `data/users.csv` through `zom_csv.Gateway`,
 posts held in `zom.memory.Gateway`, combined with `users.combine(.posts, posts)`. Run it
 with `cd examples/csv_users && zig build run`; `zig build test` at the root
 runs it too and checks its output.
+
+### Repository
+
+`zom.Repository(App, spec)` is rom-repository's root repository: it takes
+the relations one part of the app needs from a container, and forwards
+command shortcuts to its root relation:
+
+```zig
+const UserRepo = zom.Repository(App, .{ .root = .users, .relations = .{ .users, .posts } });
+
+var repo = UserRepo.init(&app);
+_ = try repo.create(.{ .id = 1, .name = "Achieng", .age = 31 }).commit();
+const u = try repo.byPk(1).one(allocator);   // ?User
+const n = try repo.relations.posts.count();
+```
+
+`byPk`, `where`, `all` (the whole root relation, to chain from), `create`,
+`createMany`, `update` and `delete` each call the root relation's method of
+the same name, so `repo.byPk(1).update()` and `repo.where(...).delete()`
+work as on the relation. They are written out by hand, not mixed in, since
+Zig 0.15 removed `usingnamespace`. A shortcut that needs a dataset capability
+fails to compile, naming the adapter, exactly like the relation's own method,
+and only when it is called: a repository over a read-only adapter compiles as
+long as it is only read.
+
+Custom views, rom's `def active = where(deleted_at: nil)`, go on a wrapper
+struct with a `rel` field holding the container's relation. Name the wrapper
+in `.relations`, and `.plain` for a relation without one:
+
+```zig
+const Users = struct {
+    rel: @FieldType(App.Relations, "users"),
+
+    pub fn active(self: Users) @TypeOf(self.rel) {
+        return self.rel.where(.deleted_at, .eq, null);
+    }
+};
+
+const UserRepo = zom.Repository(App, .{ .root = .users, .relations = .{ .users = Users, .posts = .plain } });
+
+var repo = UserRepo.init(&app);
+const active = try repo.relations.users.active().count();
+const older = try repo.root().active().where(.age, .gt, 30).count();
+```
+
+`@TypeOf(self.rel)` lets a view return the relation's type without naming
+it. The shortcuts still go to the relation itself (`rel`), not the wrapper.
+`UserRepo.Relations`, `UserRepo.Root` (the root's wrapper or relation) and
+`UserRepo.RootRelation` are the generated types.
+
+A repository copies the container's relations (a dataset pointer and a
+query each), so it is a cheap value; it must not be used after the
+container's `deinit`. A relation the container lacks, a root that isn't in
+`.relations`, a wrapper without a `rel` field of the right type, and a
+relation named like one of the repository's own declarations (`create`,
+`all`, ...) are compile errors.
 
 ### Associations
 
@@ -977,6 +1034,7 @@ links to the topics below.
 | `src/relation.zig` | `Relation(S, Gateway)`: immutable query builder | Comptime field enums, `anytype`, a type parameter with a default through a wrapper (`Relation` calls `RelationOf`) |
 | `src/projection.zig` | `Project(T, fields)`: the narrower struct `select` reads into | `@Struct`, field defaults in reflection, memoised comptime calls |
 | `src/container.zig` | `Container(spec)`: gateways and relations declared once, init/deinit in one place | Building struct types with `@Struct`, `errdefer` with a counter in an `inline for` |
+| `src/repository.zig` | `Repository(App, spec)`: a root relation with command shortcuts, and wrapper structs for custom views | `@Struct`, `@FieldType`, `@TypeOf` in return types, forwarding methods by hand |
 | `src/changeset.zig` | `Create`, `CreateMany` and `Update` changesets | Fixed-capacity arrays, slices, comptime capability branching |
 | `src/mapper.zig` | Copies tuples into domain structs | `inline for` over struct fields |
 | `src/codec.zig` | Text cells to typed fields and back, with a `Diagnostic` out-parameter | `@typeInfo` dispatch, mapping error sets with `catch \|e\| switch`, the diagnostics pattern, `std.Io.Writer` and shortest round-trip float formatting |

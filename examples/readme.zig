@@ -205,6 +205,55 @@ test "README: Container" {
     try testing.expectEqual(0, try app.relations.posts.count());
 }
 
+test "README: Repository" {
+    const allocator = testing.allocator;
+    const zom = @import("zom");
+    const User = struct { id: u32, name: []const u8, age: u8, deleted_at: ?i64 = null };
+    const Post = struct { id: u32, user_id: u32, title: []const u8 };
+
+    const App = zom.Container(.{
+        .gateways = .{ .default = zom.memory.Gateway },
+        .relations = .{
+            .users = .{ zom.Schema(User, "users", .id, .{}), .default },
+            .posts = .{ zom.Schema(Post, "posts", .id, .{}), .default },
+        },
+    });
+    var app: App = undefined;
+    try app.init(allocator, .{});
+    defer app.deinit();
+
+    {
+        const UserRepo = zom.Repository(App, .{ .root = .users, .relations = .{ .users, .posts } });
+
+        var repo = UserRepo.init(&app);
+        _ = try repo.create(.{ .id = 1, .name = "Achieng", .age = 31 }).commit();
+        const u = try repo.byPk(1).one(allocator); // ?User
+        const n = try repo.relations.posts.count();
+
+        try testing.expectEqualStrings("Achieng", u.?.name);
+        try testing.expectEqual(0, n);
+    }
+    {
+        const Users = struct {
+            rel: @FieldType(App.Relations, "users"),
+
+            pub fn active(self: @This()) @TypeOf(self.rel) {
+                return self.rel.where(.deleted_at, .eq, null);
+            }
+        };
+
+        const UserRepo = zom.Repository(App, .{ .root = .users, .relations = .{ .users = Users, .posts = .plain } });
+
+        var repo = UserRepo.init(&app);
+        _ = try repo.create(.{ .id = 2, .name = "Wanjiru", .age = 42, .deleted_at = 1_700_000_000 }).commit();
+        const active = try repo.relations.users.active().count();
+        const older = try repo.root().active().where(.age, .gt, 30).count();
+
+        try testing.expectEqual(1, active);
+        try testing.expectEqual(1, older);
+    }
+}
+
 // Container-level, as in the README: schemas that name each other must be
 // container declarations, which Zig resolves lazily. Locals in a test body
 // can't refer forward.
