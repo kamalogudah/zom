@@ -9,6 +9,20 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- zom-tigerbeetle (scaffold): the `zom_tigerbeetle` module, built with
+  `-Dtigerbeetle` (`.tigerbeetle = true` from a dependent; on in a
+  checkout). It links TigerBeetle's prebuilt C client from the
+  tigerbeetle-go `v0.17.9` tarball, a lazy dependency, and translates
+  `tb_client.h` with `b.addTranslateC`. TigerBeetle's releases pin Zig
+  0.14.1, so building from its source was ruled out; the reasoning is in
+  `adapters/tigerbeetle/README.md`. The fixed schemas `Account` and
+  `Transfer` use the client's `tb_account_t` / `tb_transfer_t` directly,
+  keyed by `id`. `tb.AccountFlags` / `tb.TransferFlags` are typed
+  `packed struct(u16)` views of `flags`. `Gateway.init` starts the client
+  from `cluster_id` and `addresses`. There is no `update`, `delete` or
+  `transaction`, and `read` / `count` return `error.Unimplemented` until
+  #56. `zig build test-tigerbeetle`; its cluster test needs
+  `ZOM_TB_ADDRESSES`. ([#54])
 - `zom.Value.uint128: u128` for unsigned integers of 65 to 128 bits
   (TigerBeetle ids, `user_data_128`, amounts). `toValue`, `fromValue`,
   `order` and `eql` handle it, comparing exactly against `int` and `uint`
@@ -667,3 +681,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#51]: https://github.com/kamalogudah/zom/issues/51
 [#52]: https://github.com/kamalogudah/zom/issues/52
 [#53]: https://github.com/kamalogudah/zom/issues/53
+[#54]: https://github.com/kamalogudah/zom/issues/54

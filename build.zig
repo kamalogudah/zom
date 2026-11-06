@@ -1,7 +1,8 @@
 const std = @import("std");
 
 /// zom is one package that exports several modules: the core, `zom`, and one
-/// module per adapter (`zom_csv`, `zom_yaml`, `zom_sql`, `zom_pg`). An
+/// module per adapter (`zom_csv`, `zom_yaml`, `zom_sql`, `zom_pg`,
+/// `zom_tigerbeetle`). An
 /// application depends on the package once and picks the modules it uses:
 ///
 ///     const dep = b.dependency("zom", .{ .target = target, .optimize = optimize });
@@ -10,7 +11,8 @@ const std = @import("std");
 ///
 /// zom-pg needs pg.zig, a lazy dependency, so it only exists when asked for
 /// with `.pg = true`: an application that doesn't use Postgres never fetches
-/// pg.zig. The adapters' code lives under `adapters/<name>/src` and imports
+/// pg.zig. zom-tigerbeetle likewise needs TigerBeetle's prebuilt C client,
+/// so it only exists with `.tigerbeetle = true`. The adapters' code lives under `adapters/<name>/src` and imports
 /// zom only through its public module, so an adapter can still move to a
 /// repo of its own later without code changes (see plan.md, section 3.2).
 pub fn build(b: *std.Build) void {
@@ -20,6 +22,7 @@ pub fn build(b: *std.Build) void {
     // pkg_hash is empty), so `zig build test` covers zom-pg; off by default
     // when zom is someone else's dependency.
     const with_pg = b.option(bool, "pg", "Build the zom_pg module (fetches pg.zig)") orelse (b.pkg_hash.len == 0);
+    const with_tigerbeetle = b.option(bool, "tigerbeetle", "Build the zom_tigerbeetle module (fetches TigerBeetle's C client)") orelse (b.pkg_hash.len == 0);
 
     // Turns deprecated declarations (zom.combineMany) into compile errors,
     // to find the calls left before they are removed.
@@ -63,6 +66,16 @@ pub fn build(b: *std.Build) void {
     } else {
         const fail = b.addFail("zom-pg is off: pass -Dpg=true (or `.pg = true` to b.dependency)");
         b.step("test-pg", "Run zom-pg's tests (its database tests need ZOM_PG_URL)").dependOn(&fail.step);
+    }
+
+    const test_tigerbeetle = b.step("test-tigerbeetle", "Run zom-tigerbeetle's tests (its cluster test needs ZOM_TB_ADDRESSES)");
+    if (with_tigerbeetle) {
+        if (b.lazyDependency("tigerbeetle_go", .{})) |tb_dep| {
+            addTigerBeetle(b, test_adapters, test_tigerbeetle, mod, tb_dep, target, optimize);
+        }
+    } else {
+        const fail = b.addFail("zom-tigerbeetle is off: pass -Dtigerbeetle=true (or `.tigerbeetle = true` to b.dependency)");
+        test_tigerbeetle.dependOn(&fail.step);
     }
     test_step.dependOn(test_adapters);
 
@@ -139,6 +152,58 @@ fn addPg(
     const run_infer = b.addRunArtifact(infer_exe);
     if (b.args) |args| run_infer.addArgs(args);
     b.step("infer", "Run zom-pg-infer (pass its options after --)").dependOn(&run_infer.step);
+}
+
+/// The `zom_tigerbeetle` module and its tests. TigerBeetle's C client comes
+/// prebuilt from the tigerbeetle-go release tarball (`native/`): its header,
+/// translated here, and one static library per supported target. Releases
+/// of TigerBeetle pin an older Zig, so its source can't be built by this
+/// one; the C ABI doesn't care which Zig built the library.
+fn addTigerBeetle(
+    b: *std.Build,
+    test_adapters: *std.Build.Step,
+    test_tigerbeetle: *std.Build.Step,
+    zom: *std.Build.Module,
+    tb_dep: *std.Build.Dependency,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) void {
+    const t = target.result;
+    const library: ?[]const u8 = switch (t.os.tag) {
+        .linux, .macos => switch (t.cpu.arch) {
+            .x86_64, .aarch64 => b.fmt("native/libtb_client_{t}-{t}.a", .{ t.cpu.arch, t.os.tag }),
+            else => null,
+        },
+        .windows => if (t.cpu.arch == .x86_64) "native/tb_client_x86_64-windows.lib" else null,
+        else => null,
+    };
+    const lib_path = library orelse {
+        const fail = b.addFail(b.fmt("zom-tigerbeetle: TigerBeetle's C client has no library for {t}-{t}; " ++
+            "it ships x86_64 and aarch64 for linux and macos, and x86_64 for windows", .{ t.cpu.arch, t.os.tag }));
+        test_tigerbeetle.dependOn(&fail.step);
+        test_adapters.dependOn(&fail.step);
+        return;
+    };
+
+    const tb_client = b.addTranslateC(.{
+        .root_source_file = tb_dep.path("native/tb_client.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const adapter = addAdapter(b, test_adapters, "tigerbeetle", &.{
+        .{ .name = "zom", .module = zom },
+        .{ .name = "tb_client", .module = tb_client.createModule() },
+    }, target, optimize);
+    // The library starts a thread and does its own I/O through libc.
+    adapter.module.link_libc = true;
+    adapter.module.addObjectFile(tb_dep.path(lib_path));
+    if (t.os.tag == .windows) {
+        adapter.module.linkSystemLibrary("ws2_32", .{});
+        adapter.module.linkSystemLibrary("ntdll", .{});
+    }
+    // The cluster test reads ZOM_TB_ADDRESSES, which the cache can't see.
+    adapter.run_tests.has_side_effects = true;
+    test_tigerbeetle.dependOn(&adapter.run_tests.step);
 }
 
 /// Options for `addInferStep`.

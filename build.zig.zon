@@ -11,6 +11,14 @@
             .hash = "pg-0.0.0-Wp_7gRBNBwB5UeWisHZe3lpWmy9swOS61GYbZCtOXaLE",
             .lazy = true,
         },
+        // TigerBeetle's C client (tb_client), prebuilt: tigerbeetle-go ships
+        // libtb_client for each target plus tb_client.h in native/, per release
+        // tag. Only zom_tigerbeetle uses it, with `-Dtigerbeetle=true`.
+        .tigerbeetle_go = .{
+            .url = "https://github.com/tigerbeetle/tigerbeetle-go/archive/refs/tags/v0.17.9.tar.gz",
+            .hash = "N-V-__8AAGycPwCtpzQ4XDECKNT32ToihjKtvdqD9HQ3ZtNy",
+            .lazy = true,
+        },
     },
     .paths = .{
         "build.zig",
@@ -21,6 +29,8 @@
         "adapters/sql/src",
         "adapters/pg/src",
         "adapters/pg/README.md",
+        "adapters/tigerbeetle/src",
+        "adapters/tigerbeetle/README.md",
         "examples/readme.zig",
         "README.md",
         "CHANGELOG.md",

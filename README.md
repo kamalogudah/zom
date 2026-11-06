@@ -1148,7 +1148,9 @@ const zom_csv = dep.module("zom_csv"); // also zom_yaml, zom_sql
 `zom_pg` needs pg.zig, which is a lazy dependency, so it exists only when
 asked for: `b.dependency("zom", .{ ..., .pg = true })`. Applications that
 don't use Postgres never fetch pg.zig. In a checkout of zom, `-Dpg` is on by
-default; `-Dpg=false` leaves zom-pg out.
+default; `-Dpg=false` leaves zom-pg out. `zom_tigerbeetle` works the same
+way with `.tigerbeetle = true` (`-Dtigerbeetle`), for TigerBeetle's
+prebuilt C client.
 
 Each adapter's code lives in `adapters/<name>/src`, and the root `build.zig`
 exports `adapters/<name>/src/root.zig` as the module `zom_<name>`:
@@ -1179,7 +1181,7 @@ this way. The contract is listed in `src/file.zig` and checked with
 `@hasDecl` when the gateway type is built.
 
 `zig build test-adapters` runs every adapter's tests, `zig build test-pg`
-only zom-pg's, and `zig build test` runs them all along with the core.
+only zom-pg's, `zig build test-tigerbeetle` only zom-tigerbeetle's, and `zig build test` runs them all along with the core.
 Every adapter's tests should call `zom.lint.run` once it can store the lint
 seed rows.
 
@@ -1264,6 +1266,24 @@ rows decoded by column name. Its strings are caller-owned (see
 var pg = try zom_pg.Gateway.init(allocator, .{ .io = io, .url = "postgres://app@localhost/app" });
 defer pg.deinit();
 const users = try zom.Relation(UserSchema, zom_pg.Gateway).init(&pg);
+```
+
+### zom-tigerbeetle
+
+`adapters/tigerbeetle` is a gateway for [TigerBeetle](https://tigerbeetle.com)
+on its C client, `tb_client`, which comes prebuilt and is linked as a
+static library. TigerBeetle's own releases pin an older Zig than 0.16, so
+zom can't build them from source. The schemas are fixed:
+`zom_tigerbeetle.Account` and `zom_tigerbeetle.Transfer`, over the client's
+own structs, keyed by the `u128` `id`. Records are immutable, so there is
+no `update` or `delete`. It is a scaffold for now (inserts and reads are
+#55 and #56). The dependency decision, the supported targets and the
+setup are in [adapters/tigerbeetle/README.md](adapters/tigerbeetle/README.md).
+
+```zig
+var tb = try zom_tigerbeetle.Gateway.init(allocator, .{ .io = io, .cluster_id = 0, .addresses = "3000" });
+defer tb.deinit();
+const accounts = try zom.Relation(zom_tigerbeetle.Account, zom_tigerbeetle.Gateway).init(&tb);
 ```
 
 ### Errors
