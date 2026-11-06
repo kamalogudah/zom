@@ -2,6 +2,7 @@ const std = @import("std");
 const zom = @import("../root.zig");
 const testing = std.testing;
 const fixtures = @import("fixtures.zig");
+const build_options = @import("build_options");
 
 const Post = fixtures.Post;
 const AuthorMapper = fixtures.AuthorMapper;
@@ -9,7 +10,10 @@ const Users = fixtures.Users;
 const Posts = fixtures.Posts;
 const seed = fixtures.seed;
 
-test "map to entities and combine has-many" {
+// combine_test.zig covers the same data through `relation.combine`. This
+// test keeps the deprecated path working until combineMany is removed.
+test "deprecated combineMany still combines has-many" {
+    if (build_options.no_deprecated) return error.SkipZigTest;
     var gw = zom.memory.Gateway.init(testing.allocator, .{});
     defer gw.deinit();
     const users = try Users.init(&gw);
@@ -20,7 +24,6 @@ test "map to entities and combine has-many" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    // users.combine(:posts) in ROM terms.
     const authors = try users.where(.deleted_at, .eq, null).order(.id, .asc).mapWith(AuthorMapper, a);
     const author_posts = try posts.where(.published, .eq, true).order(.id, .asc).mapTo(Post, a);
     try zom.combineMany(.{ .into = "posts", .parent_key = "id", .child_key = "user_id" }, a, authors, author_posts);

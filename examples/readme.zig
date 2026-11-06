@@ -12,7 +12,12 @@ test "README: Usage, then A longer tour" {
     const zom = @import("zom");
 
     const User = struct { id: u32, name: []const u8, age: u8, deleted_at: ?i64 = null };
-    const Users = zom.Relation(zom.Schema(User, "users", .id, .{}), zom.memory.Gateway);
+    const Post = struct { id: u32, user_id: u32, title: []const u8 };
+    const PostSchema = zom.Schema(Post, "posts", .id, .{});
+    const UserSchema = zom.Schema(User, "users", .id, .{
+        .associations = .{ .posts = zom.hasMany(PostSchema, .user_id) },
+    });
+    const Users = zom.Relation(UserSchema, zom.memory.Gateway);
 
     var gw = zom.memory.Gateway.init(allocator, .{});
     defer gw.deinit();
@@ -24,9 +29,8 @@ test "README: Usage, then A longer tour" {
     defer allocator.free(active);
 
     // -- README: A longer tour --------------------------------------------
-    const Post = struct { id: u32, user_id: u32, title: []const u8 };
     const Author = struct { id: u32, full_name: []const u8, posts: []const Post = &.{} };
-    const Posts = zom.Relation(zom.Schema(Post, "posts", .id, .{}), zom.memory.Gateway);
+    const Posts = zom.Relation(PostSchema, zom.memory.Gateway);
     const AuthorMapper = zom.Mapper(User, Author, .{
         .renames = &.{.{ .from = "name", .to = "full_name" }},
     });
@@ -38,24 +42,17 @@ test "README: Usage, then A longer tour" {
     const changed = try users.byPk(1).update().set(.age, 32).commit(); // 1
     const removed = try users.where(.age, .gt, 100).delete(); // 0
 
-    // Tuples become entities, then children are attached. combineMany
-    // allocates one slice per parent, so give it an arena.
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const authors = try users.mapWith(AuthorMapper, arena.allocator());
-    try zom.combineMany(
-        .{ .into = "posts", .parent_key = "id", .child_key = "user_id" },
-        arena.allocator(),
-        authors,
-        try posts.toSlice(arena.allocator()),
-    );
+    // Tuples become entities, each with its posts attached: one query for
+    // the users, one for their posts. One deinit frees the whole tree.
+    var authors = try users.combine(.posts, posts).mapWith(AuthorMapper, allocator);
+    defer authors.deinit();
 
     // -- checks (not in the README) ---------------------------------------
     try testing.expectEqual(1, active.len);
     try testing.expectEqual(1, changed);
     try testing.expectEqual(0, removed);
-    try testing.expectEqualStrings("Achieng", authors[0].full_name);
-    try testing.expectEqual(1, authors[0].posts.len);
+    try testing.expectEqualStrings("Achieng", authors.items[0].full_name);
+    try testing.expectEqual(1, authors.items[0].posts.len);
 }
 
 test "README: Projections" {
@@ -231,7 +228,6 @@ const assoc = struct {
 };
 
 test "README: Associations" {
-    const zom = assoc.zom;
     const posts = assoc.UserSchema.association(.posts);
     try testing.expect(posts.kind == .has_many);
     try testing.expect(posts.target == assoc.PostSchema);
@@ -239,21 +235,6 @@ test "README: Associations" {
     try testing.expectEqualStrings("id", posts.primary_key);
     try testing.expect(assoc.UserSchema.associations.posts.target == assoc.PostSchema);
     try testing.expect(assoc.PostSchema.association(.author).target == assoc.UserSchema);
-
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    var authors_buf = [_]assoc.Author{ .{ .id = 1, .name = "Achieng" }, .{ .id = 2, .name = "Baraka" } };
-    const authors: []assoc.Author = &authors_buf;
-    const rows: []const assoc.Post = &.{ .{ .id = 10, .user_id = 2, .title = "b" }, .{ .id = 11, .user_id = 1, .title = "a" } };
-    try zom.combineMany(
-        .{ .into = "posts", .parent_key = posts.primary_key, .child_key = posts.foreign_key },
-        arena.allocator(),
-        authors,
-        rows,
-    );
-    try testing.expectEqual(1, authors[0].posts.len);
-    try testing.expectEqual(11, authors[0].posts[0].id);
-    try testing.expectEqual(10, authors[1].posts[0].id);
 }
 
 test "README: Combine" {

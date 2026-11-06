@@ -293,7 +293,8 @@ for rom.
 - Associated changesets (rom-changeset's `associate`) set foreign keys on
   create.
 - **Done when** combine works the same on memory, csv and pg, and
-  `combineMany` is deprecated.
+  `combineMany` is deprecated. Done: it carries a `/// Deprecated:` doc
+  comment, and `-Dno-deprecated` turns each call into a compile error.
 
 ### Phase 5: repositories, transactions, plugins
 - `zom.Repository(.{ .root = .users, .relations = .{ .users, .posts } })`

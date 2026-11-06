@@ -21,11 +21,16 @@ pub fn build(b: *std.Build) void {
     // when zom is someone else's dependency.
     const with_pg = b.option(bool, "pg", "Build the zom_pg module (fetches pg.zig)") orelse (b.pkg_hash.len == 0);
 
+    // Turns deprecated declarations (zom.combineMany) into compile errors,
+    // to find the calls left before they are removed.
+    const no_deprecated = b.option(bool, "no-deprecated", "Make uses of deprecated zom declarations compile errors") orelse false;
+
     const mod = b.addModule("zom", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
+    mod.addOptions("build_options", buildOptions(b, no_deprecated));
 
     const test_step = b.step("test", "Run zom.zig tests");
     const test_adapters = b.step("test-adapters", "Run the tests of every adapter module");
@@ -218,6 +223,13 @@ fn addExampleTests(b: *std.Build, step: *std.Build.Step, optimize: std.builtin.O
     }
 }
 
+/// The `build_options` module that zom's source imports.
+fn buildOptions(b: *std.Build, no_deprecated: bool) *std.Build.Step.Options {
+    const options = b.addOptions();
+    options.addOption(bool, "no_deprecated", no_deprecated);
+    return options;
+}
+
 const compile_errors_dir = "tests/compile_errors";
 const expect_prefix = "// expect: ";
 
@@ -225,8 +237,11 @@ const expect_prefix = "// expect: ";
 /// say "this must not compile", so each case must exit 1 with the text of every
 /// leading `// expect:` line (at least the first line of the file) somewhere in
 /// stderr. Several lines let one case check every line of a multi-line error.
+/// The cases build zom with `no_deprecated` set, so one of them can check the
+/// deprecation error, and no other case relies on a deprecated declaration.
 fn addCompileErrorCases(b: *std.Build, step: *std.Build.Step) void {
     const io = b.graph.io;
+    const build_options = buildOptions(b, true).getOutput();
     var dir = b.build_root.handle.openDir(io, compile_errors_dir, .{ .iterate = true }) catch |err|
         std.debug.panic("unable to open {s}: {t}", .{ compile_errors_dir, err });
     defer dir.close(io);
@@ -243,7 +258,9 @@ fn addCompileErrorCases(b: *std.Build, step: *std.Build.Step) void {
         const run = b.addSystemCommand(&.{ b.graph.zig_exe, "build-obj", "-fno-emit-bin", "--dep", "zom" });
         run.setName(b.fmt("compile-error {s}", .{entry.name}));
         run.addPrefixedFileArg("-Mroot=", b.path(b.fmt("{s}/{s}", .{ compile_errors_dir, entry.name })));
+        run.addArgs(&.{ "--dep", "build_options" });
         run.addPrefixedFileArg("-Mzom=", b.path("src/root.zig"));
+        run.addPrefixedFileArg("-Mbuild_options=", build_options);
         run.expectExitCode(1);
         var lines = std.mem.splitScalar(u8, source, '\n');
         while (lines.next()) |line| {

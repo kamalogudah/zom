@@ -69,7 +69,12 @@ Each row below says whether that part exists today or is planned (see
 const zom = @import("zom");
 
 const User = struct { id: u32, name: []const u8, age: u8, deleted_at: ?i64 = null };
-const Users = zom.Relation(zom.Schema(User, "users", .id, .{}), zom.memory.Gateway);
+const Post = struct { id: u32, user_id: u32, title: []const u8 };
+const PostSchema = zom.Schema(Post, "posts", .id, .{});
+const UserSchema = zom.Schema(User, "users", .id, .{
+    .associations = .{ .posts = zom.hasMany(PostSchema, .user_id) },
+});
+const Users = zom.Relation(UserSchema, zom.memory.Gateway);
 
 var gw = zom.memory.Gateway.init(allocator, .{});
 defer gw.deinit();
@@ -89,9 +94,8 @@ compiled and run by that command, from [examples/readme.zig](examples/readme.zig
 Continuing from the block above:
 
 ```zig
-const Post = struct { id: u32, user_id: u32, title: []const u8 };
 const Author = struct { id: u32, full_name: []const u8, posts: []const Post = &.{} };
-const Posts = zom.Relation(zom.Schema(Post, "posts", .id, .{}), zom.memory.Gateway);
+const Posts = zom.Relation(PostSchema, zom.memory.Gateway);
 const AuthorMapper = zom.Mapper(User, Author, .{
     .renames = &.{.{ .from = "name", .to = "full_name" }},
 });
@@ -103,17 +107,10 @@ _ = try posts.create(.{ .id = 10, .user_id = 1, .title = "Relations are values" 
 const changed = try users.byPk(1).update().set(.age, 32).commit(); // 1
 const removed = try users.where(.age, .gt, 100).delete(); // 0
 
-// Tuples become entities, then children are attached. combineMany
-// allocates one slice per parent, so give it an arena.
-var arena = std.heap.ArenaAllocator.init(allocator);
-defer arena.deinit();
-const authors = try users.mapWith(AuthorMapper, arena.allocator());
-try zom.combineMany(
-    .{ .into = "posts", .parent_key = "id", .child_key = "user_id" },
-    arena.allocator(),
-    authors,
-    try posts.toSlice(arena.allocator()),
-);
+// Tuples become entities, each with its posts attached: one query for
+// the users, one for their posts. One deinit frees the whole tree.
+var authors = try users.combine(.posts, posts).mapWith(AuthorMapper, allocator);
+defer authors.deinit();
 ```
 
 ## API (v0.2)
@@ -153,7 +150,7 @@ breaking change needs a minor version bump and an entry in
 | `zom.changeset` | `Create(Rel)`, `CreateMany(Rel)`, `Update(Rel)` and `Scoped(Rel, keys)`, the types returned by `relation.create`, `relation.createMany`, `relation.update` and `relation.associate`. You don't name them yourself; `Scoped`'s `Input` is the struct its `create` takes. |
 | `zom.Mapper(Src, Dst, .{ .renames, .skip })` | A comptime mapper: `call(src) Dst` and `many(allocator, srcs) ![]Dst`. A `Dst` field takes the `Src` field of the same name (or its rename), else its default; neither is a compile error. Fields named in `skip` are left undefined for the caller to fill. `sources` lists the `Src` fields it copies, and `options` the options it was made with. |
 | `zom.Combined(Source, association, Target)`, `zom.CombineResult(E)` | What `relation.combine(.assoc, target)` returns, and what its `mapTo` / `mapWith` return: `items: []E` and the arena owning them, freed with `deinit()`. See [Associations](#associations). |
-| `zom.combineMany(.{ .into, .parent_key, .child_key }, allocator, parents, children)` | Sets `parent.into` to the children whose `child_key` equals the parent's `parent_key`, on slices already loaded. O(n·m); prefer `relation.combine`. |
+| `zom.combineMany(.{ .into, .parent_key, .child_key }, allocator, parents, children)` | **Deprecated:** use `relation.combine`. Sets `parent.into` to the children whose `child_key` equals the parent's `parent_key`, on slices already loaded, in O(n·m). Build with `-Dno-deprecated` to make each call a compile error. |
 | `zom.mapper` | The module behind `Mapper` and `combineMany`, with their option types `Options`, `Rename` and `CombineOptions`. |
 | `zom.codec` | Text cells to field values, for adapters whose rows arrive as strings. `decodeField(F, text, opts) !F` decodes one cell, and `decodeRow(T, cells, opts, ?*Diagnostic) !T` decodes a row, in field order or through `Options.columns`. `Options.null_text` (default `""`) means null. Strings borrow the cells. On error the `Diagnostic` has `row`, `column`, `field`, `text` and `err`, and formats with `{f}` as `14:3 (age): "abc" is not an integer from 0 to 255`. The other way, `encodeField(writer, value, opts)` and `encodeRow(writer, T, row, opts, sep)` write values back so they decode to the same thing: ints `{d}`, floats in their shortest round-trip form (decimal, or scientific outside `1e-6`..`1e21`), `true`/`false`, tag names, strings as they are, `null` as `null_text`. Nothing is quoted; that is the format writer's job. The accepted spellings are listed in `src/codec.zig`. |
 | `zom.memory` | The in-memory adapter: `Gateway` (`adapter_name = "memory"`, `Config = struct {}`, `init(allocator, Config)`, `deinit()`), whose dataset is `Store(S)`. Every capability except `transaction`. |
@@ -348,14 +345,14 @@ compile errors.
 
 [examples/csv_users](examples/csv_users/src/main.zig) puts two adapters in
 one container: users read from `data/users.csv` through `zom_csv.Gateway`,
-posts held in `zom.memory.Gateway`, joined with `zom.combineMany`. Run it
+posts held in `zom.memory.Gateway`, combined with `users.combine(.posts, posts)`. Run it
 with `cd examples/csv_users && zig build run`; `zig build test` at the root
 runs it too and checks its output.
 
 ### Associations
 
-A schema declares its associations once, in its options, instead of spelling
-out keys at every `combineMany` call:
+A schema declares its associations once, in its options, so `combine`,
+`join` and `associate` never take keys:
 
 ```zig
 const UserSchema = zom.Schema(User, "users", .id, .{
@@ -527,9 +524,10 @@ the other schema's rows: `users.associate(.posts, post)` points you at
 #### Nesting
 
 Nested combines (`users.combine(.posts.combine(.comments))`) are not
-supported yet. `combineMany`, which joins slices already loaded in O(n·m),
-still works, and takes its keys from the descriptor as well as from strings:
-`.{ .into = "posts", .parent_key = posts.primary_key, .child_key = posts.foreign_key }`.
+supported yet. Until they are, the deprecated `combineMany` can attach a
+second level to slices already loaded, in O(n·m), with its keys taken from
+the descriptor:
+`.{ .into = "comments", .parent_key = comments.primary_key, .child_key = comments.foreign_key }`.
 
 ### Value
 
@@ -860,7 +858,6 @@ condition (`DuplicatePrimaryKey`, `ValueOutOfRange`, `NotFound`, `ReadOnly`,
 These are scheduled in [plan.md](plan.md) and will each come with a version
 bump and a changelog entry:
 
-- Phase 4: `zom.combineMany` is deprecated in favour of `combine`.
 - Phase 6: `zom.Value` gains a `u128` variant.
 
 ## Memory rules
@@ -901,7 +898,9 @@ bump and a changelog entry:
   its values are comptime-known and stored statically.
 - The gateway must outlive every relation made from it, and
   `memory.Gateway.deinit` frees all of its datasets at once.
-- For `combineMany`, use an arena: it allocates one child slice per parent.
+- `relation.combine(...).mapTo` returns a `zom.CombineResult` whose
+  `deinit()` frees every slice and string in it. For the deprecated
+  `combineMany`, use an arena: it allocates one child slice per parent.
 
 ## Memory adapter semantics
 
@@ -940,7 +939,7 @@ rom-yaml:
    and zom-pg in `adapters/pg`; transactions and CI against a Postgres
    container are next.*
 4. Associations in the schema, and `combine` with one `IN (...)` query
-   instead of today's O(n·m) `combineMany`.
+   instead of the O(n·m) `combineMany`, now deprecated.
 5. Repositories, transactions and plugins (timestamps, pagination).
 6. `zom-tigerbeetle` on the native Zig client: immutable accounts and
    transfers, batched writes.
@@ -1035,10 +1034,12 @@ export fn entry() void {
 }
 ```
 
-`zig build compile-errors` (also run by `zig build test`) compiles every case and fails if one compiles, or if its stderr doesn't contain the `// expect:` text. For a multi-line error, start the file with several `// expect:` lines (one per line of the message, without its indentation); each must appear in stderr, as in `adapter_missing_decls.zig`. To add a case, drop a new `.zig` file in the folder; `build.zig` picks it up. Put the illegal code inside an `export fn` so the compiler analyzes it, and copy the expected text from the real error (types declared in the case show up as `<file name>.<Type>`). To reproduce one by hand:
+`zig build compile-errors` (also run by `zig build test`) compiles every case and fails if one compiles, or if its stderr doesn't contain the `// expect:` text. For a multi-line error, start the file with several `// expect:` lines (one per line of the message, without its indentation); each must appear in stderr, as in `adapter_missing_decls.zig`. To add a case, drop a new `.zig` file in the folder; `build.zig` picks it up. Put the illegal code inside an `export fn` so the compiler analyzes it, and copy the expected text from the real error (types declared in the case show up as `<file name>.<Type>`). The cases build zom with `-Dno-deprecated` on, so a case can't lean on a deprecated declaration, and `combine_many_deprecated.zig` checks that error. To reproduce one by hand, give zom its `build_options` module:
 
 ```sh
-zig build-obj -fno-emit-bin --dep zom -Mroot=tests/compile_errors/null_on_non_optional.zig -Mzom=src/root.zig
+echo 'pub const no_deprecated: bool = true;' > /tmp/build_options.zig
+zig build-obj -fno-emit-bin --dep zom -Mroot=tests/compile_errors/null_on_non_optional.zig \
+  --dep build_options -Mzom=src/root.zig -Mbuild_options=/tmp/build_options.zig
 ```
 
 ### 5. Good first tickets

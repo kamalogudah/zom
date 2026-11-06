@@ -9,6 +9,9 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- A `no-deprecated` build option. With `-Dno-deprecated`, using a
+  deprecated declaration is a compile error that names its replacement.
+  zom's source reads it as `@import("build_options").no_deprecated`.
 - `relation.associate(.assoc, parent)`, ROM's `changeset.associate(user)`
   with the parent first: `posts.associate(.author, user).create(.{ ... })`
   takes the tuple without the foreign key (`Input`) and sets it from the
@@ -82,6 +85,26 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
   `-Dpg=false`) and `pg.yml` (zom-pg against a Postgres container), so a
   Postgres failure no longer fails the core's run. The pg step now runs
   with `pipefail`, so a failing test can't pass behind `tee`.
+
+### Deprecated
+
+- `zom.combineMany`: use `relation.combine(.assoc, target)`, which reads the
+  children with one `in` query and groups them in O(n + m) where
+  `combineMany` matched loaded slices in O(n·m). Instead of
+
+      const authors = try users.mapWith(AuthorMapper, arena);
+      try zom.combineMany(.{ .into = "posts", .parent_key = "id", .child_key = "user_id" },
+          arena, authors, try posts.toSlice(arena));
+
+  declare `.posts = zom.hasMany(PostSchema, .user_id)` on the users schema
+  and write
+
+      var authors = try users.combine(.posts, posts).mapWith(AuthorMapper, allocator);
+      defer authors.deinit(); // authors.items
+
+  `combineMany` still works, and will be removed in a later 0.x release.
+  Build with `-Dno-deprecated` (`.@"no-deprecated" = true` from a
+  dependent) to make every call a compile error. ([#46])
 
 ### Removed (breaking)
 
@@ -563,3 +586,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#39]: https://github.com/kamalogudah/zom/issues/39
 [#40]: https://github.com/kamalogudah/zom/issues/40
 [#41]: https://github.com/kamalogudah/zom/issues/41
+[#46]: https://github.com/kamalogudah/zom/issues/46

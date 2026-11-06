@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const q = @import("query.zig");
+const build_options = @import("build_options");
 
 pub const Rename = struct { from: []const u8, to: []const u8 };
 pub const Options = struct {
@@ -83,15 +84,25 @@ pub const CombineOptions = struct {
     child_key: []const u8,
 };
 
+/// Deprecated: use `Relation.combine`, e.g.
+/// `users.combine(.posts, posts).mapTo(Author, allocator)`, which reads the
+/// children with one `in` query and groups them in O(n + m). To be removed
+/// in a later 0.x release; build with `-Dno-deprecated` to turn the calls
+/// left into compile errors.
+///
 /// ROM's `users.combine(:posts)` for a has-many association, done on loaded
 /// entities: each parent gets the children whose `child_key` equals its
-/// `parent_key`. Use an arena; the child slices are allocated per parent.
+/// `parent_key`, in O(n·m). Use an arena; the child slices are allocated per
+/// parent.
 pub fn combineMany(
     comptime opts: CombineOptions,
     allocator: std.mem.Allocator,
     parents: anytype,
     children: anytype,
 ) !void {
+    if (build_options.no_deprecated)
+        @compileError("zom.combineMany is deprecated: use relation.combine(.assoc, target).mapTo(E, allocator) " ++
+            "(built with -Dno-deprecated)");
     const Child = @typeInfo(@TypeOf(children)).pointer.child;
     for (parents) |*parent| {
         const key = q.toValue(@field(parent.*, opts.parent_key));
