@@ -5,9 +5,9 @@ on its C client (`tb_client`). TigerBeetle tests zom's adapter contract
 hardest: two fixed schemas, 128-bit ids, immutable records, batched writes
 and limited queries (plan.md, Phase 6).
 
-**Status:** inserts (#55). `create` and `createMany` work, with typed
-errors for TigerBeetle's result codes. Reads come in #56: until then,
-`read` and `count` return `error.Unimplemented`.
+**Status:** inserts (#55) and reads (#56). `create` and `createMany` work,
+with typed errors for TigerBeetle's result codes, and relations read
+through `lookup_*` and `query_*`.
 
 ## Schemas
 
@@ -130,10 +130,86 @@ is caught before anything is sent.
 A failed transfer's id stays taken. Sending it again gives
 `error.IdAlreadyFailed`, not a second try.
 
-### Threads
+## Reads
+
+```zig
+const one = try accounts.byPk(id).one(allocator); // lookup_accounts
+const some = try accounts.whereIn(.id, ids).toSlice(allocator); // lookup_accounts, up to 64 ids
+const newest = try transfers // query_transfers
+    .where(.ledger, .eq, 700)
+    .where(.user_data_128, .eq, order_id)
+    .where(.timestamp, .gte, since)
+    .order(.timestamp, .desc)
+    .limit(50)
+    .toSlice(allocator);
+```
+
+| Relation | TigerBeetle |
+|---|---|
+| `byPk(id)`, `where(.id, .eq, id)`, `where(.id, .in, ids)` / `whereIn` | `lookup_accounts` / `lookup_transfers`, one request |
+| `.eq` on `user_data_128`, `user_data_64`, `user_data_32`, `ledger`, `code` | `query_accounts` / `query_transfers`, one `QueryFilter` |
+| `timestamp` by `eq`, `lt`, `lte`, `gt`, `gte`, `between` | the filter's `timestamp_min` / `timestamp_max` |
+| `.order(.timestamp, .asc)` / `.desc` | the filter's `reversed` flag |
+| `.limit(n)` | the filter's `limit`, in pages of up to 8189 |
+| anything else, and `offset` | a compile error, or in memory with `allowFallback()` |
+
+The datasets declare this to zom: `supports` (`in`, and no `offset`),
+`filterable(field, op)` and `orderable(field)`. A strict relation that uses
+anything else doesn't compile, and the message names the call:
+
+```
+zom: adapter 'tigerbeetle' cannot evaluate `where(.amount, .gt, ...)` on relation 'transfers':
+its dataset's `filterable` rejects `.gt` on 'amount'; call `allowFallback()` on the relation
+to evaluate it in memory instead
+```
+
+With `allowFallback()`, zom sends the part TigerBeetle can do and runs the
+rest in memory. TigerBeetle orders only by `timestamp`, so a `.fallback`
+`order(.amount, .desc)` reads every matching row and sorts them.
+
+- **An id filter wins.** With `where(.id, ...)` the read is a lookup, and
+  any other filter, order and limit is applied to the (at most 64) rows it
+  returns. Without an order, they come in the order the ids were given.
+- **Every row is checked.** The gateway checks each row the cluster
+  returns against the whole query, so a filter a `QueryFilter` can't hold
+  is still right, just slower. In a `QueryFilter`, 0 means "no filter", so
+  `where(.user_data_64, .eq, 0)` reads rows with any `user_data_64` and
+  keeps the zeros. A query that can't match anything, such as `ledger = 1
+  AND ledger = 2` or an empty timestamp range, sends no request at all.
+- **Paging.** A reply holds at most 8189 records, on any cluster:
+  `--development` lowers the request limit, not the reply limit. A longer
+  read sends the next page from just past the last timestamp. A page
+  shorter than asked for is the last one.
+- **`offset`** isn't supported. TigerBeetle can only start from a
+  timestamp, so skipping rows means reading them, and `.fallback` makes
+  that visible. To page, filter on the timestamp of the last row you read:
+  `where(.timestamp, .lt, last.timestamp).order(.timestamp, .desc).limit(n)`.
+- **`count`.** TigerBeetle has no count operation, so `count` pages
+  through the matching rows and counts them without keeping them. It costs
+  as many requests as reading them.
+- **Bounded.** A read or count that fetches `Config.scan_max` records (2^20
+  by default) without finishing fails with `error.ScanLimitExceeded`. A
+  read with a limit on filters TigerBeetle evaluates fetches at most that
+  limit. A count, or a read without a limit, fetches every match.
+- **Atomicity.** Pages are separate requests. Rows created between them
+  can show up in a later page, as TigerBeetle's docs warn for lookups too.
+
+### zom.lint
+
+zom.lint defines its own schema (`lint_users`, with a string `name`), and
+TigerBeetle's two schemas are fixed, so the suite can't run here. Instead,
+a live test (`lint read checks` in gateway.zig) seeds six accounts. It runs
+the kinds of queries lint's read checks use on them: every supported op,
+`in`, ranges, `whereAny` / `whereNot`, orders, limit and offset, strict
+and `.fallback`. It compares each result and count with the same query
+evaluated in memory on the seeded rows. Lint's order checks (by `name`,
+`age`, `id`) have no counterpart, because TigerBeetle orders by
+`timestamp` only.
+
+## Threads
 
 The client runs its own thread for all network I/O. zom's calls are
-synchronous, so each `create` or `createMany` request blocks the calling
+synchronous, so each request (`create`, `createMany`, or a read's page) blocks the calling
 task on a `std.Io.Event` until the client's thread delivers the reply. The
 wait can't be cancelled, because the client writes into the request until
 it completes. One gateway can be shared by several threads. Their requests

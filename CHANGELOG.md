@@ -9,6 +9,29 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- zom-tigerbeetle reads: `byPk` and `where(.id, .in, ...)` are one
+  `lookup_accounts` / `lookup_transfers`; `eq` on `user_data_128/64/32`,
+  `ledger` and `code` and `timestamp` ranges (`eq`, `lt`, `lte`, `gt`,
+  `gte`, `between`) are `query_accounts` / `query_transfers` with one
+  `QueryFilter`; `order(.timestamp, .desc)` is its `reversed` flag, and
+  `limit` its limit, paged with a timestamp cursor past 8189 rows. The
+  datasets declare `supports` (`in`, no `offset`), `filterable` and
+  `orderable`, so any other filter, order, or `offset` is a compile error
+  on a strict relation (`its dataset's `filterable` rejects `.gt` on
+  'amount'`) and runs in memory with `allowFallback()`. Every returned row
+  is checked against the whole query, so values a `QueryFilter` can't hold
+  (`user_data_64 = 0`, where 0 means no filter) are still right. TigerBeetle
+  has no count, so `count` pages through the matches without keeping them.
+  Reads and counts are bounded by `Config.scan_max` (2^20 rows,
+  `error.ScanLimitExceeded`). `error.Unimplemented` is gone. zom.lint can't
+  run on TigerBeetle's fixed schemas; a live test runs its read checks'
+  queries on accounts against the same queries evaluated in memory. ([#56])
+- Adapter contract: an optional `orderable(comptime field) bool` on a
+  dataset narrows ordering per attribute, as `filterable` does filters.
+  `Adapter.orderGap` consults it, so a strict relation ordering by a
+  rejected field doesn't compile and a `.fallback` one sorts in memory.
+  zom.lint skips a check that orders by an attribute the dataset can't.
+  ([#56])
 - zom-tigerbeetle inserts: `create` / `createMany` (the datasets' `insert`
   and `insertMany`) on `create_accounts` / `create_transfers`. `insert`
   returns the row with the `timestamp` the cluster gave it. `insertMany`
@@ -700,3 +723,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#53]: https://github.com/kamalogudah/zom/issues/53
 [#54]: https://github.com/kamalogudah/zom/issues/54
 [#55]: https://github.com/kamalogudah/zom/issues/55
+[#56]: https://github.com/kamalogudah/zom/issues/56

@@ -29,6 +29,8 @@ pub const LimitedGateway = Gateway("limited", LimitedDataset);
 pub const JoinNoLikeGateway = Gateway("joinnolike", JoinNoLikeDataset);
 /// Reads, supporting boolean groups but not `in`.
 pub const OrOnlyGateway = Gateway("oronly", OrOnlyDataset);
+/// Reads, ordering by `name` only (`orderable`), not even by the key.
+pub const OrderableGateway = Gateway("orderable", OrderableDataset);
 /// `filterable` with the wrong signature.
 pub const BadFilterableGateway = Gateway("badfilterable", BadFilterableDataset);
 /// Caller-owned strings, with `insert` taking the allocator (like zom-pg).
@@ -127,6 +129,21 @@ fn JoinNoLikeDataset(comptime S: type) type {
     return struct {
         pub const supports: zom.Supports = .{ .join = true };
 
+        pub fn read(_: *@This(), _: Q, a: std.mem.Allocator) ![]S.Tuple {
+            return a.alloc(S.Tuple, 0);
+        }
+        pub fn count(_: *@This(), _: Q) !usize {
+            return 0;
+        }
+    };
+}
+
+fn OrderableDataset(comptime S: type) type {
+    const Q = zom.Query(S.Tuple);
+    return struct {
+        pub fn orderable(comptime field: []const u8) bool {
+            return std.mem.eql(u8, field, "name");
+        }
         pub fn read(_: *@This(), _: Q, a: std.mem.Allocator) ![]S.Tuple {
             return a.alloc(S.Tuple, 0);
         }

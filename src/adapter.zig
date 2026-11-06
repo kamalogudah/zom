@@ -40,6 +40,7 @@
 //!   pub const supports: zom.Supports                 // query features
 //!   readProjected(*Self, Q, comptime P: type, std.mem.Allocator) ![]P
 //!   pub fn filterable(comptime field: []const u8, comptime op: zom.Op) bool
+//!   pub fn orderable(comptime field: []const u8) bool
 //!   pub const strings: zom.StringOwnership           // .dataset when left out
 //!
 //! `strings` says who owns the strings in the tuples `read`, `readProjected`
@@ -59,6 +60,11 @@
 //! `ledger` and `code`, not on `amount`). zom calls it at compile time with
 //! a field name and an op that `supports` already allows; returning false
 //! makes that filter unsupported. Without it, every attribute is filterable.
+//!
+//! `orderable` does the same for sort keys: zom calls it with a field that
+//! `supports.order_on` (or being the primary key) already allows, and false
+//! makes ordering by it unsupported. TigerBeetle, for one, orders only by
+//! `timestamp`, which is not its primary key.
 //!
 //! A relation that uses a feature the dataset does not support is a compile
 //! error in `.strict` mode (the default), or evaluated in memory after the
@@ -89,7 +95,8 @@ pub const Supports = struct {
     in: bool = false,
     /// `.like` and `.ilike` filters: pattern matching on strings.
     like: bool = false,
-    /// Ordering by any attribute. Without it, only the primary key.
+    /// Ordering by any attribute. Without it, only the primary key. The
+    /// dataset's `orderable` narrows either.
     order_on: bool = true,
     /// Skipping rows with `offset`.
     offset: bool = true,
@@ -208,8 +215,12 @@ pub fn Adapter(comptime G: type) type {
 
         /// Null when the dataset for `S` can order by `field`, else why not.
         pub fn orderGap(comptime S: type, comptime field: []const u8) ?[]const u8 {
-            if (supports(S).order_on or std.mem.eql(u8, field, @tagName(S.primary_key))) return null;
-            return "`supports.order_on` is false, so it only orders by the primary key '" ++ @tagName(S.primary_key) ++ "'";
+            if (!supports(S).order_on and !std.mem.eql(u8, field, @tagName(S.primary_key)))
+                return "`supports.order_on` is false, so it only orders by the primary key '" ++ @tagName(S.primary_key) ++ "'";
+            const D = Dataset(S);
+            if (@hasDecl(D, "orderable") and !D.orderable(field))
+                return "its dataset's `orderable` rejects ordering by '" ++ field ++ "'";
+            return null;
         }
 
         /// The dataset's `strings`, or `.dataset` when it declares none.
@@ -426,6 +437,12 @@ fn checkDataset(comptime G: type, comptime S: type) void {
         .params = &.{ []const u8, q.Op },
         .returns = .{ .exactly = bool },
         .text = "fn (comptime field: []const u8, comptime op: zom.Op) bool",
+    });
+    problems = problems ++ checkMethod(D, "orderable", false, .{
+        .self = false,
+        .params = &.{[]const u8},
+        .returns = .{ .exactly = bool },
+        .text = "fn (comptime field: []const u8) bool",
     });
 
     if (problems.len > 0) @compileError(header ++ problems);

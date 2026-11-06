@@ -329,6 +329,24 @@ fn FilterableDataset(comptime S: type) type {
     };
 }
 
+/// Orders by `name` only, not by its primary key (like TigerBeetle, which
+/// orders by `timestamp`).
+fn OrderableDataset(comptime S: type) type {
+    const T = S.Tuple;
+    const Q = zom.Query(T);
+    return struct {
+        pub fn orderable(comptime field: []const u8) bool {
+            return std.mem.eql(u8, field, "name");
+        }
+        pub fn read(_: *@This(), _: Q, a: std.mem.Allocator) ![]T {
+            return a.alloc(T, 0);
+        }
+        pub fn count(_: *@This(), _: Q) !usize {
+            return 0;
+        }
+    };
+}
+
 test "filterGap and orderGap combine supports with filterable" {
     const A = zom.Adapter(FakeGateway(FilterableDataset));
     comptime {
@@ -340,6 +358,12 @@ test "filterGap and orderGap combine supports with filterable" {
         std.debug.assert(std.mem.indexOf(u8, A.filterGap(Items, "id", .like).?, "supports.like") != null);
         std.debug.assert(A.orderGap(Items, "id") == null);
         std.debug.assert(A.orderGap(Items, "name") != null);
+    }
+    // `orderable` narrows `order_on`, even on the primary key.
+    const O = zom.Adapter(FakeGateway(OrderableDataset));
+    comptime {
+        std.debug.assert(O.orderGap(Items, "name") == null);
+        std.debug.assert(std.mem.indexOf(u8, O.orderGap(Items, "id").?, "`orderable` rejects ordering by 'id'") != null);
     }
     // Memory supports everything, on every field.
     const M = zom.Adapter(zom.memory.Gateway);

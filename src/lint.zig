@@ -126,25 +126,29 @@ const Check = struct {
     needs_any: []const adapter.Capability = &.{},
     /// `zom.Supports` fields that must be true for the check to run.
     features: []const []const u8 = &.{},
+    /// Attributes of `Users` the check orders by: it is skipped when the
+    /// dataset can't order by one of them (`supports.order_on`, or its
+    /// `orderable`).
+    orders: []const []const u8 = &.{},
 };
 
 const checks = .{
     .{ Check{ .name = "read: no filters returns every row" }, checkReadAll },
-    .{ Check{ .name = "read: strings stay valid after later reads" }, checkReadStrings },
+    .{ Check{ .name = "read: strings stay valid after later reads", .orders = &.{"id"} }, checkReadStrings },
     .{ Check{ .name = "filter: every op on an int attribute" }, checkIntOps },
     .{ Check{ .name = "filter: eq/neq on string and enum attributes" }, checkStringOps },
     .{ Check{ .name = "filter: null semantics" }, checkNulls },
-    .{ Check{ .name = "filter: in / not_in, from a tuple and from a slice", .features = &.{"in"} }, checkIn },
+    .{ Check{ .name = "filter: in / not_in, from a tuple and from a slice", .features = &.{"in"}, .orders = &.{"id"} }, checkIn },
     .{ Check{ .name = "filter: like / ilike", .features = &.{"like"} }, checkLike },
     .{ Check{ .name = "filter: between, inclusive" }, checkBetween },
-    .{ Check{ .name = "filter: or / not groups, with SQL's three-valued logic", .features = &.{"or"} }, checkBoolean },
-    .{ Check{ .name = "order: on the primary key" }, checkOrderPk },
-    .{ Check{ .name = "order: on other attributes and on several, nulls last on asc", .features = &.{"order_on"} }, checkOrderOn },
-    .{ Check{ .name = "limit" }, checkLimit },
-    .{ Check{ .name = "offset", .features = &.{"offset"} }, checkOffset },
-    .{ Check{ .name = "one: null, one tuple, or error.MoreThanOneTuple" }, checkOne },
-    .{ Check{ .name = "select: readProjected keeps filters, order and limit", .features = &.{ "projection", "order_on" } }, checkProjection },
-    .{ Check{ .name = "join: rows with a matching row in another dataset, each once", .features = &.{"join"} }, checkJoin },
+    .{ Check{ .name = "filter: or / not groups, with SQL's three-valued logic", .features = &.{"or"}, .orders = &.{"id"} }, checkBoolean },
+    .{ Check{ .name = "order: on the primary key", .orders = &.{"id"} }, checkOrderPk },
+    .{ Check{ .name = "order: on other attributes and on several, nulls last on asc", .features = &.{"order_on"}, .orders = &.{ "name", "age", "role", "id" } }, checkOrderOn },
+    .{ Check{ .name = "limit", .orders = &.{"id"} }, checkLimit },
+    .{ Check{ .name = "offset", .features = &.{"offset"}, .orders = &.{"id"} }, checkOffset },
+    .{ Check{ .name = "one: null, one tuple, or error.MoreThanOneTuple", .orders = &.{"id"} }, checkOne },
+    .{ Check{ .name = "select: readProjected keeps filters, order and limit", .features = &.{ "projection", "order_on" }, .orders = &.{ "age", "id", "name" } }, checkProjection },
+    .{ Check{ .name = "join: rows with a matching row in another dataset, each once", .features = &.{"join"}, .orders = &.{"id"} }, checkJoin },
     .{ Check{ .name = "insert: returns the stored tuple, error.DuplicatePrimaryKey", .needs = &.{.writable} }, checkInsert },
     .{ Check{ .name = "insert: strings are copied", .needs = &.{.writable} }, checkInsertCopies },
     .{ Check{ .name = "insertMany: count, error.DuplicatePrimaryKey", .needs_any = &.{ .batch_insert, .writable } }, checkInsertMany },
@@ -197,6 +201,10 @@ fn skipReason(comptime A: type, comptime c: Check) ?[]const u8 {
     for (c.features) |f| {
         if (!@field(s, f))
             return std.fmt.comptimePrint("dataset does not support `{s}`", .{f});
+    }
+    for (c.orders) |f| {
+        if (A.orderGap(Users, f)) |why|
+            return std.fmt.comptimePrint("it orders by '{s}', but {s}", .{ f, why });
     }
     return null;
 }

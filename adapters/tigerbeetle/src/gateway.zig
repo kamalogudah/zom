@@ -5,8 +5,16 @@
 //! Writes are `insert` and `insertMany`, on `create_accounts` /
 //! `create_transfers`. TigerBeetle records are immutable, so the datasets
 //! have no `update` and no `delete`: `relation.update()` and
-//! `relation.delete()` don't compile. Reads (`lookup_*` / `query_*`) come in
-//! #56; until then `read` and `count` return `error.Unimplemented`.
+//! `relation.delete()` don't compile.
+//!
+//! Reads are `lookup_*` for `byPk` and `where(.id, .in, ...)`, and
+//! `query_*` for equality on `user_data_128/64/32`, `ledger` and `code`
+//! and ranges of `timestamp`, ordered by `timestamp` either way and paged
+//! through with a timestamp cursor. Other filters and orders are a compile
+//! error on a strict relation, and run in memory on a `.fallback` one; so
+//! does `offset`, which TigerBeetle has no way to do. See read.zig for the
+//! whole mapping. TigerBeetle can't count, so `count` reads the matching
+//! rows and counts them: at most `Config.scan_max`, like any read.
 //!
 //! ## Threads and blocking
 //!
@@ -28,6 +36,7 @@ const std = @import("std");
 const zom = @import("zom");
 const tb = @import("tb.zig");
 const results = @import("results.zig");
+const reads = @import("read.zig");
 const schemas = @import("schemas.zig");
 const c = tb.c;
 
@@ -52,6 +61,16 @@ pub const Gateway = struct {
         /// cluster's limit, which it then keeps (see `batchLimit`). Setting
         /// this to the cluster's limit skips that search.
         batch_max: u32 = tb.batch_max,
+        /// The most records one read or count fetches from the cluster
+        /// before it gives up with `error.ScanLimitExceeded`. Every read
+        /// that isn't a lookup pages through `query_*` replies of up to
+        /// 8189 records (`read.query_max`), so this is the bound on that
+        /// loop. A read with a limit, filtered on what TigerBeetle
+        /// evaluates, fetches no more than its limit; one without, or a
+        /// `count`, fetches every match. Rows filtered out in memory
+        /// count too: `user_data_64 = 0`, which `QueryFilter` can't say,
+        /// fetches every row to keep the ones with 0.
+        scan_max: u64 = 1 << 20,
     };
 
     /// What every zom-tigerbeetle call can fail with. The first is one of
@@ -78,8 +97,10 @@ pub const Gateway = struct {
         /// had the wrong size, or `tb_client_init` failed for no stated
         /// reason. A bug in zom-tigerbeetle.
         Unexpected,
-        /// Not written yet; see the file comment.
-        Unimplemented,
+        /// A read or count fetched `Config.scan_max` records and wasn't
+        /// done. Narrow it (a limit, or filters TigerBeetle evaluates), or
+        /// raise `scan_max`.
+        ScanLimitExceeded,
         OutOfMemory,
         /// `std.Io` cancelled the wait for a reply.
         Canceled,
@@ -95,6 +116,7 @@ pub const Gateway = struct {
         io: std.Io,
         allocator: Allocator,
         batch_max: u32,
+        scan_max: u64,
         /// What is known of the cluster's batch limit: the largest batch it
         /// took, and the smallest the client refused. Several threads may
         /// update them at once; a race only costs a retry.
@@ -160,6 +182,7 @@ pub const Gateway = struct {
     /// cluster shows up on the first request, not here.
     pub fn init(allocator: Allocator, config: Config) Error!Gateway {
         std.debug.assert(config.batch_max > 0);
+        std.debug.assert(config.scan_max > 0);
         const shared = try allocator.create(Shared);
         errdefer allocator.destroy(shared);
         shared.* = .{
@@ -167,6 +190,7 @@ pub const Gateway = struct {
             .io = config.io,
             .allocator = allocator,
             .batch_max = config.batch_max,
+            .scan_max = config.scan_max,
             .accounts = .{ .shared = shared },
             .transfers = .{ .shared = shared },
         };
@@ -286,6 +310,20 @@ fn TbDataset(comptime S: type) type {
 
         const Reply = if (is_account) c.tb_create_account_result_t else c.tb_create_transfer_result_t;
         const operation = if (is_account) c.TB_OPERATION_CREATE_ACCOUNTS else c.TB_OPERATION_CREATE_TRANSFERS;
+        const lookup_operation = if (is_account) c.TB_OPERATION_LOOKUP_ACCOUNTS else c.TB_OPERATION_LOOKUP_TRANSFERS;
+        const query_operation = if (is_account) c.TB_OPERATION_QUERY_ACCOUNTS else c.TB_OPERATION_QUERY_TRANSFERS;
+
+        /// Ids by `eq` and `in` (`supports.in`; `filterable` keeps `in` to
+        /// `id`). No `or` groups, `like`, projection or join, and no
+        /// `offset`: `query_*` can only start from a timestamp, so skipping
+        /// rows means reading them, which `.fallback` does in the open.
+        pub const supports: zom.Supports = .{ .in = true, .offset = false };
+        /// `id` by `eq` / `in`, `user_data_128/64/32`, `ledger` and `code`
+        /// by `eq`, `timestamp` by `eq`, `lt`, `lte`, `gt`, `gte` and
+        /// `between`. See read.zig.
+        pub const filterable = reads.filterable;
+        /// `timestamp` only.
+        pub const orderable = reads.orderable;
 
         /// `create_accounts` / `create_transfers` with one event. Returns
         /// the row as stored, with the `timestamp` the cluster gave it.
@@ -340,20 +378,141 @@ fn TbDataset(comptime S: type) type {
             return list.items.toOwnedSlice(allocator);
         }
 
-        /// `lookup_*` / `query_*`, in #56.
+        /// The rows matching `query`, through `lookup_*` or `query_*`
+        /// (see read.zig). Every returned row is checked against the whole
+        /// query, so any query is answered right; the relation only sends
+        /// what `filterable` and `orderable` accept, which TigerBeetle
+        /// evaluates itself. Without an order, a lookup's rows come in the
+        /// order of the ids asked for, and a query's by `timestamp`. An
+        /// `offset` (only from a direct call: `supports.offset` is false)
+        /// is applied by reading the skipped rows.
         pub fn read(self: *Self, query: Q, allocator: Allocator) Gateway.Error![]T {
-            _ = self;
-            _ = query;
-            _ = allocator;
-            return error.Unimplemented;
+            const p = reads.plan(T, &query);
+            var rows: Collect = .{ .allocator = allocator };
+            errdefer rows.items.deinit(allocator);
+            // Sorting needs every match; otherwise the first offset + limit do.
+            try self.scan(&query, p, if (p.sort) null else wanted(&query), &rows);
+
+            const items = rows.items.items;
+            if (p.sort) std.mem.sort(T, items, query.orderSlice(), Q.lessThan);
+            const start, const end = reads.window(items.len, query.offset, query.limit);
+            std.mem.copyForwards(T, items[0 .. end - start], items[start..end]);
+            rows.items.shrinkRetainingCapacity(end - start);
+            return rows.items.toOwnedSlice(allocator);
         }
 
-        /// In #56.
+        /// How many rows `read` would return. TigerBeetle has no count, so
+        /// this reads them, page by page, and keeps none: up to `offset +
+        /// limit` rows, or every match, at most `Config.scan_max`.
         pub fn count(self: *Self, query: Q) Gateway.Error!usize {
-            _ = self;
-            _ = query;
-            return error.Unimplemented;
+            var counter: Counter = .{};
+            // The order changes which rows, not how many.
+            try self.scan(&query, reads.plan(T, &query), wanted(&query), &counter);
+            const start, const end = reads.window(counter.n, query.offset, query.limit);
+            return end - start;
         }
+
+        /// The matches a read needs, null for all: `offset + limit`.
+        fn wanted(query: *const Q) ?usize {
+            const l = query.limit orelse return null;
+            if (l == 0) return 0;
+            return std.math.add(usize, l, query.offset) catch null;
+        }
+
+        /// Sends `p`'s requests and calls `sink.add(row)` for each row
+        /// returned that matches `query`, in the order they come, until
+        /// `want` have (null: all of them).
+        fn scan(self: *Self, query: *const Q, p: reads.Plan, want: ?usize, sink: anytype) Gateway.Error!void {
+            if (want == 0) return;
+            switch (p.source) {
+                .none => {},
+                .lookup => |ids| {
+                    var reply: [reads.lookup_max]T = undefined;
+                    const rows = try self.submitRead(lookup_operation, std.mem.sliceAsBytes(ids.slice()), reply[0..ids.len]);
+                    var matched: usize = 0;
+                    for (rows) |row| {
+                        if (!query.matches(row)) continue;
+                        try sink.add(row);
+                        matched += 1;
+                        if (matched == want) return;
+                    }
+                },
+                .query => |filter| try self.scanQuery(query, filter, want, sink),
+            }
+        }
+
+        /// `query_*` from `base`, a page at a time: each page starts past
+        /// the last timestamp of the one before (`reads.advance`).
+        fn scanQuery(self: *Self, query: *const Q, base: c.tb_query_filter_t, want: ?usize, sink: anytype) Gateway.Error!void {
+            const shared = self.shared;
+            const page_max: u32 = @intCast(@min(want orelse reads.query_max, reads.query_max, shared.scan_max));
+            const page = try shared.allocator.alloc(T, page_max);
+            defer shared.allocator.free(page);
+
+            var filter = base;
+            var matched: usize = 0;
+            var fetched: u64 = 0;
+            // Once a row is filtered out here, pages may need more rows
+            // than the matches still missing.
+            var dropped = false;
+            // Every page but the last is full, so `fetched` grows by at
+            // least one per page, and `scan_max` bounds the loop. A page is
+            // never bigger than what is left of `scan_max`, so a read that
+            // stops there fetched exactly `scan_max` rows.
+            while (fetched < shared.scan_max) {
+                const missing: u64 = if (want) |w| (if (dropped) page_max else w - matched) else page_max;
+                const asked: u32 = @intCast(@min(page_max, missing, shared.scan_max - fetched));
+                std.debug.assert(asked > 0);
+                filter.limit = asked;
+                const rows = try self.submitRead(query_operation, std.mem.asBytes(&filter), page[0..asked]);
+                fetched += rows.len;
+                for (rows) |row| {
+                    if (!query.matches(row)) {
+                        dropped = true;
+                        continue;
+                    }
+                    try sink.add(row);
+                    matched += 1;
+                    if (matched == want) return;
+                }
+                // A short page is the last (see `reads.query_max`).
+                if (rows.len < asked) return;
+                if (!reads.advance(&filter, rows[rows.len - 1].timestamp)) return;
+            }
+            return error.ScanLimitExceeded;
+        }
+
+        /// One `lookup_*` or `query_*` request; the reply is records.
+        fn submitRead(self: *Self, op: c.TB_OPERATION, events: []const u8, reply: []T) Gateway.Error![]T {
+            const len = self.shared.submit(op, events, std.mem.sliceAsBytes(reply)) catch |err| switch (err) {
+                // One filter, or at most 64 ids, is far below any cluster's
+                // smallest request (see `reads.lookup_max`).
+                error.TooMuchData => return error.Unexpected,
+                else => |e| return e,
+            };
+            if (len % @sizeOf(T) != 0) {
+                log.debug("a read reply of {d} bytes isn't whole records", .{len});
+                return error.Unexpected;
+            }
+            return reply[0 .. len / @sizeOf(T)];
+        }
+
+        const Collect = struct {
+            allocator: Allocator,
+            items: std.ArrayList(T) = .empty,
+
+            fn add(self: *Collect, row: T) Allocator.Error!void {
+                try self.items.append(self.allocator, row);
+            }
+        };
+
+        const Counter = struct {
+            n: usize = 0,
+
+            fn add(self: *Counter, _: T) error{}!void {
+                self.n += 1;
+            }
+        };
 
         fn errorFor(status: u32) ?InsertError {
             const code: Code = @enumFromInt(status);
@@ -518,7 +677,7 @@ test "a chain longer than batch_max doesn't fit" {
 ///
 ///     tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development 0_0.tigerbeetle
 ///     tigerbeetle start --addresses=3000 --development 0_0.tigerbeetle
-fn testGateway(config: struct { batch_max: u32 = tb.batch_max }) !Gateway {
+fn testGateway(config: struct { batch_max: u32 = tb.batch_max, scan_max: u64 = 1 << 20 }) !Gateway {
     const addresses = testing.environ.getAlloc(testing.allocator, "ZOM_TB_ADDRESSES") catch |err| switch (err) {
         error.EnvironmentVariableMissing => return error.SkipZigTest,
         else => |e| return e,
@@ -529,6 +688,7 @@ fn testGateway(config: struct { batch_max: u32 = tb.batch_max }) !Gateway {
         .cluster_id = 0,
         .addresses = addresses,
         .batch_max = config.batch_max,
+        .scan_max = config.scan_max,
     });
 }
 
@@ -591,6 +751,7 @@ test "insertMany: 10,000 transfers go in 2 requests" {
         .amount = 1,
         .ledger = 700,
         .code = 1,
+        .user_data_128 = base,
     };
 
     // A --development cluster takes 253 events per request, not 8189: the
@@ -606,6 +767,21 @@ test "insertMany: 10,000 transfers go in 2 requests" {
     // 8189 + 1811 on a production cluster; 40 on a development one.
     try testing.expectEqual(try std.math.divCeil(usize, rows.len, limit), gateway.requestCount() - before);
     if (limit == tb.batch_max) try testing.expectEqual(2, gateway.requestCount() - before);
+
+    // Reads page through `query_*` replies of up to 8189 rows, whatever the
+    // cluster's request limit: 20,000 rows are 3 pages, 9000 are 2.
+    const tagged = transfers.where(.user_data_128, .eq, base);
+    const read_before = gateway.requestCount();
+    try testing.expectEqual(20_000, try tagged.count());
+    try testing.expectEqual(3, gateway.requestCount() - read_before);
+    const newest = try tagged.order(.timestamp, .desc).limit(9000).toSlice(testing.allocator);
+    defer testing.allocator.free(newest);
+    try testing.expectEqual(9000, newest.len);
+    try testing.expectEqual(5, gateway.requestCount() - read_before);
+    // The last row created comes first, and the timestamps strictly fall
+    // across the page boundary.
+    try testing.expectEqual(rows[rows.len - 1].id, newest[0].id);
+    for (newest[1..], newest[0 .. newest.len - 1]) |row, prev| try testing.expect(row.timestamp < prev.timestamp);
 }
 
 test "the batch limit is found without losing rows" {
@@ -695,4 +871,221 @@ test "a linked chain fails as a whole, and isn't split across requests" {
 
     const too_long = [_]tb.Account{ rows[1], rows[2], rows[2], rows[3] };
     try testing.expectError(error.LinkedChainTooLong, accounts.insertMany(&too_long));
+}
+
+/// Six accounts tagged with a fresh `user_data_128`, so a query can find
+/// them among every earlier run's, created one at a time so their
+/// timestamps (returned) go up with the index. Row `i` has ledger 700 + i
+/// % 2, code 10 + i / 3, `user_data_64` i % 2 and `user_data_32` i.
+fn seedAccounts(accounts: Accounts) !struct { u128, [6]tb.Account } {
+    const tag = freshIds();
+    var stored: [6]tb.Account = undefined;
+    for (&stored, 0..) |*row, i| row.* = try accounts.create(.{
+        .id = tag + i,
+        .user_data_128 = tag,
+        .user_data_64 = i % 2,
+        .user_data_32 = @intCast(i),
+        .ledger = @intCast(700 + i % 2),
+        .code = @intCast(10 + i / 3),
+    }).commit();
+    return .{ tag, stored };
+}
+
+/// Checks that `rows` are `seeded[indices]`, in order.
+fn expectRows(seeded: []const tb.Account, indices: []const usize, rows: []const tb.Account) !void {
+    errdefer {
+        std.debug.print("expected rows", .{});
+        for (indices) |i| std.debug.print(" {d}", .{i});
+        std.debug.print(", found", .{});
+        for (rows) |row| std.debug.print(" {d}", .{row.id - seeded[0].id});
+        std.debug.print("\n", .{});
+    }
+    try testing.expectEqual(indices.len, rows.len);
+    for (indices, rows) |i, row| try testing.expectEqual(seeded[i], row);
+}
+
+/// Reads `rel` and checks it returns `seeded[indices]` in order, that its
+/// count agrees, and that it took `requests` requests to the cluster.
+fn expectRead(gateway: *const Gateway, rel: anytype, seeded: []const tb.Account, indices: []const usize, requests: u64) !void {
+    const before = gateway.requestCount();
+    const rows = try rel.toSlice(testing.allocator);
+    defer testing.allocator.free(rows);
+    try expectRows(seeded, indices, rows);
+    try testing.expectEqual(requests, gateway.requestCount() - before);
+    const n = if (@TypeOf(rel).mode == .fallback) try rel.count(testing.allocator) else try rel.count();
+    try testing.expectEqual(indices.len, n);
+}
+
+test "byPk and where(.id, .in, ...) are one lookup_* each" {
+    var gateway = try testGateway(.{});
+    defer gateway.deinit();
+    const accounts = try Accounts.init(&gateway);
+    const tag, const seeded = try seedAccounts(accounts);
+    const a = testing.allocator;
+
+    try expectRead(&gateway, accounts.byPk(tag + 2), &seeded, &.{2}, 1);
+    try testing.expectEqual(seeded[4], (try accounts.byPk(tag + 4).one(a)).?);
+    try testing.expectEqual(null, try accounts.byPk(tag + 99).one(a));
+    // In the order asked; an unknown id is skipped and a repeated one read once.
+    const mixed = [_]u128{ tag + 3, tag + 99, tag + 1, tag + 3 };
+    try expectRead(&gateway, accounts.whereIn(.id, &mixed), &seeded, &.{ 3, 1 }, 1);
+    // Other filters and an order are applied to the looked-up rows: still
+    // one request.
+    const four = [_]u128{ tag + 1, tag + 2, tag + 3, tag + 4 };
+    try expectRead(&gateway, accounts.whereIn(.id, &four).where(.code, .eq, 11).order(.timestamp, .desc), &seeded, &.{ 4, 3 }, 1);
+    try expectRead(&gateway, accounts.whereIn(.id, &four).limit(2), &seeded, &.{ 1, 2 }, 1);
+}
+
+test "eq on user_data and ledger/code, and timestamp ranges, are one query_*" {
+    var gateway = try testGateway(.{});
+    defer gateway.deinit();
+    const accounts = try Accounts.init(&gateway);
+    const tag, const s = try seedAccounts(accounts);
+    const rel = accounts.where(.user_data_128, .eq, tag);
+
+    try expectRead(&gateway, rel, &s, &.{ 0, 1, 2, 3, 4, 5 }, 1);
+    try expectRead(&gateway, rel.where(.ledger, .eq, 701), &s, &.{ 1, 3, 5 }, 1);
+    try expectRead(&gateway, rel.where(.code, .eq, 11).where(.ledger, .eq, 700), &s, &.{4}, 1);
+    try expectRead(&gateway, rel.where(.user_data_64, .eq, 1).where(.user_data_32, .eq, 3), &s, &.{3}, 1);
+    try expectRead(&gateway, rel.where(.timestamp, .gte, s[2].timestamp).where(.timestamp, .lte, s[4].timestamp), &s, &.{ 2, 3, 4 }, 1);
+    try expectRead(&gateway, rel.where(.timestamp, .gt, s[2].timestamp).where(.timestamp, .lt, s[4].timestamp), &s, &.{3}, 1);
+    try expectRead(&gateway, rel.where(.timestamp, .between, .{ s[1].timestamp, s[2].timestamp }), &s, &.{ 1, 2 }, 1);
+    try expectRead(&gateway, rel.where(.timestamp, .eq, s[5].timestamp), &s, &.{5}, 1);
+    // No user_data_128 filter: a timestamp range alone.
+    try expectRead(&gateway, accounts.where(.timestamp, .between, .{ s[0].timestamp, s[1].timestamp }), &s, &.{ 0, 1 }, 1);
+    // A contradiction sends nothing.
+    try expectRead(&gateway, rel.where(.ledger, .eq, 700).where(.ledger, .eq, 701), &s, &.{}, 0);
+    try expectRead(&gateway, rel.where(.timestamp, .gt, s[3].timestamp).where(.timestamp, .lt, s[2].timestamp), &s, &.{}, 0);
+}
+
+test "order(.timestamp, .desc) is the reversed flag, and limit the filter's limit" {
+    var gateway = try testGateway(.{});
+    defer gateway.deinit();
+    const accounts = try Accounts.init(&gateway);
+    const tag, const s = try seedAccounts(accounts);
+    const rel = accounts.where(.user_data_128, .eq, tag);
+
+    try expectRead(&gateway, rel.order(.timestamp, .desc), &s, &.{ 5, 4, 3, 2, 1, 0 }, 1);
+    try expectRead(&gateway, rel.order(.timestamp, .asc).limit(2), &s, &.{ 0, 1 }, 1);
+    try expectRead(&gateway, rel.order(.timestamp, .desc).limit(2), &s, &.{ 5, 4 }, 1);
+    try expectRead(&gateway, rel.where(.ledger, .eq, 700).order(.timestamp, .desc).limit(1), &s, &.{4}, 1);
+    try expectRead(&gateway, rel.limit(100), &s, &.{ 0, 1, 2, 3, 4, 5 }, 1);
+    try expectRead(&gateway, rel.limit(0), &s, &.{}, 0);
+    try testing.expectEqual(s[5], (try rel.order(.timestamp, .desc).first(testing.allocator)).?);
+    try testing.expectError(error.MoreThanOneTuple, rel.where(.ledger, .eq, 700).one(testing.allocator));
+}
+
+test "a value a QueryFilter can't hold is filtered as rows come, paging on" {
+    var gateway = try testGateway(.{});
+    defer gateway.deinit();
+    const accounts = try Accounts.init(&gateway);
+    const tag, const s = try seedAccounts(accounts);
+    const rel = accounts.where(.user_data_128, .eq, tag);
+
+    // `user_data_64 = 0` turns that filter off: rows 1, 3 and 5 come back
+    // too and are dropped. The first page asks for 3 rows (0, 1, 2) and
+    // keeps 2, so a second page goes on from row 3.
+    try expectRead(&gateway, rel.where(.user_data_64, .eq, 0).limit(3), &s, &.{ 0, 2, 4 }, 2);
+    // Newest first: 5, 4 then 3, 2.
+    try expectRead(&gateway, rel.where(.user_data_64, .eq, 0).order(.timestamp, .desc).limit(2), &s, &.{ 4, 2 }, 2);
+    // No limit: one page holds all six.
+    try expectRead(&gateway, rel.where(.user_data_64, .eq, 0), &s, &.{ 0, 2, 4 }, 1);
+}
+
+test "scan_max bounds a read: error.ScanLimitExceeded" {
+    var gateway = try testGateway(.{ .scan_max = 4 });
+    defer gateway.deinit();
+    const accounts = try Accounts.init(&gateway);
+    const tag, const s = try seedAccounts(accounts);
+    const rel = accounts.where(.user_data_128, .eq, tag);
+
+    try testing.expectError(error.ScanLimitExceeded, rel.count());
+    try testing.expectError(error.ScanLimitExceeded, rel.toSlice(testing.allocator));
+    // A limit within it is fine, and so is a lookup.
+    try expectRead(&gateway, rel.limit(4), &s, &.{ 0, 1, 2, 3 }, 1);
+    const all = [_]u128{ tag, tag + 1, tag + 2, tag + 3, tag + 4, tag + 5 };
+    try expectRead(&gateway, rel.whereIn(.id, &all), &s, &.{ 0, 1, 2, 3, 4, 5 }, 1);
+}
+
+test "allowFallback: other filters, orders and offset run in memory" {
+    var gateway = try testGateway(.{});
+    defer gateway.deinit();
+    const accounts = try Accounts.init(&gateway);
+    const tag, const s = try seedAccounts(accounts);
+    const rel = accounts.where(.user_data_128, .eq, tag).allowFallback();
+
+    try expectRead(&gateway, rel.where(.user_data_32, .gt, 3), &s, &.{ 4, 5 }, 1);
+    try expectRead(&gateway, rel.where(.code, .neq, 10).where(.ledger, .eq, 701), &s, &.{ 3, 5 }, 1);
+    try expectRead(&gateway, rel.order(.user_data_32, .desc).limit(2), &s, &.{ 5, 4 }, 1);
+    // The timestamp order and the limit go to the cluster as offset + limit.
+    try expectRead(&gateway, rel.order(.timestamp, .desc).offset(1).limit(2), &s, &.{ 4, 3 }, 1);
+    try expectRead(&gateway, rel.offset(4), &s, &.{ 4, 5 }, 1);
+    try expectRead(&gateway, rel.whereAny(.{ .{ .user_data_32, .eq, 1 }, .{ .code, .eq, 11 } }), &s, &.{ 1, 3, 4, 5 }, 1);
+}
+
+// zom.lint can't run here: it defines its own schema, and TigerBeetle's
+// two are fixed. This runs its read checks' kinds of queries (every
+// supported op, an `in`, ranges, groups, orders, limit and offset) on
+// six accounts instead, and checks each against the same query evaluated
+// in memory on the seeded rows: `Query.matches`, then a stable sort and
+// the window, as the memory adapter does. Without an order a query
+// returns rows by timestamp, the order they were seeded in.
+test "lint read checks: every query agrees with the same one in memory" {
+    var gateway = try testGateway(.{});
+    defer gateway.deinit();
+    const accounts = try Accounts.init(&gateway);
+    const tag, const s = try seedAccounts(accounts);
+    const rel = accounts.where(.user_data_128, .eq, tag);
+    const any = rel.allowFallback();
+    const ts = s[3].timestamp;
+    const ids = [_]u128{ tag + 1, tag + 4, tag + 77 };
+
+    const cases = .{
+        rel,
+        rel.where(.ledger, .eq, 700),
+        rel.where(.code, .eq, 11).where(.user_data_64, .eq, 1),
+        rel.where(.user_data_32, .eq, 2),
+        rel.where(.timestamp, .eq, ts),
+        rel.where(.timestamp, .lt, ts),
+        rel.where(.timestamp, .lte, ts),
+        rel.where(.timestamp, .gt, ts),
+        rel.where(.timestamp, .gte, ts),
+        rel.where(.timestamp, .between, .{ s[1].timestamp, ts }),
+        rel.whereIn(.id, &ids),
+        rel.order(.timestamp, .desc).limit(3),
+        rel.where(.user_data_64, .eq, 0).order(.timestamp, .desc),
+        any.where(.user_data_32, .neq, 2),
+        any.where(.user_data_32, .lt, 2),
+        any.where(.user_data_32, .between, .{ 1, 3 }),
+        any.where(.user_data_32, .in, .{ 0, 5, 9 }),
+        any.where(.user_data_32, .not_in, .{ 0, 5 }),
+        any.whereNot(.{ .ledger, .eq, 700 }),
+        any.whereAny(.{ .{ .user_data_32, .eq, 0 }, zom.all(.{ .{ .ledger, .eq, 701 }, .{ .code, .eq, 11 } }) }),
+        any.order(.ledger, .desc).order(.user_data_32, .asc),
+        any.order(.id, .desc).limit(2),
+        any.order(.code, .asc).order(.timestamp, .desc).offset(1).limit(3),
+        any.offset(5),
+        any.offset(9),
+        any.where(.ledger, .eq, 701).limit(1).offset(1),
+    };
+    inline for (cases, 0..) |case, n| {
+        errdefer std.debug.print("lint read case {d} failed\n", .{n});
+        var want: std.ArrayList(usize) = .empty;
+        defer want.deinit(testing.allocator);
+        var matched: [6]tb.Account = undefined;
+        var len: usize = 0;
+        for (s) |row| if (case.query.matches(row)) {
+            matched[len] = row;
+            len += 1;
+        };
+        std.mem.sort(tb.Account, matched[0..len], case.query.orderSlice(), zom.Query(tb.Account).lessThan);
+        const start, const end = reads.window(len, case.query.offset, case.query.limit);
+        for (matched[start..end]) |row| try want.append(testing.allocator, @intCast(row.id - tag));
+
+        const rows = try case.toSlice(testing.allocator);
+        defer testing.allocator.free(rows);
+        try expectRows(&s, want.items, rows);
+        const count = if (@TypeOf(case).mode == .fallback) try case.count(testing.allocator) else try case.count();
+        try testing.expectEqual(want.items.len, count);
+    }
 }

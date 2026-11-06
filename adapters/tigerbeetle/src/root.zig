@@ -31,6 +31,7 @@ pub const results = @import("results.zig");
 test {
     _ = tb;
     _ = results;
+    _ = @import("read.zig");
     _ = @import("gateway.zig");
     _ = @import("gateway_test.zig");
 }

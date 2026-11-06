@@ -464,8 +464,8 @@ defer p.free(allocator);
 #### Query support: strict and fallback
 
 A dataset says which query features it evaluates with `supports` and,
-optionally, per attribute with `filterable` (see [the adapter
-contract](#the-adapter-contract)). A relation is `.strict` by default:
+optionally, per attribute with `filterable` and `orderable` (see [the
+adapter contract](#the-adapter-contract)). A relation is `.strict` by default:
 building a query the dataset can't run is a compile error, at the call that
 needs the missing feature, naming the adapter, the relation, the call and the
 feature:
@@ -1051,6 +1051,7 @@ In full, with `Q = zom.Query(S.Tuple)`:
 | `delete` | `fn (*Dataset, Q) !usize` | no, `.deletable` | Returns the rows removed. |
 | `supports` | `zom.Supports` | no | The query features the dataset handles; the defaults when missing. A strict relation that uses one left out does not compile; see [Query support](#query-support-strict-and-fallback). |
 | `filterable` | `fn (comptime field: []const u8, comptime op: zom.Op) bool` | no | Narrows `supports` per attribute, for a backend that only filters on some (TigerBeetle filters transfers on `ledger` and `code`, not `amount`). Called at compile time, only for ops `supports` allows; false makes that filter unsupported. Without it, every attribute is filterable. |
+| `orderable` | `fn (comptime field: []const u8) bool` | no | Narrows ordering per attribute, the same way: called for a field `supports.order_on` (or being the primary key) allows; false makes `order` by it unsupported. TigerBeetle orders by `timestamp` only, not by its key. |
 | `strings` | `zom.StringOwnership` | no | `.dataset` (the default): returned strings point into the dataset. `.caller`: `read`, `readProjected` and `insert` allocate them with the allocator passed in, and every string attribute must be a slice. |
 | `readProjected` | `fn (*Dataset, Q, comptime P: type, Allocator) ![]P` | when `supports.projection` | The rows `read` would return, as `P`, a `zom.Project(S.Tuple, ...)` with some of the tuple's fields (copy them by name, e.g. with `zom.Mapper(S.Tuple, P, .{})`). Used by `select`. Without it, zom reads whole tuples and maps them down. |
 
@@ -1279,7 +1280,11 @@ own structs, keyed by the `u128` `id`. Records are immutable, so there is
 no `update` or `delete`. `create` and `createMany` run `create_accounts` /
 `create_transfers`, split into batches the cluster takes, and each of
 TigerBeetle's result codes is a typed error (`error.ExceedsCredits`, ...).
-Reads come in #56. The dependency decision, the supported targets and the
+`byPk` and `where(.id, .in, ...)` are `lookup_*`. Equality on
+`user_data_128/64/32`, `ledger` and `code`, and `timestamp` ranges, are
+`query_*`, ordered by `timestamp` either way and paged through. Any other
+filter or order, and `offset`, is a compile error unless the relation
+`allowFallback()`s. The dependency decision, the supported targets and the
 setup are in [adapters/tigerbeetle/README.md](adapters/tigerbeetle/README.md).
 
 ```zig
@@ -1287,6 +1292,7 @@ var tb = try zom_tigerbeetle.Gateway.init(allocator, .{ .io = io, .cluster_id = 
 defer tb.deinit();
 const accounts = try zom.Relation(zom_tigerbeetle.Account, zom_tigerbeetle.Gateway).init(&tb);
 _ = try accounts.create(.{ .id = 1, .ledger = 700, .code = 10 }).commit();
+const newest = try accounts.where(.ledger, .eq, 700).order(.timestamp, .desc).limit(10).toSlice(allocator);
 ```
 
 ### Errors
@@ -1298,6 +1304,7 @@ _ = try accounts.create(.{ .id = 1, .ledger = 700, .code = 10 }).commit();
 | `error.MoreThanOneTuple` | `one`. |
 | `error.DatasetTypeMismatch` | `memory.Gateway.dataset` (and so `Relation.init`), when two different schema types share a dataset name. |
 | `error.UnboundedWrite` | zom-sql's `compileUpdate` and `compileDelete`, for a query with no filters and `all` not set. |
+| `error.ScanLimitExceeded` | zom-tigerbeetle's reads and counts, after fetching `Config.scan_max` records without finishing. |
 | `error.EmptyUpdate` | zom-sql's `compileUpdate`, with no changes. |
 | `error.UnsupportedFilter` | `update().commit()` and `delete()` on a `.fallback` relation with a filter its dataset can't evaluate. |
 | `error.JoinedWrite` | `update().commit()` and `delete()` on a relation with a `join`, and zom-sql's `compileUpdate` / `compileDelete` on a joined query. |
