@@ -9,6 +9,15 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- `app.transaction(.gateway, ctx, f)` on `zom.Container`: runs `f(ctx, tx)`
+  in that gateway's `transaction`, where `tx` is an `App.Relations` whose
+  relations on that gateway are rebound to the transaction and the rest
+  are unchanged. A gateway without the `transaction` capability, or an
+  unknown gateway name, is a compile error. ([#48])
+- `zom.memory.Gateway.transaction(ctx, f)`: saves every store's rows and
+  puts them back if `f` fails; calls nest. The memory gateway now has the
+  `.transaction` capability. ([#48])
+
 - `zom.Repository(App, .{ .root = .users, .relations = .{ .users, .posts } })`,
   rom-repository's root repository: `init(&app)` copies the listed relations
   out of a container into `repo.relations`, and `byPk`, `where`, `all`,
@@ -595,3 +604,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#40]: https://github.com/kamalogudah/zom/issues/40
 [#41]: https://github.com/kamalogudah/zom/issues/41
 [#46]: https://github.com/kamalogudah/zom/issues/46
+[#48]: https://github.com/kamalogudah/zom/issues/48

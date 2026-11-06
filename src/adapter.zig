@@ -16,7 +16,15 @@
 //!   pub fn Dataset(comptime S: type) type            // S is a zom.Schema
 //!   pub fn dataset(*Gateway, comptime S: type) !*Dataset(S)
 //!
-//! and may declare `transaction` (capability `.transaction`). With
+//! and may declare `transaction` (capability `.transaction`):
+//!
+//!   pub fn transaction(*Gateway, ctx: anytype, comptime f: anytype) R
+//!
+//! which calls `f(ctx, tx)` with `tx: *Gateway`, the gateway `f`'s writes
+//! go through (zom-pg pins a connection; memory passes itself), commits
+//! when `f` returns and rolls back when it fails. `R` is usually `f`'s
+//! result with the gateway's errors added. `Container.transaction` calls
+//! it. With
 //! `Q = zom.Query(S.Tuple)`, a dataset must declare:
 //!
 //!   read(*Self, Q, std.mem.Allocator) ![]S.Tuple

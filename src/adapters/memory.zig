@@ -4,6 +4,11 @@
 //! primary-key checks. It needs no gateway, so file adapters (CSV, YAML)
 //! wrap it to hold the rows they load. `Gateway` owns one `Store` per
 //! relation name and hands it out as its dataset.
+//!
+//! Transactions: `Gateway.transaction(ctx, f)` saves every store's row list
+//! before calling `f(ctx, tx)`, and puts them back if `f` fails, so code
+//! that uses transactions can be tested without a database. See its doc
+//! comment for what is and isn't covered.
 
 const std = @import("std");
 const q = @import("../query.zig");
@@ -31,8 +36,17 @@ pub const Gateway = struct {
     const Entry = struct {
         ptr: *anyopaque,
         deinit_fn: *const fn (*anyopaque, Allocator) void,
+        save_fn: *const fn (*anyopaque, Allocator) Allocator.Error!Saved,
+        restore_fn: *const fn (*anyopaque, ?Saved) void,
+        free_fn: *const fn (Saved, Allocator) void,
         type_name: []const u8,
     };
+
+    /// A type-erased copy of one store's row list, `[]Store(S).T`.
+    const Saved = struct { ptr: *anyopaque, len: usize };
+
+    /// The row lists of the stores that existed when a transaction began.
+    const Snapshot = std.ArrayList(struct { store: *anyopaque, saved: Saved, free_fn: *const fn (Saved, Allocator) void });
 
     pub fn init(allocator: Allocator, _: Config) Gateway {
         return .{ .allocator = allocator };
@@ -67,8 +81,86 @@ pub const Gateway = struct {
         const d = try self.allocator.create(D);
         d.* = D.init(self.allocator);
         d.gateway = self;
-        gop.value_ptr.* = .{ .ptr = d, .deinit_fn = destroyFn(D), .type_name = @typeName(S) };
+        gop.value_ptr.* = .{
+            .ptr = d,
+            .deinit_fn = destroyFn(D),
+            .save_fn = D.saveErased,
+            .restore_fn = D.restoreErased,
+            .free_fn = D.freeSaved,
+            .type_name = @typeName(S),
+        };
         return d;
+    }
+
+    /// `f(ctx, tx)`, rolled back if it fails: every store's rows are put
+    /// back as they were when `transaction` was called, and `f`'s error is
+    /// returned unchanged. `tx` is `self`; there is no connection to pin.
+    /// Returns what `f` returns, with `error.OutOfMemory` (from saving the
+    /// rows) added. Calls nest, each rolling back only its own changes,
+    /// like zom-pg's savepoints.
+    ///
+    /// Saving copies each store's row list but not its strings: strings
+    /// live in the store's arena until `clear` or `deinit` (see `Store`), so
+    /// the saved rows still point at valid strings, and rows read before
+    /// the transaction stay valid after a rollback. So don't call a store's
+    /// `clear` inside `f`. Strings copied in by writes that are rolled back
+    /// stay in the arena until then, as with `update`. A store first used
+    /// inside `f` is emptied on rollback, not removed.
+    ///
+    /// This is a test double, not isolation: there is one copy of the
+    /// data, so reads outside `f` (there are none on one thread) would see
+    /// its writes.
+    pub fn transaction(self: *Gateway, ctx: anytype, comptime f: anytype) Transaction(@TypeOf(ctx), f) {
+        var snapshot = try self.save();
+        defer freeSnapshot(&snapshot, self.allocator);
+        errdefer self.restore(&snapshot);
+        return if (comptime @typeInfo(FnResult(@TypeOf(ctx), f)) == .error_union) try f(ctx, self) else f(ctx, self);
+    }
+
+    /// What `transaction(ctx, f)` returns: `f`'s result, with
+    /// `error.OutOfMemory` merged into its error set.
+    pub fn Transaction(comptime Ctx: type, comptime f: anytype) type {
+        const R = FnResult(Ctx, f);
+        return switch (@typeInfo(R)) {
+            .error_union => |eu| (eu.error_set || Allocator.Error)!eu.payload,
+            else => Allocator.Error!R,
+        };
+    }
+
+    /// `@TypeOf(f(ctx, tx))`, which also works when `f` is generic.
+    fn FnResult(comptime Ctx: type, comptime f: anytype) type {
+        return @TypeOf(f(@as(Ctx, undefined), @as(*Gateway, undefined)));
+    }
+
+    fn save(self: *Gateway) Allocator.Error!Snapshot {
+        var snapshot: Snapshot = .empty;
+        errdefer freeSnapshot(&snapshot, self.allocator);
+        try snapshot.ensureTotalCapacity(self.allocator, self.datasets.count());
+        var it = self.datasets.valueIterator();
+        while (it.next()) |entry| {
+            const saved = try entry.save_fn(entry.ptr, self.allocator);
+            snapshot.appendAssumeCapacity(.{ .store = entry.ptr, .saved = saved, .free_fn = entry.free_fn });
+        }
+        return snapshot;
+    }
+
+    /// Puts back the saved rows, and empties the stores created since.
+    fn restore(self: *Gateway, snapshot: *const Snapshot) void {
+        var it = self.datasets.valueIterator();
+        next: while (it.next()) |entry| {
+            for (snapshot.items) |s| {
+                if (s.store == entry.ptr) {
+                    entry.restore_fn(entry.ptr, s.saved);
+                    continue :next;
+                }
+            }
+            entry.restore_fn(entry.ptr, null);
+        }
+    }
+
+    fn freeSnapshot(snapshot: *Snapshot, allocator: Allocator) void {
+        for (snapshot.items) |s| s.free_fn(s.saved, allocator);
+        snapshot.deinit(allocator);
     }
 
     fn destroyFn(comptime D: type) *const fn (*anyopaque, Allocator) void {
@@ -186,6 +278,31 @@ pub fn Store(comptime S: type) type {
                 }
             }
             return self.loadMany(batch);
+        }
+
+        // -- transactions (see Gateway.transaction) -------------------------
+
+        fn saveErased(ptr: *anyopaque, allocator: Allocator) Allocator.Error!Gateway.Saved {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            const copy = try allocator.dupe(T, self.list.items);
+            return .{ .ptr = @ptrCast(copy.ptr), .len = copy.len };
+        }
+
+        /// Cannot fail: the list's capacity only grows (writes and `delete`
+        /// keep it), so it still holds the saved rows.
+        fn restoreErased(ptr: *anyopaque, saved: ?Gateway.Saved) void {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            self.list.clearRetainingCapacity();
+            if (saved) |s| self.list.appendSliceAssumeCapacity(savedRows(s));
+        }
+
+        fn freeSaved(saved: Gateway.Saved, allocator: Allocator) void {
+            allocator.free(savedRows(saved));
+        }
+
+        fn savedRows(saved: Gateway.Saved) []T {
+            const p: [*]T = @ptrCast(@alignCast(saved.ptr));
+            return p[0..saved.len];
         }
 
         fn hasKey(self: *const Self, key: q.Value) bool {

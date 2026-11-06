@@ -154,7 +154,7 @@ breaking change needs a minor version bump and an entry in
 | `zom.combineMany(.{ .into, .parent_key, .child_key }, allocator, parents, children)` | **Deprecated:** use `relation.combine`. Sets `parent.into` to the children whose `child_key` equals the parent's `parent_key`, on slices already loaded, in O(n·m). Build with `-Dno-deprecated` to make each call a compile error. |
 | `zom.mapper` | The module behind `Mapper` and `combineMany`, with their option types `Options`, `Rename` and `CombineOptions`. |
 | `zom.codec` | Text cells to field values, for adapters whose rows arrive as strings. `decodeField(F, text, opts) !F` decodes one cell, and `decodeRow(T, cells, opts, ?*Diagnostic) !T` decodes a row, in field order or through `Options.columns`. `Options.null_text` (default `""`) means null. Strings borrow the cells. On error the `Diagnostic` has `row`, `column`, `field`, `text` and `err`, and formats with `{f}` as `14:3 (age): "abc" is not an integer from 0 to 255`. The other way, `encodeField(writer, value, opts)` and `encodeRow(writer, T, row, opts, sep)` write values back so they decode to the same thing: ints `{d}`, floats in their shortest round-trip form (decimal, or scientific outside `1e-6`..`1e21`), `true`/`false`, tag names, strings as they are, `null` as `null_text`. Nothing is quoted; that is the format writer's job. The accepted spellings are listed in `src/codec.zig`. |
-| `zom.memory` | The in-memory adapter: `Gateway` (`adapter_name = "memory"`, `Config = struct {}`, `init(allocator, Config)`, `deinit()`), whose dataset is `Store(S)`. Every capability except `transaction`. |
+| `zom.memory` | The in-memory adapter: `Gateway` (`adapter_name = "memory"`, `Config = struct {}`, `init(allocator, Config)`, `deinit()`), whose dataset is `Store(S)`. Every capability; its `transaction` saves each store's rows and puts them back on error, for tests without a database. |
 | `zom.memory.Store(S)` | The in-memory row engine, usable without a gateway: `init(allocator)`, `deinit()`, `read`, `count`, `insert`, `insertMany`, `update`, `delete`, plus `rows() []const Tuple` (every row, in insertion order), `load(row)` and `loadMany(rows)` (insert without the primary-key check, for trusted bulk loads) and `clear()`. Strings are copied into the store's arena; rows it returns point into it until `clear` or `deinit`. |
 | `zom.lint` | The adapter conformance suite, see [Checking an adapter](#checking-an-adapter-with-zomlint). Also exports the schema it tests on, `Users` (`User`, `Role`), its seed rows, `users`, `OnDuplicate` and `expectSharedError`. |
 | `zom.query` | The module behind `Query`, `Value`, `Op` and `Direction`, plus `Operand` (a filter's value side: `none`, `one`, `many: ValueList` or `range: [2]Value`), `ValueList` (a borrowed list read with `at(i)`) and `like(text, pattern, case)`, the `LIKE` matcher `matches` uses. Adapters can use `toValue(x) Value` and `fromValue(F, value) !F` to convert between attribute values and `Value`. Its `assert*`, `isString` and `isComptimeOnly` helpers are used by the core and are not part of the frozen API. |
@@ -327,6 +327,26 @@ memory gateways; any other gateway's settings must be passed, e.g.
 relation. If a gateway or a relation fails, the gateways already initialised
 are deinitialised, last first, and the error is returned. `deinit` also runs
 in reverse order.
+
+`app.transaction(.gateway, ctx, f)` runs `f(ctx, tx)` in that gateway's
+transaction. Zig has no closures, so `f`'s state comes in through `ctx`. `tx`
+is an `App.Relations`, the same type as `app.relations`: the relations on
+`.gateway` are rebound to the transaction (zom-pg's pinned connection), and
+the others are copied unchanged, so they are not part of it. `f` commits by
+returning and rolls back by failing; its result or error comes back:
+
+```zig
+try app.transaction(.default, {}, struct {
+    fn f(_: void, tx: App.Relations) !void {
+        _ = try tx.users.create(.{ .id = 2, .name = "Otieno", .age = 24 }).commit();
+        _ = try tx.users.byPk(1).update().set(.age, 32).commit();
+    }
+}.f);
+```
+
+A gateway without the `transaction` capability is a compile error:
+`zom: gateway 'files' (adapter 'csv') does not support transactions`. The
+memory gateway has one, so the same code runs in tests without Postgres.
 
 `init` takes `self: *App` and fills it in place, and **the container must
 not be copied or moved between `init` and `deinit`**. A relation holds a
@@ -667,7 +687,7 @@ In full, with `Q = zom.Query(S.Tuple)`:
 | `Gateway.deinit` | `fn (*Gateway) void` | yes | Frees everything the gateway owns. |
 | `Gateway.Dataset` | `fn (comptime S: type) type` | yes | The dataset type for schema `S`. |
 | `Gateway.dataset` | `fn (*Gateway, comptime S: type) !*Dataset(S)` | yes | Returns the same dataset every time for the same `S`. |
-| `Gateway.transaction` | `fn (*Gateway, ...)` | no, `.transaction` | Not used by the core yet. |
+| `Gateway.transaction` | `fn (*Gateway, ctx: anytype, comptime f: anytype) R` | no, `.transaction` | Calls `f(ctx, tx)` with `tx: *Gateway`, the gateway to write through (zom-pg pins a connection, memory passes itself). Commits when `f` returns, rolls back when it fails and returns its error. `R` is usually `f`'s result with the gateway's errors added. Used by `Container.transaction`. |
 | `read` | `fn (*Dataset, Q, Allocator) ![]S.Tuple` | yes | Applies filters, then order, then offset and limit. The caller frees the slice. |
 | `count` | `fn (*Dataset, Q) !usize` | yes | The number of rows `read` would return: filters, offset and limit all apply. |
 | `insert` | `fn (*Dataset, S.Tuple) !S.Tuple`, or `fn (*Dataset, S.Tuple, Allocator) !S.Tuple` | no, `.writable` | Returns the tuple as stored. `error.DuplicatePrimaryKey` on a key clash. With `strings = .caller` it must take the allocator, which owns the returned strings; `createMany` then needs `insertMany`. |

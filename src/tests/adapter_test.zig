@@ -102,8 +102,8 @@ const TransactionalGateway = struct {
         return &static.instance;
     }
 
-    pub fn transaction(_: *Self, ctx: anytype, comptime f: anytype) !void {
-        return f(ctx);
+    pub fn transaction(self: *Self, ctx: anytype, comptime f: anytype) !void {
+        return f(ctx, self);
     }
 };
 
@@ -111,7 +111,7 @@ fn expectCaps(comptime G: type, comptime want: zom.Capabilities) !void {
     try testing.expectEqual(want, comptime zom.Adapter(G).capabilities(Items));
 }
 
-test "memory gateway has every capability except transaction" {
+test "memory gateway has every capability" {
     const A = zom.Adapter(zom.memory.Gateway);
     try testing.expectEqualStrings("memory", A.name);
     try expectCaps(zom.memory.Gateway, .{
@@ -119,7 +119,7 @@ test "memory gateway has every capability except transaction" {
         .batch_insert = true,
         .updatable = true,
         .deletable = true,
-        .transaction = false,
+        .transaction = true,
     });
 }
 

@@ -113,6 +113,163 @@ test "a gateway that keeps its dataset inline works, because init fills in place
     try testing.expectEqual(@as(usize, 1), app.gateways.default.items.rows().len);
 }
 
+// -- transactions -----------------------------------------------------------
+
+const TxApp = zom.Container(.{
+    .gateways = .{ .default = zom.memory.Gateway, .archive = zom.memory.Gateway },
+    .relations = .{ .users = .{ UserSchema, .default }, .posts = .{ PostSchema, .archive } },
+});
+
+fn addUser(users: fixtures.Users, id: u32, name: []const u8) !void {
+    _ = try users.create(.{ .id = id, .name = name, .email = "x@example.com", .age = 30 }).commit();
+}
+
+test "transaction on memory: f's writes stay when it returns, and its result comes back" {
+    var app: TxApp = undefined;
+    try app.init(testing.allocator, .{});
+    defer app.deinit();
+
+    const n = try app.transaction(.default, @as(u32, 2), struct {
+        fn f(id: u32, tx: TxApp.Relations) !usize {
+            try addUser(tx.users, 1, "Achieng");
+            try addUser(tx.users, id, "Otieno");
+            return tx.users.count();
+        }
+    }.f);
+    try testing.expectEqual(@as(usize, 2), n);
+    try testing.expectEqual(@as(usize, 2), try app.relations.users.count());
+}
+
+test "transaction on memory: an error rolls back the gateway's stores and comes back unchanged" {
+    var app: TxApp = undefined;
+    try app.init(testing.allocator, .{});
+    defer app.deinit();
+    try addUser(app.relations.users, 1, "Achieng");
+    // A row read before the transaction must survive its rollback.
+    const before = try app.relations.users.byPk(1).one(testing.allocator);
+
+    const result = app.transaction(.default, {}, struct {
+        fn f(_: void, tx: TxApp.Relations) !void {
+            try addUser(tx.users, 2, "Otieno");
+            _ = try tx.users.byPk(1).update().set(.name, "Renamed").commit();
+            try addUser(tx.users, 2, "again");
+        }
+    }.f);
+    try testing.expectError(error.DuplicatePrimaryKey, result);
+
+    const rows = try app.relations.users.toSlice(testing.allocator);
+    defer testing.allocator.free(rows);
+    try testing.expectEqual(@as(usize, 1), rows.len);
+    try testing.expectEqualStrings("Achieng", rows[0].name);
+    try testing.expectEqualStrings("Achieng", before.?.name);
+}
+
+test "transaction on memory: relations on other gateways are not part of it" {
+    var app: TxApp = undefined;
+    try app.init(testing.allocator, .{});
+    defer app.deinit();
+
+    const result = app.transaction(.default, {}, struct {
+        fn f(_: void, tx: TxApp.Relations) !void {
+            try addUser(tx.users, 1, "Achieng");
+            _ = try tx.posts.create(.{ .id = 10, .user_id = 1, .title = "kept", .published = true }).commit();
+            return error.Boom;
+        }
+    }.f);
+    try testing.expectError(error.Boom, result);
+    try testing.expectEqual(@as(usize, 0), try app.relations.users.count());
+    try testing.expectEqual(@as(usize, 1), try app.relations.posts.count());
+}
+
+test "transaction on memory: f may return a plain value, and calls nest" {
+    var app: TxApp = undefined;
+    try app.init(testing.allocator, .{});
+    defer app.deinit();
+
+    const v = try app.transaction(.default, @as(u32, 41), struct {
+        fn f(x: u32, _: TxApp.Relations) u32 {
+            return x + 1;
+        }
+    }.f);
+    try testing.expectEqual(@as(u32, 42), v);
+
+    try app.transaction(.default, &app, struct {
+        fn f(a: *TxApp, tx: TxApp.Relations) !void {
+            try addUser(tx.users, 1, "Achieng");
+            // The inner one fails; only its rows go.
+            const inner = a.transaction(.default, {}, struct {
+                fn f(_: void, inner_tx: TxApp.Relations) !void {
+                    try addUser(inner_tx.users, 2, "Otieno");
+                    try addUser(inner_tx.users, 1, "dup");
+                }
+            }.f);
+            try testing.expectError(error.DuplicatePrimaryKey, inner);
+            try addUser(tx.users, 3, "Wanjiru");
+        }
+    }.f);
+    const rows = try app.relations.users.order(.id, .asc).toSlice(testing.allocator);
+    defer testing.allocator.free(rows);
+    try testing.expectEqual(@as(usize, 2), rows.len);
+    try testing.expectEqual(@as(u32, 1), rows[0].id);
+    try testing.expectEqual(@as(u32, 3), rows[1].id);
+}
+
+test "transaction rebinds the gateway's relations to the gateway f is given, keeping on_scan" {
+    const App = zom.Container(.{
+        .gateways = .{ .default = Pinning, .other = zom.memory.Gateway },
+        .relations = .{ .users = .{ UserSchema, .default }, .posts = .{ PostSchema, .other } },
+        .on_scan = noteScan,
+    });
+    var app: App = undefined;
+    try app.init(testing.allocator, .{});
+    defer app.deinit();
+
+    try app.transaction(.default, &app, struct {
+        fn f(a: *App, tx: App.Relations) !void {
+            const pinned = Pinning.current.?;
+            try testing.expect(pinned != &a.gateways.default);
+            try testing.expectEqual(try pinned.dataset(UserSchema), tx.users.dataset);
+            try testing.expect(tx.users.dataset != a.relations.users.dataset);
+            try testing.expectEqual(a.relations.posts.dataset, tx.posts.dataset);
+            try testing.expectEqual(@as(?zom.ScanHook, &noteScan), tx.users.on_scan);
+        }
+    }.f);
+    try testing.expectEqual(@as(?*Pinning, null), Pinning.current);
+}
+
+fn noteScan(_: zom.Scan) void {}
+
+/// Like zom-pg: `transaction` hands `f` a different gateway of the same
+/// type, with datasets of its own.
+const Pinning = struct {
+    pub const adapter_name = "pinning";
+    pub const Config = struct {};
+
+    var current: ?*Pinning = null;
+
+    inner: zom.memory.Gateway,
+
+    pub fn init(allocator: std.mem.Allocator, _: Config) Pinning {
+        return .{ .inner = .init(allocator, .{}) };
+    }
+    pub fn deinit(self: *Pinning) void {
+        self.inner.deinit();
+    }
+    pub fn Dataset(comptime S: type) type {
+        return zom.memory.Store(S);
+    }
+    pub fn dataset(self: *Pinning, comptime S: type) !*Dataset(S) {
+        return self.inner.dataset(S);
+    }
+    pub fn transaction(self: *Pinning, ctx: anytype, comptime f: anytype) @TypeOf(f(@as(@TypeOf(ctx), undefined), @as(*Pinning, undefined))) {
+        var tx: Pinning = .init(self.inner.allocator, .{});
+        defer tx.deinit();
+        current = &tx;
+        defer current = null;
+        return f(ctx, &tx);
+    }
+};
+
 // -- fakes ----------------------------------------------------------------
 
 const Item = struct { id: u32, name: []const u8 = "" };

@@ -24,6 +24,17 @@
 //! Relations chained from `app.relations.users`, including through
 //! `allowFallback()`, keep the hook.
 //!
+//! Transactions: `app.transaction(.default, ctx, f)` runs `f(ctx, tx)` in
+//! the `default` gateway's `transaction`, where `tx` is an `App.Relations`
+//! whose relations on `default` run in the transaction:
+//!
+//!   try app.transaction(.default, {}, struct {
+//!       fn f(_: void, tx: App.Relations) !void {
+//!           _ = try tx.users.create(.{ ... }).commit();
+//!           _ = try tx.posts.create(.{ ... }).commit();
+//!       }
+//!   }.f);
+//!
 //! Pointer stability: a relation holds a `*Dataset`, and the adapter contract
 //! does not say where a dataset lives. The memory gateway heap-allocates its
 //! datasets, but another gateway may keep one inside its own struct, and
@@ -137,7 +148,89 @@ pub fn Container(comptime spec: anytype) type {
                 if (i < n) @field(gateways, gateway_names_final[i]).deinit();
             }
         }
+
+        /// Runs `f(ctx, tx)` in a transaction on the gateway named
+        /// `gateway`, through that gateway's own `transaction`: it commits
+        /// when `f` returns and rolls back when `f` fails, returning `f`'s
+        /// error. Zig has no closures, so `f`'s state comes in through
+        /// `ctx`. Returns what `f` returns, with the gateway's errors added.
+        ///
+        /// `tx` is a `Relations`, the same type as `self.relations`, so code
+        /// written against the container's relations takes it as well. The
+        /// relations on `gateway` are rebound to the transaction (zom-pg's
+        /// pinned connection, for instance), and the rest are copied from
+        /// `self.relations` unchanged: they are not part of the transaction.
+        /// The rebound relations are only valid inside `f`; don't keep them.
+        ///
+        /// A gateway without the `.transaction` capability, or a name that
+        /// isn't one of the container's gateways, is a compile error.
+        pub fn transaction(self: *Self, comptime gateway: @EnumLiteral(), ctx: anytype, comptime f: anytype) Transaction(gateway, @TypeOf(ctx), f) {
+            const B = Bound(@tagName(gateway), @TypeOf(ctx), f);
+            const g = &@field(self.gateways, @tagName(gateway));
+            return g.transaction(B.Context{ .relations = &self.relations, .ctx = ctx }, B.run);
+        }
+
+        /// What `transaction(gateway, ctx, f)` returns: whatever the
+        /// gateway's `transaction` makes of `f`'s result, usually that
+        /// result with the gateway's errors merged in.
+        pub fn Transaction(comptime gateway: @EnumLiteral(), comptime Ctx: type, comptime f: anytype) type {
+            const G = TransactionGateway(@tagName(gateway));
+            const B = Bound(@tagName(gateway), Ctx, f);
+            return @TypeOf(@as(*G, undefined).transaction(@as(B.Context, undefined), B.run));
+        }
+
+        /// The type of the gateway called `name`, which must have the
+        /// `.transaction` capability.
+        fn TransactionGateway(comptime name: []const u8) type {
+            for (gateway_names_final, gateway_types_final) |n, G| {
+                if (!std.mem.eql(u8, n, name)) continue;
+                if (!@hasDecl(G, "transaction"))
+                    @compileError("zom: gateway '" ++ name ++ "' (adapter '" ++ G.adapter_name ++ "') does not support transactions: `container.transaction` needs the `transaction` capability (the gateway has no `transaction`)");
+                return G;
+            }
+            @compileError("zom: container.transaction names unknown gateway '" ++ name ++ "' (gateways: " ++ knownNames(&gateway_names_final) ++ ")");
+        }
+
+        /// The callback handed to the gateway's `transaction`: it rebuilds
+        /// the relations on `gateway` over the transaction's `*G`, then
+        /// calls `f(ctx, relations)`.
+        fn Bound(comptime gateway: []const u8, comptime Ctx: type, comptime f: anytype) type {
+            const G = TransactionGateway(gateway);
+            // `@TypeOf` of the call rather than `@typeInfo(...).return_type`,
+            // which is null when `f` is generic.
+            const R = @TypeOf(f(@as(Ctx, undefined), @as(Relations, undefined)));
+            var InitError = error{};
+            for (relation_types_final, relation_gateways_final) |Rel, rg| {
+                if (std.mem.eql(u8, rg, gateway))
+                    InitError = InitError || @typeInfo(@TypeOf(Rel.init(@as(*G, undefined)))).error_union.error_set;
+            }
+            const Out = switch (@typeInfo(R)) {
+                .error_union => |eu| (eu.error_set || InitError)!eu.payload,
+                else => InitError!R,
+            };
+            return struct {
+                const Context = struct { relations: *const Relations, ctx: Ctx };
+
+                fn run(c: Context, tx: *G) Out {
+                    var relations = c.relations.*;
+                    inline for (relation_names_final, relation_types_final, relation_gateways_final) |name, Rel, rg| {
+                        if (comptime std.mem.eql(u8, rg, gateway)) {
+                            @field(relations, name) = try Rel.init(tx);
+                            @field(relations, name).on_scan = scan_hook;
+                        }
+                    }
+                    return f(c.ctx, relations);
+                }
+            };
+        }
     };
+}
+
+fn knownNames(comptime names: []const []const u8) []const u8 {
+    if (names.len == 0) return "none";
+    var known: []const u8 = "";
+    for (names, 0..) |name, i| known = known ++ (if (i == 0) "" else ", ") ++ "'" ++ name ++ "'";
+    return known;
 }
 
 /// `spec.on_scan`, a function or a pointer to one, or null when absent.
@@ -187,10 +280,7 @@ fn gatewayIndex(comptime names: []const []const u8, comptime relation: []const u
     for (names, 0..) |name, i| {
         if (std.mem.eql(u8, name, gateway)) return i;
     }
-    var known: []const u8 = "";
-    for (names, 0..) |name, i| known = known ++ (if (i == 0) "" else ", ") ++ "'" ++ name ++ "'";
-    if (names.len == 0) known = "none";
-    @compileError("zom: container relation '" ++ relation ++ "' names unknown gateway '" ++ gateway ++ "' (gateways: " ++ known ++ ")");
+    @compileError("zom: container relation '" ++ relation ++ "' names unknown gateway '" ++ gateway ++ "' (gateways: " ++ knownNames(names) ++ ")");
 }
 
 /// A pointer to `C{}` when every field of `C` has a default, else null.

@@ -203,6 +203,15 @@ test "README: Container" {
 
     try testing.expectEqual(1, try users.count());
     try testing.expectEqual(0, try app.relations.posts.count());
+
+    try app.transaction(.default, {}, struct {
+        fn f(_: void, tx: App.Relations) !void {
+            _ = try tx.users.create(.{ .id = 2, .name = "Otieno", .age = 24 }).commit();
+            _ = try tx.users.byPk(1).update().set(.age, 32).commit();
+        }
+    }.f);
+
+    try testing.expectEqual(2, try users.count());
 }
 
 test "README: Repository" {

@@ -217,3 +217,77 @@ test "errors: a missing table is NotFound, anything else Database" {
 test "the gateway has the transaction capability" {
     try testing.expect(zom.Adapter(G).has(Items, .transaction));
 }
+
+// -- container.transaction ----------------------------------------------------
+
+const Note = struct { id: u32, text: []const u8 };
+const Notes = zom.Schema(Note, "notes", .id, .{});
+
+/// `items` on Postgres, `notes` in memory, to check that only the named
+/// gateway's relations join the transaction.
+const App = zom.Container(.{
+    .gateways = .{ .db = G, .scratch = zom.memory.Gateway },
+    .relations = .{ .items = .{ Items, .db }, .notes = .{ Notes, .scratch } },
+});
+
+/// Initialises `app` on ZOM_PG_URL. The table comes from `open`, called
+/// first on a gateway of its own.
+fn openApp(app: *App) !void {
+    const u = testing.environ.getAlloc(testing.allocator, "ZOM_PG_URL") catch |err| switch (err) {
+        error.EnvironmentVariableMissing => return error.SkipZigTest,
+        else => |e| return e,
+    };
+    defer testing.allocator.free(u);
+    try app.init(testing.allocator, .{ .db = .{ .io = testing.io, .url = u, .pool_size = 2 } });
+}
+
+fn addItem(items: Rel, id: u32, name: []const u8) !void {
+    const stored = try items.create(.{ .id = id, .name = name, .qty = 1 }).commitAlloc(testing.allocator);
+    items.freeOne(testing.allocator, stored);
+}
+
+test "container.transaction on pg: commits, on the pinned connection" {
+    var g = try open();
+    defer close(&g);
+    var app: App = undefined;
+    try openApp(&app);
+    defer app.deinit();
+
+    const Ctx = struct { outer: Rel, seen_inside: usize = 99 };
+    var ctx: Ctx = .{ .outer = app.relations.items };
+    const n = try app.transaction(.db, &ctx, struct {
+        fn f(c: *Ctx, tx: App.Relations) !usize {
+            try addItem(tx.items, 1, "a");
+            try addItem(tx.items, 2, "b");
+            // The container's own relation is on another connection.
+            c.seen_inside = try c.outer.count();
+            return tx.items.count();
+        }
+    }.f);
+    try testing.expectEqual(2, n);
+    try testing.expectEqual(0, ctx.seen_inside);
+    try testing.expectEqual(2, try app.relations.items.count());
+}
+
+test "container.transaction on pg: an error rolls back the gateway's relations only" {
+    var g = try open();
+    defer close(&g);
+    var app: App = undefined;
+    try openApp(&app);
+    defer app.deinit();
+
+    const result = app.transaction(.db, {}, struct {
+        fn f(_: void, tx: App.Relations) !void {
+            try addItem(tx.items, 1, "a");
+            _ = try tx.notes.create(.{ .id = 1, .text = "outside the transaction" }).commit();
+            try addItem(tx.items, 1, "dup");
+        }
+    }.f);
+    try testing.expectError(error.DuplicatePrimaryKey, result);
+    try testing.expectEqual(0, try app.relations.items.count());
+    try testing.expectEqual(1, try app.relations.notes.count());
+
+    // The pool is still usable.
+    try addItem(app.relations.items, 3, "c");
+    try testing.expectEqual(1, try app.relations.items.count());
+}
