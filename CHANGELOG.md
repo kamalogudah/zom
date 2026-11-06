@@ -9,6 +9,15 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- `zom.Value.uint128: u128` for unsigned integers of 65 to 128 bits
+  (TigerBeetle ids, `user_data_128`, amounts). `toValue`, `fromValue`,
+  `order` and `eql` handle it, comparing exactly against `int` and `uint`
+  by widening to `i129`; integer literals above `maxInt(u64)` become
+  `uint128`. The payload is stored at 8-byte alignment, so
+  `@sizeOf(Value)` stays 24 on 64-bit targets. `zom.codec` parses and
+  formats `u128` fields. zom-pg binds it as bigint after a range check and
+  returns `error.ValueOutOfRange` past 2^63-1, as for `uint`. Signed
+  integers wider than 64 bits are still a compile error. ([#53])
 - `Repository.fromRelations(relations)`: a repository over a container's
   `Relations` value, such as the `tx` that `app.transaction(.gw, ctx, f)`
   passes to `f`, so a repository's relations can run in a transaction.
@@ -657,3 +666,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#50]: https://github.com/kamalogudah/zom/issues/50
 [#51]: https://github.com/kamalogudah/zom/issues/51
 [#52]: https://github.com/kamalogudah/zom/issues/52
+[#53]: https://github.com/kamalogudah/zom/issues/53

@@ -228,14 +228,15 @@ simplest alternative: read into it and free it once.
 | Zig attribute | Column | Notes |
 |---|---|---|
 | `i8` .. `i64`, `u8` .. `u64` | `smallint`, `integer`, `bigint` | Read by the column's type, then range-checked into the field (`error.ValueOutOfRange`). A `u32` needs `bigint`. Values past bigint's range (a `u64` above 2^63-1) can't be stored or compared. |
+| `u65` .. `u128` | `bigint` | As above: values up to 2^63-1 work, larger ones are `error.ValueOutOfRange`, both when read and when bound as a parameter. Postgres has no 128-bit integer; zom-pg doesn't bind them as `numeric` text, since an integer column couldn't hold them and integer fields aren't read from `numeric`. |
 | `f32`, `f64` | `real`, `double precision`, `numeric` | |
 | `bool` | `boolean` | |
 | `[]const u8` (or `[:0]const u8`) | `text`, `varchar`, `char(n)` | Copied; see above. |
 | an enum | `text`, or a Postgres `ENUM` | Stored as the tag name, read with `zom.codec`. Ordering a text column sorts by name, not declaration order. |
 | `?T` | any of the above, nullable | |
 
-Parameters are bound from `zom.Value`: `int` as bigint, `uint` as bigint
-after a range check, `float`, `string` as text, `boolean`, and `null`.
+Parameters are bound from `zom.Value`: `int` as bigint, `uint` and `uint128` as
+bigint after a range check (`error.ValueOutOfRange` past 2^63-1), `float`, `string` as text, `boolean`, and `null`.
 Postgres infers each parameter's type from the SQL, and pg.zig converts to
 it, refusing a value that does not fit (`error.ValueOutOfRange`).
 

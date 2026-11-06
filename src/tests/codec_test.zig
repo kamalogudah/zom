@@ -45,6 +45,14 @@ test "integers" {
         .{ .in = "-9223372036854775808", .want = std.math.minInt(i64) },
         .{ .in = "9223372036854775808", .want = error.ValueOutOfRange },
     }, .{});
+    try expectCases(u128, &.{
+        .{ .in = "0", .want = 0 },
+        .{ .in = "18446744073709551616", .want = std.math.maxInt(u64) + 1 },
+        .{ .in = "340282366920938463463374607431768211455", .want = std.math.maxInt(u128) },
+        .{ .in = "340282366920938463463374607431768211456", .want = error.ValueOutOfRange },
+        .{ .in = "-1", .want = error.ValueOutOfRange },
+        .{ .in = "1e3", .want = error.InvalidInt },
+    }, .{});
 }
 
 test "floats" {
@@ -230,6 +238,8 @@ test "encodeField per type" {
     try expectEncoded("0", @as(u8, 0), .{});
     try expectEncoded("-9223372036854775808", @as(i64, std.math.minInt(i64)), .{});
     try expectEncoded("42", 42, .{});
+    try expectEncoded("340282366920938463463374607431768211455", @as(u128, std.math.maxInt(u128)), .{});
+    try expectEncoded("18446744073709551616", @as(?u128, std.math.maxInt(u64) + 1), .{});
     try expectEncoded("true", true, .{});
     try expectEncoded("false", false, .{});
     try expectEncoded("member", Role.member, .{});

@@ -529,13 +529,35 @@ fn bindValue(stmt: *pg.Stmt, v: Value) !void {
     switch (v) {
         .null => try stmt.bind(null),
         .boolean => |b| try stmt.bind(b),
-        .int => |i| try stmt.bind(i),
-        // Postgres has no unsigned integers: a u64 past bigint's range
-        // can't be stored or compared as one.
-        .uint => |u| try stmt.bind(std.math.cast(i64, u) orelse return error.ValueOutOfRange),
+        .int, .uint, .uint128 => try stmt.bind(try bigint(v)),
         .float => |f| try stmt.bind(f),
         .string => |s| try stmt.bind(s),
     }
+}
+
+/// An integer `Value` as a bigint parameter. Postgres has no unsigned
+/// integers and nothing wider than bigint, so a `uint` or `uint128` past
+/// 2^63-1 is refused rather than bound as `numeric` text: an integer
+/// column could not hold it, and zom-pg reads integer fields from
+/// smallint, integer and bigint columns only.
+fn bigint(v: Value) error{ValueOutOfRange}!i64 {
+    return switch (v) {
+        .int => |i| i,
+        .uint => |u| std.math.cast(i64, u) orelse error.ValueOutOfRange,
+        .uint128 => |u| std.math.cast(i64, u) orelse error.ValueOutOfRange,
+        else => unreachable,
+    };
+}
+
+test "bigint: uint and uint128 bind when they fit, ValueOutOfRange past 2^63-1" {
+    const max = std.math.maxInt(i64);
+    try std.testing.expectEqual(-1, try bigint(.{ .int = -1 }));
+    try std.testing.expectEqual(max, try bigint(.{ .uint = max }));
+    try std.testing.expectEqual(max, try bigint(.{ .uint128 = max }));
+    try std.testing.expectEqual(7, try bigint(zom.query.toValue(@as(u128, 7))));
+    try std.testing.expectError(error.ValueOutOfRange, bigint(.{ .uint = max + 1 }));
+    try std.testing.expectError(error.ValueOutOfRange, bigint(.{ .uint128 = max + 1 }));
+    try std.testing.expectError(error.ValueOutOfRange, bigint(.{ .uint128 = std.math.maxInt(u128) }));
 }
 
 /// zom's shared error names for what Postgres and pg.zig report (see

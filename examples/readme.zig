@@ -105,6 +105,8 @@ test "README: Value" {
     std.debug.assert(big.order(.{ .int = -1 }).? == .gt);
     std.debug.assert(big.order(.{ .string = "x" }) == null); // different kinds never compare
     std.debug.assert(zom.query.toValue(@as(u64, 7)).eql(.{ .int = 7 }));
+    const id: zom.Value = .{ .uint128 = std.math.maxInt(u128) }; // a TigerBeetle id
+    std.debug.assert(id.order(big).? == .gt);
 }
 
 test "README: The adapter contract" {

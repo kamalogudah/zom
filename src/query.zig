@@ -160,37 +160,49 @@ pub const Value = union(enum) {
     int: i64,
     /// Unsigned values that do not fit `int` (u64, usize on 64-bit targets).
     uint: u64,
+    /// Unsigned integers of 65 to 128 bits (TigerBeetle ids, amounts and
+    /// `user_data_128`). Stored at 8-byte alignment, not u128's natural 16,
+    /// so `Value` stays 24 bytes on 64-bit targets instead of growing to
+    /// 32; switch captures copy the payload out, so it is never read
+    /// through an under-aligned pointer.
+    uint128: u128 align(8),
     float: f64,
     string: []const u8,
 
+    /// Every integer variant widened to `i129`, which holds every `i64`,
+    /// `u64` and `u128` exactly; null for the other variants.
+    fn integer(v: Value) ?i129 {
+        return switch (v) {
+            .int => |x| x,
+            .uint => |x| x,
+            .uint128 => |x| x,
+            else => null,
+        };
+    }
+
     /// Total order within a kind; `null` when the two values are not comparable.
+    /// Integers compare exactly across `int`, `uint` and `uint128`; against a
+    /// `float`, the integer is converted to `f64` first.
     pub fn order(a: Value, b: Value) ?std.math.Order {
+        if (a.integer()) |x| {
+            if (b.integer()) |y| return std.math.order(x, y);
+            if (b == .float) return std.math.order(@as(f64, @floatFromInt(x)), b.float);
+            return null;
+        }
         return switch (a) {
             .null => if (b == .null) .eq else null,
             .boolean => |x| if (b == .boolean)
                 std.math.order(@intFromBool(x), @intFromBool(b.boolean))
             else
                 null,
-            .int => |x| switch (b) {
-                .int => |y| std.math.order(x, y),
-                // Widening to i128 holds every i64 and u64 value exactly.
-                .uint => |y| std.math.order(@as(i128, x), @as(i128, y)),
-                .float => |y| std.math.order(@as(f64, @floatFromInt(x)), y),
-                else => null,
-            },
-            .uint => |x| switch (b) {
-                .uint => |y| std.math.order(x, y),
-                .int => |y| std.math.order(@as(i128, x), @as(i128, y)),
-                .float => |y| std.math.order(@as(f64, @floatFromInt(x)), y),
-                else => null,
-            },
-            .float => |x| switch (b) {
-                .float => |y| std.math.order(x, y),
-                .int => |y| std.math.order(x, @as(f64, @floatFromInt(y))),
-                .uint => |y| std.math.order(x, @as(f64, @floatFromInt(y))),
-                else => null,
-            },
+            .float => |x| if (b.integer()) |y|
+                std.math.order(x, @as(f64, @floatFromInt(y)))
+            else if (b == .float)
+                std.math.order(x, b.float)
+            else
+                null,
             .string => |x| if (b == .string) std.mem.order(u8, x, b.string) else null,
+            .int, .uint, .uint128 => unreachable, // handled above
         };
     }
 
@@ -219,15 +231,19 @@ pub fn toValue(v: anytype) Value {
         .null => return .null,
         .bool => return .{ .boolean = v },
         .int => |info| {
-            if (info.bits > 64)
-                @compileError("zom: " ++ @typeName(T) ++ " is wider than 64 bits; u128 support is planned for phase 6");
+            if (info.signedness == .signed and info.bits > 64)
+                @compileError("zom: " ++ @typeName(T) ++ " is a signed integer wider than 64 bits; only unsigned ones go up to 128");
+            if (info.bits > 128)
+                @compileError("zom: " ++ @typeName(T) ++ " is wider than 128 bits");
+            if (info.bits > 64) return .{ .uint128 = v };
             if (info.signedness == .unsigned and info.bits == 64) return .{ .uint = v };
             return .{ .int = v };
         },
         .comptime_int => {
             if (comptime std.math.cast(i64, v) != null) return .{ .int = v };
             if (comptime std.math.cast(u64, v) != null) return .{ .uint = v };
-            @compileError(std.fmt.comptimePrint("zom: {d} does not fit in 64 bits; u128 support is planned for phase 6", .{v}));
+            if (comptime std.math.cast(u128, v) != null) return .{ .uint128 = v };
+            @compileError(std.fmt.comptimePrint("zom: {d} fits neither i64 nor u128", .{v}));
         },
         .float, .comptime_float => return .{ .float = v },
         .optional => return if (v) |inner| toValue(inner) else .null,
@@ -249,12 +265,14 @@ pub fn fromValue(comptime F: type, v: Value) error{ValueOutOfRange}!F {
         .int => return switch (v) {
             .int => |i| std.math.cast(F, i) orelse error.ValueOutOfRange,
             .uint => |u| std.math.cast(F, u) orelse error.ValueOutOfRange,
+            .uint128 => |u| std.math.cast(F, u) orelse error.ValueOutOfRange,
             else => unreachable, // assertSettable rejects floats for int attributes
         },
         .float => return switch (v) {
             .float => |f| @floatCast(f),
             .int => |i| @floatFromInt(i),
             .uint => |u| @floatFromInt(u),
+            .uint128 => |u| @floatFromInt(u),
             else => unreachable,
         },
         .@"enum" => return std.meta.stringToEnum(F, v.string) orelse error.ValueOutOfRange,

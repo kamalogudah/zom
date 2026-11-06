@@ -183,8 +183,11 @@ relation code run on memory and Postgres.
 | `timestamp` | `i64` nanoseconds since the Unix epoch, UTC | marker type `zom.Timestamp{ .ns: i64 }` | Covers 1677 to 2262. Not `std.time.Instant`, which is a monotonic, platform-specific clock reading with no fixed epoch. A bare `i64` field still maps to `.int`. |
 | `bytes` | `[]const u8` | marker type `zom.Bytes` | A separate tag from `string`, because `[]const u8` means string. Orders against `bytes` only. Text adapters encode it as base64 (details in the codec ticket). |
 
-`u128` raises `Value`'s alignment to 16, so it grows from 24 to 32 bytes.
-Fixed-capacity filter and change arrays grow by the same ratio.
+Done in #53: the `uint128` payload is declared `u128 align(8)`, so
+`Value` keeps the 8-byte alignment of its string slice and stays 24 bytes
+(a plain `u128` would raise it to 16-byte alignment and 32 bytes, and grow
+the fixed-capacity filter and change arrays by the same ratio). zom-pg
+binds it as bigint after a range check, like `uint`.
 
 ## 4. Phases
 

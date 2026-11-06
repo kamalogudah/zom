@@ -61,6 +61,91 @@ test "int and uint values compare across variants" {
     try testing.expectEqual(std.math.Order.lt, zom.Value.order(.{ .float = -1.0 }, .{ .uint = 0 }).?);
 }
 
+const Account = struct { id: u128, user_data_128: u128 = 0, ledger: u32 = 1 };
+const Accounts = zom.Relation(zom.Schema(Account, "accounts", .id, .{}), zom.memory.Gateway);
+
+test "u128 values: where, order, byPk and update on memory" {
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
+    defer gw.deinit();
+    const accounts = try Accounts.init(&gw);
+
+    const max = std.math.maxInt(u128);
+    const mid: u128 = std.math.maxInt(u64) + 1;
+    _ = try accounts.create(.{ .id = max, .user_data_128 = 1 }).commit();
+    _ = try accounts.create(.{ .id = mid, .user_data_128 = 2 }).commit();
+    _ = try accounts.create(.{ .id = 3, .user_data_128 = 3 }).commit();
+    try testing.expectError(error.DuplicatePrimaryKey, accounts.create(.{ .id = max }).commit());
+
+    try testing.expectEqual(@as(u128, 1), (try accounts.where(.id, .eq, std.math.maxInt(u128)).one(testing.allocator)).?.user_data_128);
+    try testing.expectEqual(@as(usize, 2), try accounts.where(.id, .gt, std.math.maxInt(u64)).count());
+    try testing.expectEqual(@as(usize, 1), try accounts.where(.id, .lt, std.math.maxInt(i64)).count());
+    // A u128 attribute compared with a literal that fits i64 still matches.
+    try testing.expectEqual(@as(usize, 1), try accounts.where(.id, .eq, 3).count());
+
+    const rows = try accounts.order(.id, .desc).toSlice(testing.allocator);
+    defer testing.allocator.free(rows);
+    try testing.expectEqualSlices(u128, &.{ max, mid, 3 }, &.{ rows[0].id, rows[1].id, rows[2].id });
+
+    try testing.expectEqual(@as(usize, 1), try accounts.byPk(mid).update().set(.user_data_128, max).commit());
+    try testing.expectEqual(max, (try accounts.byPk(mid).one(testing.allocator)).?.user_data_128);
+    // A runtime u128 too big for the u32 attribute is refused on commit.
+    var too_big: u128 = max;
+    _ = &too_big;
+    try testing.expectError(error.ValueOutOfRange, accounts.byPk(3).update().set(.ledger, too_big).commit());
+}
+
+test "toValue: u65..u128 types and literals past u64 are uint128" {
+    try testing.expectEqual(zom.Value{ .uint128 = 5 }, zom.query.toValue(@as(u128, 5)));
+    try testing.expectEqual(zom.Value{ .uint128 = 5 }, zom.query.toValue(@as(u65, 5)));
+    try testing.expectEqual(zom.Value{ .uint128 = std.math.maxInt(u128) }, zom.query.toValue(std.math.maxInt(u128)));
+    try testing.expectEqual(zom.Value{ .uint = std.math.maxInt(u64) }, zom.query.toValue(std.math.maxInt(u64)));
+    try testing.expectEqual(zom.Value{ .uint128 = std.math.maxInt(u64) + 1 }, zom.query.toValue(std.math.maxInt(u64) + 1));
+    try testing.expectEqual(@as(u128, std.math.maxInt(u128)), try zom.query.fromValue(u128, .{ .uint128 = std.math.maxInt(u128) }));
+    try testing.expectEqual(@as(u128, 7), try zom.query.fromValue(u128, .{ .int = 7 }));
+    try testing.expectError(error.ValueOutOfRange, zom.query.fromValue(u128, .{ .int = -1 }));
+    try testing.expectError(error.ValueOutOfRange, zom.query.fromValue(u64, .{ .uint128 = std.math.maxInt(u64) + 1 }));
+    try testing.expectEqual(@as(?u128, null), try zom.query.fromValue(?u128, .null));
+}
+
+test "uint128 orders against int, uint and float, including negative ints" {
+    const Order = std.math.Order;
+    const V = zom.Value;
+    const max128: V = .{ .uint128 = std.math.maxInt(u128) };
+    const min_int: V = .{ .int = std.math.minInt(i64) };
+    const cases = [_]struct { V, V, Order }{
+        .{ .{ .int = -1 }, .{ .uint128 = 0 }, .lt },
+        .{ min_int, max128, .lt },
+        .{ .{ .uint128 = 0 }, .{ .int = -1 }, .gt },
+        .{ .{ .uint128 = 5 }, .{ .int = 5 }, .eq },
+        .{ .{ .uint128 = 5 }, .{ .uint = 5 }, .eq },
+        .{ .{ .uint = std.math.maxInt(u64) }, .{ .uint128 = std.math.maxInt(u64) + 1 }, .lt },
+        .{ .{ .int = std.math.maxInt(i64) }, .{ .uint128 = std.math.maxInt(i64) }, .eq },
+        .{ max128, .{ .uint = std.math.maxInt(u64) }, .gt },
+        .{ max128, max128, .eq },
+        .{ .{ .uint128 = std.math.maxInt(u128) - 1 }, max128, .lt },
+        .{ max128, .{ .float = 1.0 }, .gt },
+        .{ .{ .float = -1.0 }, .{ .uint128 = 0 }, .lt },
+        .{ .{ .float = 1e39 }, max128, .gt },
+    };
+    for (cases) |c| {
+        errdefer std.debug.print("order({any}, {any})\n", .{ c[0], c[1] });
+        try testing.expectEqual(c[2], c[0].order(c[1]).?);
+        try testing.expectEqual(c[2].invert(), c[1].order(c[0]).?);
+        try testing.expectEqual(c[2] == .eq, c[0].eql(c[1]));
+    }
+    try testing.expectEqual(null, max128.order(.{ .string = "1" }));
+    try testing.expectEqual(null, max128.order(.null));
+    try testing.expectEqual(null, max128.order(.{ .boolean = true }));
+    try testing.expect(!max128.eql(.null));
+}
+
+test "uint128 does not grow Value" {
+    // u128 is 16-byte aligned on x86_64; the payload is stored at 8, so the
+    // largest variant is still the 16-byte string slice, plus the tag.
+    if (@sizeOf(usize) == 8) try testing.expectEqual(24, @sizeOf(zom.Value));
+    try testing.expectEqual(@alignOf([]const u8), @alignOf(zom.Value));
+}
+
 const Contact = struct {
     id: u32,
     name: [:0]const u8,

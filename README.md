@@ -962,6 +962,8 @@ const big: zom.Value = .{ .uint = std.math.maxInt(u64) };
 std.debug.assert(big.order(.{ .int = -1 }).? == .gt);
 std.debug.assert(big.order(.{ .string = "x" }) == null); // different kinds never compare
 std.debug.assert(zom.query.toValue(@as(u64, 7)).eql(.{ .int = 7 }));
+const id: zom.Value = .{ .uint128 = std.math.maxInt(u128) }; // a TigerBeetle id
+std.debug.assert(id.order(big).? == .gt);
 ```
 
 `zom.Value` is a `union(enum)`:
@@ -972,13 +974,17 @@ std.debug.assert(zom.query.toValue(@as(u64, 7)).eql(.{ .int = 7 }));
 | `boolean: bool` | `bool`. |
 | `int: i64` | Every integer type up to 64 bits, except `u64`. |
 | `uint: u64` | `u64` (and `usize` on 64-bit targets), and integer literals above `maxInt(i64)`. |
+| `uint128: u128` | Unsigned integers of 65 to 128 bits (`u128` ids and amounts), and integer literals above `maxInt(u64)`. |
 | `float: f64` | Float types. |
 | `string: []const u8` | Strings, and enum values (by tag name). |
 
-`a.order(b)` returns `?std.math.Order`: numbers compare across `int`, `uint`
-and `float`, strings compare bytewise, and values of different kinds return
-`null`. `a.eql(b)` is `order == .eq`. Integers wider than 64 bits are a
-compile error until `u128` support lands.
+`a.order(b)` returns `?std.math.Order`: numbers compare across `int`,
+`uint`, `uint128` and `float` (integers exactly, by widening both sides to
+`i129`; against a float, through `f64`), strings compare bytewise, and
+values of different kinds return `null`. `a.eql(b)` is `order == .eq`.
+Signed integers wider than 64 bits, and any integer wider than 128, are a
+compile error. `uint128` is stored at 8-byte alignment, so `Value` is 24
+bytes on 64-bit targets, the same as without it.
 
 ### The adapter contract
 
@@ -1284,7 +1290,6 @@ condition (`DuplicatePrimaryKey`, `ValueOutOfRange`, `NotFound`, `ReadOnly`,
 These are scheduled in [plan.md](plan.md) and will each come with a version
 bump and a changelog entry:
 
-- Phase 6: `zom.Value` gains a `u128` variant.
 
 ## Memory rules
 
