@@ -9,6 +9,23 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- zom-tigerbeetle inserts: `create` / `createMany` (the datasets' `insert`
+  and `insertMany`) on `create_accounts` / `create_transfers`. `insert`
+  returns the row with the `timestamp` the cluster gave it. `insertMany`
+  splits rows into requests the cluster takes, never inside a linked chain
+  (`error.LinkedChainTooLong` for a chain that can't fit). The limit isn't
+  exposed by `tb_client.h`, and it is 253 on a `--development` cluster, not
+  8189, so the gateway learns it from the client's refusals, which send
+  nothing (`Config.batch_max` caps it; `batchLimit()` and `requestCount()`
+  show it). Result codes are `results.CreateAccountResult` /
+  `CreateTransferResult`, generated from the header; each becomes a typed
+  error (`error.ExceedsCredits`, ...), and the `exists*` codes become
+  `error.DuplicatePrimaryKey`. A code with no error is a compile error.
+  `insertMany` fails with the first failing row's error, but sends every
+  batch; `insertManyResults(rows, allocator)` lists each row not created
+  with its code. `update` / `delete` are compile errors naming the adapter
+  (`adapters/tigerbeetle/tests/compile_errors`, run by `test-tigerbeetle`).
+  ([#55])
 - zom-tigerbeetle (scaffold): the `zom_tigerbeetle` module, built with
   `-Dtigerbeetle` (`.tigerbeetle = true` from a dependent; on in a
   checkout). It links TigerBeetle's prebuilt C client from the
@@ -682,3 +699,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#52]: https://github.com/kamalogudah/zom/issues/52
 [#53]: https://github.com/kamalogudah/zom/issues/53
 [#54]: https://github.com/kamalogudah/zom/issues/54
+[#55]: https://github.com/kamalogudah/zom/issues/55

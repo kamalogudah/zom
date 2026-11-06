@@ -51,7 +51,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(readme).step);
 
     const compile_errors = b.step("compile-errors", "Check that tests/compile_errors/*.zig fail with the expected message");
-    addCompileErrorCases(b, compile_errors);
+    addCompileErrorCases(b, compile_errors, compile_errors_dir, &.{});
     test_step.dependOn(compile_errors);
 
     // The adapters with no dependency beyond zom (and each other).
@@ -203,7 +203,18 @@ fn addTigerBeetle(
     }
     // The cluster test reads ZOM_TB_ADDRESSES, which the cache can't see.
     adapter.run_tests.has_side_effects = true;
+    // The cluster tests read ZOM_TB_ADDRESSES, which the cache can't see;
+    // without it they are skipped.
+    adapter.run_tests.has_side_effects = true;
     test_tigerbeetle.dependOn(&adapter.run_tests.step);
+
+    // Cases that must not compile against zom_tigerbeetle (e.g. an update
+    // of immutable transfers). They only type-check, so nothing is linked.
+    addCompileErrorCases(b, test_tigerbeetle, "adapters/tigerbeetle/tests/compile_errors", &.{
+        .{ .name = "zom_tigerbeetle", .root = b.path("adapters/tigerbeetle/src/root.zig"), .deps = &.{ "zom", "tb_client" } },
+        .{ .name = "tb_client", .root = tb_client.getOutput(), .deps = &.{} },
+    });
+    test_adapters.dependOn(test_tigerbeetle);
 }
 
 /// Options for `addInferStep`.
@@ -299,33 +310,46 @@ fn buildOptions(b: *std.Build, no_deprecated: bool) *std.Build.Step.Options {
 const compile_errors_dir = "tests/compile_errors";
 const expect_prefix = "// expect: ";
 
-/// One `zig build-obj` per case, with zom as a module import. `zig test` can't
+/// A module a compile-error case can import besides zom: `name`, rooted at
+/// `root`, which imports `deps` (zom, build_options or another extra).
+const CaseModule = struct {
+    name: []const u8,
+    root: std.Build.LazyPath,
+    deps: []const []const u8,
+};
+
+/// One `zig build-obj` per case in `cases_dir`, with zom (and `extra`) as module imports. `zig test` can't
 /// say "this must not compile", so each case must exit 1 with the text of every
 /// leading `// expect:` line (at least the first line of the file) somewhere in
 /// stderr. Several lines let one case check every line of a multi-line error.
 /// The cases build zom with `no_deprecated` set, so one of them can check the
 /// deprecation error, and no other case relies on a deprecated declaration.
-fn addCompileErrorCases(b: *std.Build, step: *std.Build.Step) void {
+fn addCompileErrorCases(b: *std.Build, step: *std.Build.Step, cases_dir: []const u8, extra: []const CaseModule) void {
     const io = b.graph.io;
     const build_options = buildOptions(b, true).getOutput();
-    var dir = b.build_root.handle.openDir(io, compile_errors_dir, .{ .iterate = true }) catch |err|
-        std.debug.panic("unable to open {s}: {t}", .{ compile_errors_dir, err });
+    var dir = b.build_root.handle.openDir(io, cases_dir, .{ .iterate = true }) catch |err|
+        std.debug.panic("unable to open {s}: {t}", .{ cases_dir, err });
     defer dir.close(io);
 
     var it = dir.iterate();
-    while (it.next(io) catch |err| std.debug.panic("unable to list {s}: {t}", .{ compile_errors_dir, err })) |entry| {
+    while (it.next(io) catch |err| std.debug.panic("unable to list {s}: {t}", .{ cases_dir, err })) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zig")) continue;
 
         const source = dir.readFileAlloc(io, entry.name, b.allocator, .limited(64 * 1024)) catch |err|
-            std.debug.panic("unable to read {s}/{s}: {t}", .{ compile_errors_dir, entry.name, err });
+            std.debug.panic("unable to read {s}/{s}: {t}", .{ cases_dir, entry.name, err });
         if (!std.mem.startsWith(u8, source, expect_prefix))
-            std.debug.panic("{s}/{s}: first line must be `{s}<error text>`", .{ compile_errors_dir, entry.name, expect_prefix });
+            std.debug.panic("{s}/{s}: first line must be `{s}<error text>`", .{ cases_dir, entry.name, expect_prefix });
 
         const run = b.addSystemCommand(&.{ b.graph.zig_exe, "build-obj", "-fno-emit-bin", "--dep", "zom" });
         run.setName(b.fmt("compile-error {s}", .{entry.name}));
-        run.addPrefixedFileArg("-Mroot=", b.path(b.fmt("{s}/{s}", .{ compile_errors_dir, entry.name })));
+        for (extra) |m| run.addArgs(&.{ "--dep", m.name });
+        run.addPrefixedFileArg("-Mroot=", b.path(b.fmt("{s}/{s}", .{ cases_dir, entry.name })));
         run.addArgs(&.{ "--dep", "build_options" });
         run.addPrefixedFileArg("-Mzom=", b.path("src/root.zig"));
+        for (extra) |m| {
+            for (m.deps) |dep| run.addArgs(&.{ "--dep", dep });
+            run.addPrefixedFileArg(b.fmt("-M{s}=", .{m.name}), m.root);
+        }
         run.addPrefixedFileArg("-Mbuild_options=", build_options);
         run.expectExitCode(1);
         var lines = std.mem.splitScalar(u8, source, '\n');

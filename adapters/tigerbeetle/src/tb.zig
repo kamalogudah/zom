@@ -21,6 +21,18 @@ pub const c = @import("tb_client");
 pub const Account = c.tb_account_t;
 pub const Transfer = c.tb_transfer_t;
 
+/// The most events one `create_accounts` / `create_transfers` request takes
+/// in TigerBeetle's default configuration (docs/coding/requests.md). The
+/// cluster sets the real limit (a `--development` one takes 253), and the
+/// client learns it but `tb_client.h` doesn't expose it, so this is only
+/// where `insertMany` starts: see `Gateway.Config.batch_max`. A bigger
+/// request gets `TB_PACKET_TOO_MUCH_DATA` from the client, unsent.
+pub const batch_max: u32 = 8189;
+
+/// Bit 0 of `flags`, for both records: this event and the next one succeed
+/// or fail together.
+pub const linked_flag: u16 = c.TB_ACCOUNT_LINKED;
+
 /// `Account.flags` as bools, bit 0 first, as in `TB_ACCOUNT_FLAGS`.
 pub const AccountFlags = packed struct(u16) {
     linked: bool = false,
@@ -76,6 +88,7 @@ comptime {
     }
     std.debug.assert(@FieldType(Account, "flags") == u16);
     std.debug.assert(@FieldType(Transfer, "flags") == u16);
+    std.debug.assert(c.TB_ACCOUNT_LINKED == c.TB_TRANSFER_LINKED);
 }
 
 const testing = std.testing;

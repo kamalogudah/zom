@@ -1276,14 +1276,17 @@ static library. TigerBeetle's own releases pin an older Zig than 0.16, so
 zom can't build them from source. The schemas are fixed:
 `zom_tigerbeetle.Account` and `zom_tigerbeetle.Transfer`, over the client's
 own structs, keyed by the `u128` `id`. Records are immutable, so there is
-no `update` or `delete`. It is a scaffold for now (inserts and reads are
-#55 and #56). The dependency decision, the supported targets and the
+no `update` or `delete`. `create` and `createMany` run `create_accounts` /
+`create_transfers`, split into batches the cluster takes, and each of
+TigerBeetle's result codes is a typed error (`error.ExceedsCredits`, ...).
+Reads come in #56. The dependency decision, the supported targets and the
 setup are in [adapters/tigerbeetle/README.md](adapters/tigerbeetle/README.md).
 
 ```zig
 var tb = try zom_tigerbeetle.Gateway.init(allocator, .{ .io = io, .cluster_id = 0, .addresses = "3000" });
 defer tb.deinit();
 const accounts = try zom.Relation(zom_tigerbeetle.Account, zom_tigerbeetle.Gateway).init(&tb);
+_ = try accounts.create(.{ .id = 1, .ledger = 700, .code = 10 }).commit();
 ```
 
 ### Errors

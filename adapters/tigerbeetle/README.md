@@ -5,9 +5,9 @@ on its C client (`tb_client`). TigerBeetle tests zom's adapter contract
 hardest: two fixed schemas, 128-bit ids, immutable records, batched writes
 and limited queries (plan.md, Phase 6).
 
-**Status:** scaffold (#54). The gateway starts the client, and the two
-schemas and their datasets pass `zom.Adapter`. Inserts come in #55, and
-reads in #56: until then, `read` and `count` return `error.Unimplemented`.
+**Status:** inserts (#55). `create` and `createMany` work, with typed
+errors for TigerBeetle's result codes. Reads come in #56: until then,
+`read` and `count` return `error.Unimplemented`.
 
 ## Schemas
 
@@ -48,8 +48,96 @@ or `tb.Transfer` keyed by `.id`, for example to add plugins. Any other
 struct is a compile error.
 
 No `update`, no `delete`, no `transaction`: TigerBeetle records are
-immutable, so `relation.update()` and `relation.delete()` don't compile.
-Linked event chains will take the place of transactions (#58).
+immutable, so `relation.update()` and `relation.delete()` don't compile
+(`zom: adapter 'tigerbeetle' does not support `update` for relation
+'transfers'...`). Linked event chains will take the place of transactions
+(#58).
+
+## Inserts
+
+```zig
+const accounts = try zom.Relation(zom_tigerbeetle.Account, zom_tigerbeetle.Gateway).init(&gateway);
+const transfers = try zom.Relation(zom_tigerbeetle.Transfer, zom_tigerbeetle.Gateway).init(&gateway);
+
+const stored = try accounts.create(.{ .id = 1, .ledger = 700, .code = 10 }).commit();
+// stored.timestamp is the cluster's.
+
+_ = transfers.create(.{ .id = 7, .debit_account_id = 1, .credit_account_id = 2, .amount = 50, .ledger = 700, .code = 1 }).commit() catch |err| switch (err) {
+    error.ExceedsCredits => {}, // account 1 has debits_must_not_exceed_credits
+    error.DuplicatePrimaryKey => {}, // transfer 7 exists
+    else => return err,
+};
+
+const n = try transfers.createMany(rows).commit(); // any number of rows
+```
+
+`create` sends one `create_accounts` / `create_transfers` event and
+`createMany` sends batches. Each event's result code becomes an error:
+
+- `.created` is success.
+- `.exists` and the `.exists_with_different_*` codes are
+  `error.DuplicatePrimaryKey`, zom's name for an id that's taken.
+- Every other code is the error of the same name: `.exceeds_credits` is
+  `error.ExceedsCredits`, `.linked_event_failed` is
+  `error.LinkedEventFailed`, and so on.
+
+The codes are the enums `zom_tigerbeetle.results.CreateAccountResult` and
+`CreateTransferResult`, generated at compile time from the header's
+`TB_CREATE_*` constants, so they always match the linked client. Zig can't
+generate error sets, so `CreateAccountError` and `CreateTransferError` are
+written out in `results.zig`. A code that has no error there is a compile
+error, so a client upgrade can't add a code that goes unmapped. A test
+checks that no error is left over from a removed code. A code the client
+doesn't know (from a newer cluster) is `error.UnknownResult`.
+
+### Batches
+
+TigerBeetle applies each event of a request on its own, except for linked
+chains, so a batch is not all or nothing. `createMany` sends every batch,
+and the rows that can be created are. If any row fails, it returns that
+row's error (the first one, skipping `LinkedEventFailed`, which only says
+that another event in its chain failed), and the count is lost. To find out
+which rows failed, call the dataset directly:
+
+```zig
+const dataset = try gateway.dataset(zom_tigerbeetle.Transfer);
+const failed = try dataset.insertManyResults(rows, allocator);
+defer allocator.free(failed);
+for (failed) |f| std.log.info("row {d}: {t}", .{ f.index, f.code }); // e.g. .exceeds_credits
+```
+
+`failed` lists every row that wasn't created, in order. An empty result
+means all of them were.
+
+A request holds at most a cluster-set number of events. That number is
+8189 by default and 253 for a `--development` cluster. `tb_client.h`
+doesn't expose it, so the gateway learns it. It starts at
+`Config.batch_max` (8189). The client refuses a request that is too big
+before sending it, so nothing is applied, and the gateway retries with a
+smaller batch. It searches between the largest batch that worked and the
+smallest that was refused, and keeps the size it settles on. On a
+development cluster the first `createMany` makes about a dozen refused
+tries, all local, and then sends batches of 253. Set `batch_max` to the
+cluster's limit to skip the search. `gateway.batchLimit()` is the current
+size, and `gateway.requestCount()` counts the requests sent.
+
+Batches are never cut inside a linked chain (events with `flags.linked`,
+and the event that closes the chain): the batch ends before the chain
+instead. A chain longer than the limit can't be sent, so it is
+`error.LinkedChainTooLong`. If the chain is longer than `batch_max`, that
+is caught before anything is sent.
+
+A failed transfer's id stays taken. Sending it again gives
+`error.IdAlreadyFailed`, not a second try.
+
+### Threads
+
+The client runs its own thread for all network I/O. zom's calls are
+synchronous, so each `create` or `createMany` request blocks the calling
+task on a `std.Io.Event` until the client's thread delivers the reply. The
+wait can't be cancelled, because the client writes into the request until
+it completes. One gateway can be shared by several threads. Their requests
+are independent, and the client batches requests queued at the same time.
 
 ## Setup
 
@@ -62,8 +150,11 @@ exe.root_module.addImport("zom_tigerbeetle", dep.module("zom_tigerbeetle"));
 ```
 
 In a checkout of zom, `-Dtigerbeetle` is on by default.
-`zig build test-tigerbeetle` runs this module's tests. The one that talks
-to a cluster is skipped unless `ZOM_TB_ADDRESSES` is set:
+`zig build test-tigerbeetle` runs this module's tests and the cases in
+`tests/compile_errors` that must not compile. The tests that talk to a
+cluster are skipped unless `ZOM_TB_ADDRESSES` is set. They create fresh
+random ids on every run, so they can be rerun against the same cluster, and
+they pass on a `--development` cluster and on a production-config one:
 
 ```sh
 tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development 0_0.tigerbeetle

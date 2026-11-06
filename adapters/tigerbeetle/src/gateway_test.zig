@@ -13,15 +13,29 @@ test "zom.Adapter accepts the gateway" {
     try testing.expectEqualStrings("tigerbeetle", A.name);
 }
 
-test "records are immutable: no update, no delete, no transaction" {
+test "records are immutable: insert and insertMany, but no update, no delete, no transaction" {
     inline for (.{ zom_tigerbeetle.Account, zom_tigerbeetle.Transfer }) |S| {
         const caps = A.capabilities(S);
+        try testing.expect(caps.writable);
+        try testing.expect(caps.batch_insert);
         try testing.expect(!caps.updatable);
         try testing.expect(!caps.deletable);
         try testing.expect(!caps.transaction);
-        // `insert` / `insertMany` come with #55.
-        try testing.expect(A.readOnly(S));
+        // `relation.update()` on them is a compile error:
+        // adapters/tigerbeetle/tests/compile_errors/update_transfers.zig.
     }
+}
+
+test "each dataset has its own result codes and errors" {
+    const Accounts = Gateway.Dataset(zom_tigerbeetle.Account);
+    const Transfers = Gateway.Dataset(zom_tigerbeetle.Transfer);
+    try testing.expect(Accounts.Code == zom_tigerbeetle.results.CreateAccountResult);
+    try testing.expect(Transfers.Code == zom_tigerbeetle.results.CreateTransferResult);
+    // The errors callers switch on are in the insert error sets.
+    const exceeds: Transfers.InsertError = error.ExceedsCredits;
+    const duplicate: Accounts.InsertError = error.DuplicatePrimaryKey;
+    try testing.expectEqual(error.ExceedsCredits, exceeds);
+    try testing.expectEqual(error.DuplicatePrimaryKey, duplicate);
 }
 
 test "the schemas are the client's structs, keyed by id" {
