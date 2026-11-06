@@ -4,7 +4,7 @@
 //! from a `zom.Container`, around a root relation with command shortcuts:
 //!
 //!   const UserRepo = zom.Repository(App, .{ .root = .users, .relations = .{ .users, .posts } });
-//!   var repo = UserRepo.init(&app);
+//!   var repo = UserRepo.init(&app);       // or UserRepo.fromRelations(tx) in a transaction
 //!   const u = try repo.byPk(1).one(allocator);
 //!   _ = try repo.create(.{ ... }).commit();
 //!   const n = try repo.relations.posts.count();
@@ -40,7 +40,7 @@ const changeset = @import("changeset.zig");
 
 /// Method names a relation in `.relations` can't take, because the
 /// repository struct declares them.
-const reserved = [_][]const u8{ "init", "root", "byPk", "where", "all", "create", "createMany", "update", "delete", "Relations", "Root", "RootRelation" };
+const reserved = [_][]const u8{ "init", "fromRelations", "root", "byPk", "where", "all", "create", "createMany", "update", "delete", "Relations", "Root", "RootRelation" };
 
 /// `ContainerT` is a `zom.Container(...)` type. `spec` is an anonymous
 /// struct literal:
@@ -101,9 +101,17 @@ pub fn Repository(comptime ContainerT: type, comptime spec: anytype) type {
 
         /// Copies the listed relations out of an initialised container.
         pub fn init(container: *const ContainerT) Self {
+            return fromRelations(container.relations);
+        }
+
+        /// Builds the repository from a container's `Relations` value
+        /// rather than the container: inside `app.transaction(.gw, ctx, f)`,
+        /// `UserRepo.fromRelations(tx)` gives a repository whose relations
+        /// on `.gw` run in the transaction.
+        pub fn fromRelations(relations: ContainerRelations) Self {
             var self: Self = undefined;
             inline for (names_final, types_final, wrapped_final) |name, T, w| {
-                const r = @field(container.relations, name);
+                const r = @field(relations, name);
                 @field(self.relations, name) = if (w) T{ .rel = r } else r;
             }
             return self;

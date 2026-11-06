@@ -79,3 +79,26 @@ test "a repository of plain relations, rooted elsewhere" {
     try testing.expectEqual(@as(usize, 2), try repo.where(.user_id, .eq, 1).count());
     try testing.expectEqual(@as(usize, 3), try repo.relations.users.count());
 }
+
+test "fromRelations: a repository over a transaction's relations" {
+    var app: App = undefined;
+    try app.init(testing.allocator, .{});
+    defer app.deinit();
+    try fixtures.seed(app.relations.users, app.relations.posts);
+
+    // Same relations as init's.
+    const repo = UserRepo.fromRelations(app.relations);
+    try testing.expectEqual(app.relations.users.dataset, repo.root().rel.dataset);
+
+    // A failing transaction rolls back what the repository wrote in it.
+    const result = app.transaction(.default, {}, struct {
+        fn f(_: void, tx: App.Relations) !void {
+            const r = UserRepo.fromRelations(tx);
+            _ = try r.create(.{ .id = 4, .name = "Kamau", .email = "kamau@example.com", .age = 29 }).commit();
+            try testing.expectEqual(@as(usize, 4), try r.all().count());
+            return error.Abort;
+        }
+    }.f);
+    try testing.expectError(error.Abort, result);
+    try testing.expectEqual(@as(usize, 3), try repo.all().count());
+}

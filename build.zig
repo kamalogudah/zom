@@ -208,7 +208,8 @@ pub fn addInferStep(b: *std.Build, options: InferOptions) Infer {
 /// on zom by path, the way an application depends on it. They are listed
 /// rather than found by scanning, because `examples/` is not in zom's
 /// `.paths`: a project that fetches zom doesn't get them, and these steps
-/// only run from a checkout.
+/// only run from a checkout. examples/pg_repo is not listed: it needs a
+/// Postgres server, so zom-pg's CI workflow (pg.yml) runs it instead.
 const example_dirs = [_][]const u8{"csv_users"};
 
 /// Runs `zig build test` inside each example's directory: it builds the

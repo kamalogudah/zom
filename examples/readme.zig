@@ -5,7 +5,7 @@
 const std = @import("std");
 const testing = std.testing;
 
-test "README: Usage, then A longer tour" {
+test "README: Quick start, then A longer tour" {
     const allocator = testing.allocator;
 
     // -- README: Usage ----------------------------------------------------
@@ -260,6 +260,14 @@ test "README: Repository" {
 
         try testing.expectEqual(1, active);
         try testing.expectEqual(1, older);
+
+        try app.transaction(.default, {}, struct {
+            fn f(_: void, tx: App.Relations) !void {
+                const r = UserRepo.fromRelations(tx);
+                _ = try r.create(.{ .id = 3, .name = "Otieno", .age = 24 }).commit();
+            }
+        }.f);
+        try testing.expectEqual(3, try repo.all().count());
     }
 }
 

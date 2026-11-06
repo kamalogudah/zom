@@ -49,6 +49,8 @@ jobs:
             ~/.cache/zig
             .zig-cache
             zig-pkg
+            examples/pg_repo/.zig-cache
+            examples/pg_repo/zig-pkg
           key: pg-zig-0.16.0-${{ runner.os }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
           restore-keys: |
             pg-zig-0.16.0-${{ runner.os }}-${{ hashFiles('build.zig.zon') }}-
@@ -67,6 +69,18 @@ jobs:
             echo "::error::zom-pg tests were skipped; is ZOM_PG_URL reaching them?"
             exit 1
           fi
+
+      # The README's Postgres example, in a database of its own: builds it,
+      # runs it, and checks its output (examples/pg_repo/build.zig).
+      - name: examples/pg_repo (against Postgres)
+        working-directory: examples/pg_repo
+        env:
+          PGPASSWORD: postgres
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/zom_example
+        run: |
+          psql -h 127.0.0.1 -U postgres -d zom_test -c 'CREATE DATABASE zom_example'
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f schema.sql
+          zig build test --summary all
 
       # zom-pg-infer is what addInferStep runs; make sure it still builds.
       - name: zig build install (zom-pg-infer)

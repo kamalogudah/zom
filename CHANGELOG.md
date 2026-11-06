@@ -9,6 +9,15 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- `Repository.fromRelations(relations)`: a repository over a container's
+  `Relations` value, such as the `tx` that `app.transaction(.gw, ctx, f)`
+  passes to `f`, so a repository's relations can run in a transaction.
+  `init(&app)` is `fromRelations(app.relations)`. ([#52])
+- `examples/pg_repo`: a container on zom-pg, a repository with a custom
+  view, and a sign-up in a transaction that rolls back on a deliberate
+  error, with `schema.sql`. zom-pg's CI workflow runs it against Postgres
+  and checks its output. The README's Usage section is built around it,
+  with a section on reading error return traces. ([#52])
 - `relation.page(n).perPage(k)`: page `n` (from 1) of `k` rows, read as
   `offset((n - 1) * k).limit(k)`. Its `paginate(allocator)` returns
   `zom.pagination.Result` with `rows`, `total` (the count without limit
@@ -647,3 +656,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#49]: https://github.com/kamalogudah/zom/issues/49
 [#50]: https://github.com/kamalogudah/zom/issues/50
 [#51]: https://github.com/kamalogudah/zom/issues/51
+[#52]: https://github.com/kamalogudah/zom/issues/52

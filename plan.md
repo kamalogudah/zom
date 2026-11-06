@@ -318,7 +318,10 @@ for rom.
     without them (`src/plugins.zig`). Setting the hooks from a container,
     for schemas that don't declare them, is left out (see #51).
 - **Done when** the README example uses a repository and a transaction
-  against pg.
+  against pg. Done: `examples/pg_repo` signs users up through a
+  repository in `app.transaction(.db, ...)` (`Repository.fromRelations(tx)`
+  builds one over the transaction's relations), and zom-pg's CI workflow
+  runs it against Postgres.
 
 ### Phase 6: `zom-tigerbeetle`
 TigerBeetle tests the contract hardest: fixed schemas, 128-bit ids,
