@@ -50,8 +50,11 @@ part by part.
 zom needs **Zig 0.16.0**. Add it to your project:
 
 ```sh
-zig fetch --save git+https://github.com/kamalogudah/zom#main
+zig fetch --save git+https://github.com/kamalogudah/zom#v0.16.0
 ```
+
+zom's version tracks Zig's: the `v0.16.x` tags build with Zig 0.16.0. Use
+`#main` for the latest unreleased changes.
 
 zom is one package with a module per adapter. Depend on it once and import
 the modules you use:

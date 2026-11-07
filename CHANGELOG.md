@@ -7,6 +7,12 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-07
+
+zom's version now follows the Zig release it builds with: 0.16.x builds
+with Zig 0.16.0 (`minimum_zig_version = "0.16.0"`). Everything below was
+added since 0.2.0.
+
 ### Changed
 
 - **Breaking (zom-tigerbeetle):** `zom_tigerbeetle.AccountBalance` has no
@@ -839,7 +845,8 @@ API is listed in the README under [API (v0.2)](docs/api.md#api-v02).
 First version: schemas, immutable relations, create and update changesets,
 mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 
-[Unreleased]: https://github.com/kamalogudah/zom/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/kamalogudah/zom/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/kamalogudah/zom/releases/tag/v0.16.0
 [0.2.0]: https://github.com/kamalogudah/zom/releases/tag/v0.2.0
 [0.1.0]: https://github.com/kamalogudah/zom/commits/04a755a
 [#2]: https://github.com/kamalogudah/zom/issues/2
