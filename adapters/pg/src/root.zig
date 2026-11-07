@@ -23,6 +23,7 @@ test {
     _ = @import("lint_test.zig");
     _ = @import("scenario_test.zig");
     _ = @import("join_test.zig");
+    _ = @import("combine_test.zig");
     _ = @import("transaction_test.zig");
     _ = @import("verify.zig");
     _ = @import("verify_test.zig");
