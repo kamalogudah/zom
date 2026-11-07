@@ -368,7 +368,7 @@ relation and never touch the dataset. `field` is always an enum literal, and
 | `count()` | `!usize` | The number of rows `toSlice` would return, so `limit` and `offset` apply. On a `.fallback` relation it is `count(allocator)`, because it may have to read the rows to count them. |
 | `mapTo(E, allocator)` | `![]E` | `mapWith(zom.Mapper(Output, E, .{}))`. |
 | `mapWith(M, allocator)` | `![]M.Output` | `M` is a `zom.Mapper` whose `Input` is `Output`. |
-| `combine(.assoc, target)` | `zom.Combined(...)` | This relation with association `assoc` of its schema, read from `target`, a relation over the association's target schema. Lazy; its `mapTo(E, allocator)` and `mapWith(M, allocator)` return a `zom.CombineResult(E)`. See [Associations](#associations). |
+| `combine(.assoc, target)` | `zom.Combined(...)` | This relation with association `assoc` of its schema, read from `target`, a relation over the association's target schema, or a combine of one for nested levels. Lazy; its `mapTo(E, allocator)` and `mapWith(M, allocator)` return a `zom.CombineResult(E)`. See [Associations](#associations). |
 | `join(.assoc)` | `Relation` | The rows that have at least one row of association `assoc`, each once, as the same relation type. Needs `supports.join` (a compile error otherwise, even on a `.fallback` relation). See [Join](#join). |
 | `whereJoined(.assoc, field, op, value)` | `Relation` | A filter on the joined rows, typed like `where` on the target's tuple. Needs `join(.assoc)` first. |
 | `create(tuple)` | `Create` | `.map(f)` applies `f: fn (Tuple) Tuple`; `.associate(.assoc, parent)` overwrites the tuple's foreign key from `parent`; `.commit()` returns `!Tuple`, the stored tuple. `.commitAlloc(allocator)` does the same on every adapter, allocating the returned strings when they are caller-owned (zom-pg, where plain `commit()` is a compile error); free the result with `freeOne`. A compile error after `select`. |
@@ -991,11 +991,43 @@ the other schema's rows: `users.associate(.posts, post)` points you at
 
 #### Nesting
 
-Nested combines (`users.combine(.posts.combine(.comments))`) are not
-supported yet. Until they are, the deprecated `combineMany` can attach a
-second level to slices already loaded, in O(n·m), with its keys taken from
-the descriptor:
-`.{ .into = "comments", .parent_key = comments.primary_key, .child_key = comments.foreign_key }`.
+The relation passed to `combine` can be a combine itself, so a combine
+loads more than one level: users with their posts, each post with its
+comments.
+
+```zig
+const Comment = struct { id: u32, body: []const u8 };
+const PostWithComments = struct { id: u32, title: []const u8, comments: []const Comment };
+const Author = struct { id: u32, name: []const u8, posts: []const PostWithComments };
+
+var result = try users.order(.id, .asc)
+    .combine(.posts, posts.order(.id, .asc).combine(.comments, comments.order(.id, .asc)))
+    .mapTo(Author, allocator);
+defer result.deinit(); // frees every level
+```
+
+The element type of `Author.posts`, here `PostWithComments`, drives the
+inner level: each post row is mapped to it by attribute name, and its
+`comments` field is filled the way `Author.posts` is. The field-shape
+checks (`[]const X` for `hasMany`, `?X` for `belongsTo`) and the
+`error.PagedCombineTarget` check apply at every level, and levels can be
+nested deeper the same way. `hasMany` and `belongsTo` mix freely:
+`posts.combine(.author, users)` inside a combine fills each post's `?User`.
+
+Each level runs once, on every row the level above it read:
+
+1. The users are read.
+2. The posts are read with `whereIn(.user_id, ...)`, ⌈users / `max_in`⌉
+   queries.
+3. The comments are read with `whereIn(.post_id, ...)`, ⌈posts / `max_in`⌉
+   queries, over all posts at once, not per batch of the level above.
+
+So a combine makes 1 + Σ ⌈keys / `max_in`⌉ queries across its levels, and a
+level whose parents have no keys makes none. A level into a dataset with
+`loadAssociation` loads through it, and the rows it returns get their own
+association filled the same way. One `result.deinit()` frees the whole
+tree. The inner levels map by attribute name; `mapWith` applies to the
+outermost rows only.
 
 ### Value
 

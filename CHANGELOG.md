@@ -9,6 +9,15 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- Nested combines: the relation passed to `combine` can be a combine,
+  `users.combine(.posts, posts.combine(.comments, comments))`, to any
+  depth. The element type of the association field (e.g.
+  `PostWithComments`) is mapped by attribute name and gets its own
+  association filled; the field-shape and paging checks apply at every
+  level. Each level runs once over all the rows of the level above, so a
+  combine makes one source read plus Σ ⌈keys / `max_in`⌉ queries across
+  its levels, and one `deinit()` frees the whole tree. Inner levels into a
+  dataset with `loadAssociation` load through it (#75).
 - `examples/double_entry`: two accounts on one ledger, a deposit, a linked
   chain that posts and one that is refused as a whole, then the balances
   and the customer's history, through zom relations and changesets only.
@@ -219,8 +228,7 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
   `Query.max_in` keys, group the rows with a hash map (O(n + m)), and fill
   `E`'s association field: `[]const X` for `hasMany`, `?X` for
   `belongsTo`. The result is a `zom.CombineResult(E)` whose arena owns the
-  whole tree; free it with `deinit()`. Nested combines are not supported
-  yet. See `src/combine.zig`.
+  whole tree; free it with `deinit()`. See `src/combine.zig`.
 - `relation.join(.assoc)`, ROM's `users.join(:posts)`: the rows with at
   least one row of the association's target, each once, as a relation of
   the same type, so filters, order, paging, `select` and `combine` still

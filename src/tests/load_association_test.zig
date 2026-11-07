@@ -17,7 +17,11 @@ const PersonSchema = zom.Schema(Person, "people", .id, .{
         pub const sent = zom.hasMany(MessageSchema, .sender_id);
     },
 });
-const MessageSchema = zom.Schema(Message, "messages", .id, .{});
+const MessageSchema = zom.Schema(Message, "messages", .id, .{
+    .associations = struct {
+        pub const sender = zom.belongsTo(PersonSchema, .sender_id);
+    },
+});
 
 /// The memory gateway, but the messages dataset loads associations itself
 /// and counts its calls; the people dataset is memory's own.
@@ -216,6 +220,56 @@ test "a hasMany into a dataset with loadAssociation goes through it too" {
     // And a paged target is still refused before anything is read.
     try testing.expectError(error.PagedCombineTarget, f.people.combine(.sent, f.messages.limit(1)).mapTo(Author, testing.allocator));
     try testing.expectEqual(1, f.gw.messages.loads);
+}
+
+test "nested combine: the inner level fills rows loaded by the dataset, and loads through it" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    // Outer level through loadAssociation, inner one generic: each message
+    // of a conversation with its sender. Messages 10 and 11 are in two
+    // groups, and each copy gets its sender.
+    const Line = struct { id: u32, sender: ?struct { name: []const u8 } };
+    const Talker = struct { id: u32, conversation: []const Line };
+    var talkers = try f.people.order(.id, .asc)
+        .combine(.conversation, f.messages.order(.id, .asc).combine(.sender, f.people))
+        .mapTo(Talker, testing.allocator);
+    defer talkers.deinit();
+    try testing.expectEqual(1, f.gw.messages.loads);
+    try expectIds(&.{ 10, 11, 12 }, talkers.items[0].conversation);
+    try expectIds(&.{ 10, 11 }, talkers.items[1].conversation);
+    try testing.expectEqualStrings("Achieng", talkers.items[0].conversation[0].sender.?.name);
+    try testing.expectEqualStrings("Otieno", talkers.items[0].conversation[1].sender.?.name);
+    try testing.expectEqualStrings("Otieno", talkers.items[1].conversation[1].sender.?.name);
+    try expectIds(&.{}, talkers.items[2].conversation);
+
+    // A .one level through loadAssociation, then generic.
+    const First = struct { id: u32, first_sent: ?Line };
+    var firsts = try f.people.order(.id, .asc)
+        .combine(.first_sent, f.messages.order(.id, .desc).combine(.sender, f.people))
+        .mapTo(First, testing.allocator);
+    defer firsts.deinit();
+    try testing.expectEqual(12, firsts.items[0].first_sent.?.id);
+    try testing.expectEqualStrings("Achieng", firsts.items[0].first_sent.?.sender.?.name);
+    try testing.expectEqualStrings("Otieno", firsts.items[1].first_sent.?.sender.?.name);
+    try testing.expectEqual(null, firsts.items[2].first_sent);
+
+    // Outer level generic, inner one through loadAssociation: each
+    // message's sender with everything they sent.
+    f.gw.messages.loads = 0;
+    f.gw.messages.reads = 0;
+    const Sender = struct { name: []const u8, sent: []const Message };
+    const Mail = struct { id: u32, sender: ?Sender };
+    var mail = try f.messages.order(.id, .asc)
+        .combine(.sender, f.people.combine(.sent, f.messages.order(.id, .desc)))
+        .mapTo(Mail, testing.allocator);
+    defer mail.deinit();
+    try testing.expectEqual(1, f.gw.messages.reads); // the outer read
+    try testing.expectEqual(1, f.gw.messages.loads); // the inner level
+    try testing.expectEqual(3, mail.items.len);
+    try expectIds(&.{ 12, 10 }, mail.items[0].sender.?.sent);
+    try expectIds(&.{11}, mail.items[1].sender.?.sent);
 }
 
 test "custom associations: the descriptor" {

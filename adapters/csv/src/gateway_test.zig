@@ -531,3 +531,83 @@ test "combine: has-many and belongs-to over two CSV files" {
     try testing.expectEqualStrings("Otieno", bylines.items[2].author.?.name);
     try testing.expect(bylines.items[3].author == null);
 }
+
+// -- nested combine ----------------------------------------------------------
+
+/// Counts the reads of each dataset, through the instrumentation hook.
+const ReadCounter = struct {
+    var editors: usize = 0;
+    var books: usize = 0;
+    var chapters: usize = 0;
+
+    pub fn before(e: zom.plugins.instrumentation.Event) void {
+        if (e.op != .read) return;
+        if (std.mem.eql(u8, e.dataset, "editors")) editors += 1;
+        if (std.mem.eql(u8, e.dataset, "books")) books += 1;
+        if (std.mem.eql(u8, e.dataset, "chapters")) chapters += 1;
+    }
+
+    fn reset() void {
+        editors = 0;
+        books = 0;
+        chapters = 0;
+    }
+};
+
+const Editor = struct { id: u32, name: []const u8 };
+const Book = struct { id: u32, editor_id: u32, title: []const u8 };
+const Chapter = struct { id: u32, book_id: u32, heading: []const u8 };
+const EditorSchema = zom.Schema(Editor, "editors", .id, .{
+    .plugins = .{ReadCounter},
+    .associations = struct {
+        pub const books = zom.hasMany(BookSchema, .editor_id);
+    },
+});
+const BookSchema = zom.Schema(Book, "books", .id, .{
+    .plugins = .{ReadCounter},
+    .associations = struct {
+        pub const chapters = zom.hasMany(ChapterSchema, .book_id);
+    },
+});
+const ChapterSchema = zom.Schema(Chapter, "chapters", .id, .{ .plugins = .{ReadCounter} });
+
+test "nested combine: editors -> books -> chapters over three CSV files, one read per level" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "editors.csv", .data = "id,name\n1,Achieng\n2,Otieno\n" });
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "books.csv",
+        .data = "id,editor_id,title\n10,1,Relations\n11,1,Mappers\n12,2,Comptime\n",
+    });
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "chapters.csv",
+        .data = "id,book_id,heading\n100,10,Values\n101,10,Filters\n102,12,Types\n103,99,Orphan\n",
+    });
+    var gw = Gateway.init(testing.allocator, .{ .io = testing.io, .dir = tmp.dir, .path = "." });
+    defer gw.deinit();
+    const editors = try zom.Relation(EditorSchema, Gateway).init(&gw);
+    const books = try zom.Relation(BookSchema, Gateway).init(&gw);
+    const chapters = try zom.Relation(ChapterSchema, Gateway).init(&gw);
+
+    const Shelf = struct {
+        name: []const u8,
+        books: []const struct { title: []const u8, chapters: []const struct { heading: []const u8 } },
+    };
+    ReadCounter.reset();
+    var shelves = try editors.order(.id, .asc)
+        .combine(.books, books.order(.id, .asc).combine(.chapters, chapters.order(.id, .asc)))
+        .mapTo(Shelf, testing.allocator);
+    defer shelves.deinit();
+
+    try testing.expectEqual(1, ReadCounter.editors);
+    try testing.expectEqual(1, ReadCounter.books);
+    try testing.expectEqual(1, ReadCounter.chapters);
+    const s = shelves.items;
+    try testing.expectEqual(2, s.len);
+    try testing.expectEqual(2, s[0].books.len);
+    try testing.expectEqual(2, s[0].books[0].chapters.len);
+    try testing.expectEqualStrings("Filters", s[0].books[0].chapters[1].heading);
+    try testing.expectEqual(0, s[0].books[1].chapters.len);
+    try testing.expectEqual(1, s[1].books.len);
+    try testing.expectEqualStrings("Types", s[1].books[0].chapters[0].heading);
+}

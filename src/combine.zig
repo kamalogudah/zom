@@ -84,6 +84,30 @@
 //! debit *or* its credit account, and `get_account_transfers` finds both,
 //! where an `in` query on one key field could not.
 //!
+//! ## Nested combines
+//!
+//! The target can itself be a `Combined`:
+//!
+//!     users.combine(.posts, posts.combine(.comments, comments)).mapTo(Author, allocator)
+//!
+//! The rows are then read from the inner combine's source relation
+//! (`posts`, with its filters and order), and the inner combine fills
+//! their association. The element type of `Author.posts` (say
+//! `PostWithComments`) is what each post row maps to, by attribute name,
+//! and it needs a `comments` field of the right shape: the same checks run
+//! at every level.
+//!
+//! Every level runs once, on all the rows of the level above: the inner
+//! level gets the posts of every batch in one slice, so it makes
+//! ⌈post keys / max_in⌉ queries, not that many per outer batch. A whole
+//! combine is one source read plus Σ ⌈keys / max_in⌉ over its levels. That
+//! is why `fill` takes rows already read rather than the inner combine
+//! being read per batch with `whereIn(...).toSlice`. Through
+//! `loadAssociation` the rows are whole tuples, flattened in key order, so
+//! the inner `fill` takes them as `M.Input` and each key's group is a
+//! sub-slice of the filled elements; a row in several groups is filled once
+//! per copy.
+//!
 //! ## Memory
 //!
 //! The result is a tree: entities pointing at slices of entities, pointing
@@ -91,11 +115,7 @@
 //! including the strings of a caller-owned adapter such as zom-pg, so one
 //! `result.deinit()` frees it all. Scratch space (the key list and the hash
 //! map) is taken from the allocator passed in and freed before returning.
-//!
-//! TODO(#43): nested combines, `users.combine(.posts.combine(.comments))`,
-//! are not done yet. Combining the children's relation would need
-//! `Combined` to be readable as a target, i.e. a `toSlice` into the parent's
-//! arena that the outer combine can call per batch.
+//! A nested combine's levels all allocate in that one arena.
 
 const std = @import("std");
 const schema = @import("schema.zig");
@@ -118,22 +138,28 @@ pub fn Result(comptime E: type) type {
 
 /// What `Relation.combine(.assoc, target)` returns. `Source` is the relation
 /// combine was called on, `a` the association (declared on its schema), and
-/// `Target` the relation the associated rows are read from.
+/// `Target` the relation the associated rows are read from, or another
+/// `Combined` over such a relation (a nested combine).
 pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime Target: type) type {
     const label = "zom.combine(." ++ a.name ++ ") on relation '" ++ Source.schema.name ++ "'";
-    if (!isRelation(Target))
+    // A nested combine: the associated rows are read from the inner
+    // combine's source relation, and the inner combine fills their own
+    // association.
+    const nested = isCombined(Target);
+    const Rel = if (nested) Target.SourceRelation else Target;
+    if (!isRelation(Rel))
         @compileError(label ++ ": the second argument must be a relation over schema \"" ++ a.target.name ++
-            "\", found `" ++ @typeName(Target) ++ "`");
-    if (Target.schema != a.target)
+            "\" (or a combine of one), found `" ++ @typeName(Target) ++ "`");
+    if (Rel.schema != a.target)
         @compileError(label ++ ": the second argument must be a relation over schema \"" ++ a.target.name ++
-            "\", found one over \"" ++ Target.schema.name ++ "\"");
+            "\", found one over \"" ++ Rel.schema.name ++ "\"");
 
     // The target's dataset loads the rows itself, or the rows are read with
     // `whereIn` and grouped here. A custom association has no other way.
-    const hooked = @hasDecl(Target.DatasetT, "loadAssociation");
+    const hooked = @hasDecl(Rel.DatasetT, "loadAssociation");
     if (a.kind == .custom and !hooked)
         @compileError(label ++ ": '" ++ a.name ++ "' is a custom association (`." ++ a.tag ++ "`), which the dataset of \"" ++
-            a.target.name ++ "\" must load, but adapter '" ++ Target.Adapter.name ++ "' declares no `loadAssociation` on it");
+            a.target.name ++ "\" must load, but adapter '" ++ Rel.Adapter.name ++ "' declares no `loadAssociation` on it");
 
     // The key field on each side: has-many joins the source's primary key to
     // the target's foreign key, belongs-to the source's foreign key to the
@@ -146,13 +172,17 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
         .custom => "",
     };
     requireField(Source.Output, source_key, label, "the relation it is called on");
-    if (!hooked) requireField(Target.Output, target_key, label, "the relation passed to it");
+    if (!hooked) requireField(Rel.Output, target_key, label, "the relation passed to it");
     const Key = a.Key();
 
     return struct {
         const Self = @This();
 
         pub const association = a;
+        /// The relation `combine` was called on.
+        pub const SourceRelation = Source;
+        /// What was passed to `combine`: a relation, or a nested `Combined`.
+        pub const TargetRelation = Target;
 
         source: Source,
         target: Target,
@@ -162,7 +192,9 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
         /// association set to its rows. That field is `[]const X` for a
         /// `hasMany` and `?X` for a `belongsTo`, where `X` is the target's
         /// row type or any struct `zom.Mapper` can map it to. It needs no
-        /// default. Free the result with `result.deinit()`.
+        /// default. For a nested combine, `X` is mapped by attribute name
+        /// too and has a field for the inner association, filled the same
+        /// way, at every level. Free the result with `result.deinit()`.
         pub fn mapTo(self: Self, comptime E: type, allocator: std.mem.Allocator) !Result(E) {
             return self.run(mapper.Mapper(Source.Output, E, .{ .skip = &.{a.name} }), allocator);
         }
@@ -170,86 +202,123 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
         /// `mapTo` through a `zom.Mapper` for the source rows, e.g. one with
         /// renames. `M.Input` is the source relation's `Output`. The
         /// association field is filled here, so `M` need not give it a
-        /// default.
+        /// default. Nested levels map by attribute name.
         pub fn mapWith(self: Self, comptime M: type, allocator: std.mem.Allocator) !Result(M.Output) {
             if (M.Input != Source.Output)
                 @compileError(label ++ ": mapWith needs a mapper from `" ++ @typeName(Source.Output) ++
                     "`, found one from `" ++ @typeName(M.Input) ++ "`");
-            if (comptime !@hasDecl(M, "options")) return self.run(M, allocator);
+            return self.run(withSkip(M), allocator);
+        }
+
+        /// `M` with the association field added to its `skip`.
+        fn withSkip(comptime M: type) type {
+            if (comptime !@hasDecl(M, "options")) return M;
             const opts = comptime blk: {
                 var o = M.options;
                 o.skip = o.skip ++ &[_][]const u8{a.name};
                 break :blk o;
             };
-            return self.run(mapper.Mapper(M.Input, M.Output, opts), allocator);
+            return mapper.Mapper(M.Input, M.Output, opts);
         }
 
         fn run(self: Self, comptime M: type, allocator: std.mem.Allocator) !Result(M.Output) {
-            const E = M.Output;
-            const X = AssocElem(E);
-            if (self.target.query.limit != null or self.target.query.offset != 0)
-                return error.PagedCombineTarget;
-
-            var result: Result(E) = .{ .items = &.{}, .arena = .init(allocator) };
+            var result: Result(M.Output) = .{ .items = &.{}, .arena = .init(allocator) };
             errdefer result.arena.deinit();
             const arena = result.arena.allocator();
 
             const sources = try self.source.toSlice(arena);
+            const items = try arena.alloc(M.Output, sources.len);
+            try self.fill(M, sources, items, arena, allocator);
+            result.items = items;
+            return result;
+        }
+
+        /// Steps 2 to 5 on source rows already read: `items[i]` is
+        /// `sources[i]` mapped through `M`, with its association filled.
+        /// `M.Input` is `Source.Output`, or, when this is the inner level
+        /// of a nested combine fed by a `loadAssociation`, the whole tuple.
+        /// Everything kept is allocated in `arena`; scratch space comes
+        /// from `scratch` and is freed before returning. A nested target's
+        /// own `fill` runs once, on every row read here.
+        fn fill(
+            self: Self,
+            comptime M: type,
+            sources: []const M.Input,
+            items: []M.Output,
+            arena: std.mem.Allocator,
+            scratch: std.mem.Allocator,
+        ) !void {
+            const X = AssocElem(M.Output);
+            const target = self.relation();
+            if (target.query.limit != null or target.query.offset != 0)
+                return error.PagedCombineTarget;
 
             // Distinct source keys, in first-seen order, and where each is.
             var keys: std.ArrayList(Key) = .empty;
-            defer keys.deinit(allocator);
+            defer keys.deinit(scratch);
             var index: KeyMap(u32) = .empty;
-            defer index.deinit(allocator);
-            try index.ensureTotalCapacity(allocator, @intCast(sources.len));
+            defer index.deinit(scratch);
+            try index.ensureTotalCapacity(scratch, @intCast(sources.len));
             for (sources) |row| {
                 const key = keyOf(@field(row, source_key)) orelse continue;
                 const gop = index.getOrPutAssumeCapacity(key);
                 if (!gop.found_existing) {
                     gop.value_ptr.* = @intCast(keys.items.len);
-                    try keys.append(allocator, key);
+                    try keys.append(scratch, key);
                 }
             }
 
-            const items = try arena.alloc(E, sources.len);
-            if (comptime hooked) {
-                try self.fillLoaded(M, X, sources, items, keys.items, &index, arena);
-                result.items = items;
-                return result;
-            }
+            if (comptime hooked)
+                return self.fillLoaded(M, X, sources, items, keys.items, &index, arena, scratch);
 
-            // One target query per `max_in` keys.
-            var batches: std.ArrayList([]const Target.Output) = .empty;
-            defer batches.deinit(allocator);
-            const field = comptime std.meta.stringToEnum(Target.Field, target_key).?;
-            const max_in = Target.Q.max_in;
+            // One target query per `max_in` keys, all rows in one slice.
+            var batches: std.ArrayList([]const Rel.Output) = .empty;
+            defer batches.deinit(scratch);
+            const field = comptime std.meta.stringToEnum(Rel.Field, target_key).?;
+            const max_in = Rel.Q.max_in;
             var start: usize = 0;
             while (start < keys.items.len) : (start += max_in) {
                 const chunk = keys.items[start..@min(start + max_in, keys.items.len)];
-                try batches.append(allocator, try self.target.whereIn(field, chunk).toSlice(arena));
+                try batches.append(scratch, try target.whereIn(field, chunk).toSlice(arena));
             }
+            const joined = batches.items.len > 1;
+            const rows: []const Rel.Output = switch (batches.items.len) {
+                0 => &.{},
+                1 => batches.items[0],
+                else => try std.mem.concat(scratch, Rel.Output, batches.items),
+            };
+            defer if (joined) scratch.free(rows);
+
+            // The element of each target row. A nested target fills them
+            // all at once, so the next level makes ⌈keys / max_in⌉ queries
+            // over every row read here, not per batch.
+            const elems: []const X = if (comptime nested) blk: {
+                const out = try arena.alloc(X, rows.len);
+                try self.target.fill(innerMapper(Rel.Output, X), rows, out, arena, scratch);
+                break :blk out;
+            } else &.{};
 
             switch (a.cardinality) {
                 .many => {
                     // Count each group, give it a range of one slice, fill it.
-                    const offsets = try allocator.alloc(u32, keys.items.len + 1);
-                    defer allocator.free(offsets);
+                    const offsets = try scratch.alloc(u32, keys.items.len + 1);
+                    defer scratch.free(offsets);
                     @memset(offsets, 0);
                     var total: u32 = 0;
-                    for (batches.items) |rows| for (rows) |row| {
+                    for (rows) |row| {
                         const g = group(&index, @field(row, target_key)) orelse continue;
                         offsets[g + 1] += 1;
                         total += 1;
-                    };
+                    }
                     for (1..offsets.len) |g| offsets[g] += offsets[g - 1];
                     const children = try arena.alloc(X, total);
-                    const cursor = try allocator.dupe(u32, offsets[0..keys.items.len]);
-                    defer allocator.free(cursor);
-                    for (batches.items) |rows| for (rows) |row| {
+                    const cursor = try scratch.dupe(u32, offsets[0..keys.items.len]);
+                    defer scratch.free(cursor);
+                    for (rows, 0..) |row, i| {
                         const g = group(&index, @field(row, target_key)) orelse continue;
-                        children[cursor[g]] = mapElem(X, row);
+                        children[cursor[g]] = if (comptime nested) elems[i] else mapElem(X, row);
                         cursor[g] += 1;
-                    };
+                    }
                     for (sources, items) |row, *item| {
                         item.* = M.call(row);
                         const g = group(&index, @field(row, source_key));
@@ -258,13 +327,13 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
                 },
                 .one => {
                     // One parent per key; the first one read wins.
-                    const parents = try allocator.alloc(?X, keys.items.len);
-                    defer allocator.free(parents);
+                    const parents = try scratch.alloc(?X, keys.items.len);
+                    defer scratch.free(parents);
                     @memset(parents, null);
-                    for (batches.items) |rows| for (rows) |row| {
+                    for (rows, 0..) |row, i| {
                         const g = group(&index, @field(row, target_key)) orelse continue;
-                        if (parents[g] == null) parents[g] = mapElem(X, row);
-                    };
+                        if (parents[g] == null) parents[g] = if (comptime nested) elems[i] else mapElem(X, row);
+                    }
                     for (sources, items) |row, *item| {
                         item.* = M.call(row);
                         const g = group(&index, @field(row, source_key));
@@ -272,8 +341,6 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
                     }
                 },
             }
-            result.items = items;
-            return result;
         }
 
         /// Steps 3 to 5 through the target dataset's `loadAssociation`:
@@ -283,30 +350,56 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
             self: Self,
             comptime M: type,
             comptime X: type,
-            sources: []const Source.Output,
+            sources: []const M.Input,
             items: []M.Output,
             keys: []const Key,
             index: *const KeyMap(u32),
             arena: std.mem.Allocator,
+            scratch: std.mem.Allocator,
         ) !void {
-            const query = self.target.query;
-            const span = self.target.instrument(.read, &query);
-            const loaded = try span.end(self.target.dataset.loadAssociation(a, keys, query, arena));
+            const target = self.relation();
+            const query = target.query;
+            const span = target.instrument(.read, &query);
+            const loaded = try span.end(target.dataset.loadAssociation(a, keys, query, arena));
             if (loaded.len != keys.len)
                 std.debug.panic("zom: adapter '{s}': loadAssociation(.{s}) returned {d} groups for {d} keys", .{
-                    Target.Adapter.name, a.name, loaded.len, keys.len,
+                    Rel.Adapter.name, a.name, loaded.len, keys.len,
                 });
+
+            // Every row this level keeps, mapped to `X`, in one slice:
+            // each key's rows for `.many`, its first row for `.one`. A
+            // nested target fills them all in one go.
+            var total: usize = 0;
+            for (loaded) |rows| total += if (a.cardinality == .many) rows.len else @min(rows.len, 1);
+            const elems = try arena.alloc(X, total);
+            if (comptime nested) {
+                const flat = try scratch.alloc(Rel.Tuple, total);
+                defer scratch.free(flat);
+                var at: usize = 0;
+                for (loaded) |rows| {
+                    const kept = if (a.cardinality == .many) rows else rows[0..@min(rows.len, 1)];
+                    @memcpy(flat[at..][0..kept.len], kept);
+                    at += kept.len;
+                }
+                try self.target.fill(innerMapper(Rel.Tuple, X), flat, elems, arena, scratch);
+            } else {
+                var at: usize = 0;
+                for (loaded) |rows| {
+                    const kept = if (a.cardinality == .many) rows else rows[0..@min(rows.len, 1)];
+                    for (kept) |row| {
+                        elems[at] = fromTuple(X, row);
+                        at += 1;
+                    }
+                }
+            }
+
             switch (a.cardinality) {
                 .many => {
                     const groups = try arena.alloc([]const X, keys.len);
+                    var at: usize = 0;
                     for (loaded, groups) |rows, *g| {
-                        if (X == Target.Tuple) {
-                            g.* = rows;
-                        } else {
-                            const mapped = try arena.alloc(X, rows.len);
-                            for (rows, mapped) |row, *m| m.* = fromTuple(X, row);
-                            g.* = mapped;
-                        }
+                        g.* = elems[at..][0..rows.len];
+                        at += rows.len;
                     }
                     for (sources, items) |row, *item| {
                         item.* = M.call(row);
@@ -314,23 +407,41 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
                         @field(item.*, a.name) = if (g) |i| groups[i] else &.{};
                     }
                 },
-                .one => for (sources, items) |row, *item| {
-                    item.* = M.call(row);
-                    const g = group(index, @field(row, source_key)) orelse {
-                        @field(item.*, a.name) = null;
-                        continue;
-                    };
-                    @field(item.*, a.name) = if (loaded[g].len > 0) fromTuple(X, loaded[g][0]) else null;
+                .one => {
+                    const parents = try scratch.alloc(?X, keys.len);
+                    defer scratch.free(parents);
+                    var at: usize = 0;
+                    for (loaded, parents) |rows, *p| {
+                        p.* = if (rows.len > 0) elems[at] else null;
+                        if (rows.len > 0) at += 1;
+                    }
+                    for (sources, items) |row, *item| {
+                        item.* = M.call(row);
+                        const g = group(index, @field(row, source_key));
+                        @field(item.*, a.name) = if (g) |i| parents[i] else null;
+                    }
                 },
             }
         }
 
+        /// The relation the associated rows are read from.
+        fn relation(self: Self) Rel {
+            return if (comptime nested) self.target.source else self.target;
+        }
+
+        /// How a nested level's rows (`Row`, its source relation's output
+        /// or tuple) map to `X`: by attribute name, leaving the inner
+        /// association for the inner `fill`.
+        fn innerMapper(comptime Row: type, comptime X: type) type {
+            return mapper.Mapper(Row, X, .{ .skip = &.{Target.association.name} });
+        }
+
         /// A whole tuple from `loadAssociation` as the association field's
-        /// element. A `select` on the target narrows `Target.Output`; any
+        /// element. A `select` on the target narrows `Rel.Output`; any
         /// `X` mapped from that maps the same from the whole tuple.
-        fn fromTuple(comptime X: type, row: Target.Tuple) X {
-            if (X == Target.Tuple) return row;
-            return mapper.Mapper(Target.Tuple, X, .{}).call(row);
+        fn fromTuple(comptime X: type, row: Rel.Tuple) X {
+            if (X == Rel.Tuple) return row;
+            return mapper.Mapper(Rel.Tuple, X, .{}).call(row);
         }
 
         /// The association field's element type in `E`, checked.
@@ -353,9 +464,9 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
             return X;
         }
 
-        fn mapElem(comptime X: type, row: Target.Output) X {
-            if (X == Target.Output) return row;
-            return mapper.Mapper(Target.Output, X, .{}).call(row);
+        fn mapElem(comptime X: type, row: Rel.Output) X {
+            if (X == Rel.Output) return row;
+            return mapper.Mapper(Rel.Output, X, .{}).call(row);
         }
 
         const KeyMap = if (Key == []const u8)
@@ -386,4 +497,9 @@ fn requireField(comptime T: type, comptime name: []const u8, comptime label: []c
 fn isRelation(comptime T: type) bool {
     return @typeInfo(T) == .@"struct" and @hasDecl(T, "schema") and @hasDecl(T, "Output") and
         @hasDecl(T, "Q") and @hasDecl(T, "DatasetT") and @hasField(T, "query");
+}
+
+fn isCombined(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and @hasDecl(T, "association") and @hasDecl(T, "SourceRelation") and
+        @hasDecl(T, "TargetRelation") and @hasField(T, "source") and @hasField(T, "target");
 }

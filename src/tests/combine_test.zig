@@ -17,6 +17,13 @@ const UserSchema = zom.Schema(UserTuple, "users", .id, .{
 const PostSchema = zom.Schema(PostTuple, "posts", .id, .{
     .associations = struct {
         pub const author = zom.belongsTo(UserSchema, .user_id);
+        pub const comments = zom.hasMany(CommentSchema, .post_id);
+    },
+});
+const CommentTuple = struct { id: u32, post_id: u32, body: []const u8 };
+const CommentSchema = zom.Schema(CommentTuple, "comments", .id, .{
+    .associations = struct {
+        pub const post = zom.belongsTo(PostSchema, .post_id);
     },
 });
 
@@ -264,4 +271,175 @@ test "combine: the result frees cleanly when allocation fails partway" {
         }
     }.run;
     try testing.checkAllAllocationFailures(testing.allocator, run, .{ f.users, f.posts });
+}
+
+// -- nested combines -----------------------------------------------------------
+
+const Comment = struct { id: u32, body: []const u8 };
+const PostWithComments = struct { id: u32, title: []const u8, comments: []const Comment };
+const AuthorWithComments = struct { id: u32, name: []const u8, posts: []const PostWithComments };
+
+fn seedComments(comments: zom.Relation(CommentSchema, CountingGateway)) !void {
+    _ = try comments.create(.{ .id = 100, .post_id = 10, .body = "Asante" }).commit();
+    _ = try comments.create(.{ .id = 101, .post_id = 10, .body = "Nzuri sana" }).commit();
+    _ = try comments.create(.{ .id = 102, .post_id = 12, .body = "Comptime!" }).commit();
+    _ = try comments.create(.{ .id = 103, .post_id = 99, .body = "Orphan comment" }).commit();
+}
+
+test "nested combine: users -> posts -> comments, one query per level" {
+    var f: Fixture(CountingGateway) = undefined;
+    try f.init();
+    defer f.deinit();
+    const comments: zom.Relation(CommentSchema, CountingGateway) = try .init(&f.gw);
+    try seedComments(comments);
+    const user_reads = &(try f.gw.dataset(UserSchema)).reads;
+    const post_reads = &(try f.gw.dataset(PostSchema)).reads;
+    const comment_reads = &(try f.gw.dataset(CommentSchema)).reads;
+    user_reads.* = 0;
+    post_reads.* = 0;
+    comment_reads.* = 0;
+
+    var result = try f.users.where(.deleted_at, .eq, null).order(.id, .asc)
+        .combine(.posts, f.posts.order(.id, .asc).combine(.comments, comments.order(.id, .desc)))
+        .mapTo(AuthorWithComments, testing.allocator);
+    defer result.deinit();
+
+    try testing.expectEqual(1, user_reads.*);
+    try testing.expectEqual(1, post_reads.*);
+    try testing.expectEqual(1, comment_reads.*);
+
+    const authors = result.items;
+    try testing.expectEqual(2, authors.len);
+    try testing.expectEqualStrings("Achieng", authors[0].name);
+    try testing.expectEqual(2, authors[0].posts.len);
+    // Post 10's comments, in the comments relation's order (id desc).
+    try testing.expectEqual(10, authors[0].posts[0].id);
+    try testing.expectEqual(2, authors[0].posts[0].comments.len);
+    try testing.expectEqualStrings("Nzuri sana", authors[0].posts[0].comments[0].body);
+    try testing.expectEqualStrings("Asante", authors[0].posts[0].comments[1].body);
+    try testing.expectEqual(0, authors[0].posts[1].comments.len);
+    try testing.expectEqual(1, authors[1].posts.len);
+    try testing.expectEqual(1, authors[1].posts[0].comments.len);
+    try testing.expectEqualStrings("Comptime!", authors[1].posts[0].comments[0].body);
+}
+
+test "nested combine: the inner level reads only the outer level's rows, and none without keys" {
+    var f: Fixture(CountingGateway) = undefined;
+    try f.init();
+    defer f.deinit();
+    const comments: zom.Relation(CommentSchema, CountingGateway) = try .init(&f.gw);
+    try seedComments(comments);
+    const comment_reads = &(try f.gw.dataset(CommentSchema)).reads;
+
+    // Otieno's only post is 12: comment 102 is all the comments level sees.
+    comment_reads.* = 0;
+    var one = try f.users.byPk(2)
+        .combine(.posts, f.posts.combine(.comments, comments))
+        .mapTo(AuthorWithComments, testing.allocator);
+    defer one.deinit();
+    try testing.expectEqual(1, comment_reads.*);
+    try testing.expectEqual(1, one.items[0].posts[0].comments.len);
+
+    // No posts match, so the comments level has no keys and no query.
+    comment_reads.* = 0;
+    var none = try f.users.order(.id, .asc)
+        .combine(.posts, f.posts.where(.id, .gt, 100).combine(.comments, comments))
+        .mapTo(AuthorWithComments, testing.allocator);
+    defer none.deinit();
+    try testing.expectEqual(0, comment_reads.*);
+    try testing.expectEqual(3, none.items.len);
+    for (none.items) |a| try testing.expectEqual(0, a.posts.len);
+}
+
+test "nested combine: belongs-to inside has-many (users -> posts -> author)" {
+    var f: Fixture(CountingGateway) = undefined;
+    try f.init();
+    defer f.deinit();
+    const Byline = struct { id: u32, author: ?struct { name: []const u8 } };
+    const Writer2 = struct { name: []const u8, posts: []const Byline };
+    var result = try f.users.byPk(1)
+        .combine(.posts, f.posts.order(.id, .asc).combine(.author, f.users))
+        .mapTo(Writer2, testing.allocator);
+    defer result.deinit();
+    try testing.expectEqual(2, result.items[0].posts.len);
+    for (result.items[0].posts) |p| try testing.expectEqualStrings("Achieng", p.author.?.name);
+}
+
+test "nested combine: each level makes ceil(keys / max_in) queries" {
+    var gw: CountingGateway = .init(testing.allocator, .{});
+    defer gw.deinit();
+    const users: zom.Relation(UserSchema, CountingGateway) = try .init(&gw);
+    const posts: zom.Relation(PostSchema, CountingGateway) = try .init(&gw);
+    const comments: zom.Relation(CommentSchema, CountingGateway) = try .init(&gw);
+
+    const max_in = zom.Query(PostTuple).max_in;
+    // max_in + 3 users with two posts each: 2 user batches, and
+    // 2 * (max_in + 3) post keys, so 3 post batches for the comments.
+    const n_users = max_in + 3;
+    for (0..n_users) |i| {
+        const id: u32 = @intCast(i + 1);
+        _ = try users.create(.{ .id = id, .name = "u", .email = "u@example.com", .age = 20 }).commit();
+        for (0..2) |j| {
+            const post_id: u32 = @intCast(2 * id + j);
+            _ = try posts.create(.{ .id = post_id, .user_id = id, .title = "p", .published = true }).commit();
+            _ = try comments.create(.{ .id = post_id, .post_id = post_id, .body = "c" }).commit();
+        }
+    }
+    const post_reads = &(try gw.dataset(PostSchema)).reads;
+    const comment_reads = &(try gw.dataset(CommentSchema)).reads;
+    post_reads.* = 0;
+    comment_reads.* = 0;
+
+    var result = try users.order(.id, .asc)
+        .combine(.posts, posts.order(.id, .asc).combine(.comments, comments))
+        .mapTo(AuthorWithComments, testing.allocator);
+    defer result.deinit();
+
+    const divCeil = struct {
+        fn f(n: usize, d: usize) usize {
+            return std.math.divCeil(usize, n, d) catch unreachable;
+        }
+    }.f;
+    try testing.expectEqual(divCeil(n_users, max_in), post_reads.*);
+    try testing.expectEqual(divCeil(2 * n_users, max_in), comment_reads.*);
+    try testing.expectEqual(n_users, result.items.len);
+    for (result.items) |a| {
+        try testing.expectEqual(2, a.posts.len);
+        for (a.posts) |p| {
+            try testing.expectEqual(1, p.comments.len);
+            try testing.expectEqual(p.id, p.comments[0].id);
+        }
+    }
+}
+
+test "nested combine: a paged inner target is refused" {
+    var f: Fixture(zom.memory.Gateway) = undefined;
+    try f.init();
+    defer f.deinit();
+    const comments: zom.Relation(CommentSchema, zom.memory.Gateway) = try .init(&f.gw);
+    try testing.expectError(
+        error.PagedCombineTarget,
+        f.users.combine(.posts, f.posts.combine(.comments, comments.limit(1))).mapTo(AuthorWithComments, testing.allocator),
+    );
+}
+
+test "nested combine: one deinit frees the tree, also when allocation fails partway" {
+    var f: Fixture(zom.memory.Gateway) = undefined;
+    try f.init();
+    defer f.deinit();
+    const comments: zom.Relation(CommentSchema, zom.memory.Gateway) = try .init(&f.gw);
+    _ = try comments.create(.{ .id = 100, .post_id = 10, .body = "Asante" }).commit();
+    _ = try comments.create(.{ .id = 101, .post_id = 12, .body = "Comptime!" }).commit();
+    const run = struct {
+        fn run(
+            allocator: std.mem.Allocator,
+            users: zom.Relation(UserSchema, zom.memory.Gateway),
+            posts: zom.Relation(PostSchema, zom.memory.Gateway),
+            cs: zom.Relation(CommentSchema, zom.memory.Gateway),
+        ) !void {
+            var result = try users.combine(.posts, posts.combine(.comments, cs)).mapTo(AuthorWithComments, allocator);
+            result.deinit();
+        }
+    }.run;
+    try testing.checkAllAllocationFailures(testing.allocator, run, .{ f.users, f.posts, comments });
 }

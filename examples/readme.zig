@@ -405,6 +405,44 @@ test "README: Combine" {
     try testing.expectEqualStrings("Achieng", bylines.items[0].author.?.name);
 }
 
+test "README: Nesting" {
+    const zom = @import("zom");
+    const allocator = testing.allocator;
+    const User = struct { id: u32, name: []const u8 };
+    const Post = struct { id: u32, user_id: u32, title: []const u8 };
+    const CommentRow = struct { id: u32, post_id: u32, body: []const u8 };
+    const S = struct {
+        const Users = zom.Schema(User, "users", .id, .{ .associations = struct {
+            pub const posts = zom.hasMany(Posts, .user_id);
+        } });
+        const Posts = zom.Schema(Post, "posts", .id, .{ .associations = struct {
+            pub const comments = zom.hasMany(Comments, .post_id);
+        } });
+        const Comments = zom.Schema(CommentRow, "comments", .id, .{});
+    };
+    var gw = zom.memory.Gateway.init(allocator, .{});
+    defer gw.deinit();
+    const users = try zom.Relation(S.Users, zom.memory.Gateway).init(&gw);
+    const posts = try zom.Relation(S.Posts, zom.memory.Gateway).init(&gw);
+    const comments = try zom.Relation(S.Comments, zom.memory.Gateway).init(&gw);
+    _ = try users.create(.{ .id = 1, .name = "Achieng" }).commit();
+    _ = try posts.create(.{ .id = 10, .user_id = 1, .title = "a" }).commit();
+    _ = try comments.create(.{ .id = 100, .post_id = 10, .body = "Asante" }).commit();
+
+    // -- README: Nesting ----------------------------------------------------
+    const Comment = struct { id: u32, body: []const u8 };
+    const PostWithComments = struct { id: u32, title: []const u8, comments: []const Comment };
+    const Author = struct { id: u32, name: []const u8, posts: []const PostWithComments };
+
+    var result = try users.order(.id, .asc)
+        .combine(.posts, posts.order(.id, .asc).combine(.comments, comments.order(.id, .asc)))
+        .mapTo(Author, allocator);
+    defer result.deinit(); // frees every level
+    // ---------------------------------------------------------------------
+
+    try testing.expectEqualStrings("Asante", result.items[0].posts[0].comments[0].body);
+}
+
 test "README: Associated creates" {
     const zom = assoc.zom;
     const allocator = testing.allocator;

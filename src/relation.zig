@@ -616,9 +616,11 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
         /// ROM's `users.combine(:posts)`: this relation with the rows of
         /// association `assoc` (declared on its schema), read from `target`,
         /// a relation over the association's target schema, e.g.
-        /// `users.combine(.posts, posts.where(.published, .eq, true))`.
+        /// `users.combine(.posts, posts.where(.published, .eq, true))`, or
+        /// a combine of one, to load several levels:
+        /// `users.combine(.posts, posts.combine(.comments, comments))`.
         /// Lazy, like any relation; `mapTo(Author, allocator)` reads it with
-        /// one `in` query per `Query.max_in` keys. See combine.zig.
+        /// one `in` query per `Query.max_in` keys per level. See combine.zig.
         pub fn combine(
             self: Self,
             comptime assoc: @TypeOf(.enum_literal),
