@@ -7,8 +7,10 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-11-07
+
 zom now builds with **Zig 0.17.1** (`minimum_zig_version = "0.17.1"`), and
-its version moves to 0.17.0 to follow it. Zig 0.16 is no longer supported:
+its version moves to 0.17.1 to follow it. Zig 0.16 is no longer supported:
 stay on the `v0.16.x` tags for it. Nothing changes in how zom behaves; the
 test suite is the same as on 0.16.
 
@@ -887,7 +889,8 @@ API is listed in the README under [API (v0.2)](docs/api.md#api-v02).
 First version: schemas, immutable relations, create and update changesets,
 mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 
-[Unreleased]: https://github.com/kamalogudah/zom/compare/v0.16.1...HEAD
+[Unreleased]: https://github.com/kamalogudah/zom/compare/v0.17.1...HEAD
+[0.17.1]: https://github.com/kamalogudah/zom/compare/v0.16.1...v0.17.1
 [0.16.1]: https://github.com/kamalogudah/zom/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/kamalogudah/zom/releases/tag/v0.16.0
 [0.2.0]: https://github.com/kamalogudah/zom/releases/tag/v0.2.0

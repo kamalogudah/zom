@@ -50,7 +50,7 @@ part by part.
 zom needs **Zig 0.17.1**. Add it to your project:
 
 ```sh
-zig fetch --save git+https://github.com/kamalogudah/zom#v0.17.0
+zig fetch --save git+https://github.com/kamalogudah/zom#v0.17.1
 ```
 
 zom's version tracks Zig's: the `v0.17.x` tags build with Zig 0.17.1, and
