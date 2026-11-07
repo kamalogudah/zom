@@ -458,6 +458,10 @@ const CaseModule = struct {
 /// The cases build zom with `no_deprecated` set, so one of them can check the
 /// deprecation error, and no other case relies on a deprecated declaration.
 fn addCompileErrorCases(b: *std.Build, step: *std.Build.Step, cases_dir: []const u8, extra: []const CaseModule) void {
+    // A fetched zom package (`b.dependency("zom", ...)`, so `pkg_hash` is
+    // set) holds only what `.paths` in build.zig.zon lists, which leaves the
+    // cases out. They only check zom itself, so a dependency has none.
+    if (b.pkg_hash.len != 0) return;
     const io = b.graph.io;
     const build_options = buildOptions(b, true).getOutput();
     // The cases are listed and read at configure time, so tell the
