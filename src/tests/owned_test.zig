@@ -100,7 +100,7 @@ fn Factory(comptime G: type) type {
 }
 
 /// Everything but joins: this fake holds `zom.lint.Users` only, and the
-/// join check needs `zom.lint.Posts` too.
+/// join check needs `zom.lint.Posts` and `zom.lint.Comments` too.
 const Full = OwnedGateway(blk: {
     var s: zom.Supports = .all;
     s.join = false;

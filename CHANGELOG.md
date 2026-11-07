@@ -28,6 +28,20 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- More than one join per query: `users.join(.posts).join(.comments)` keeps
+  the users with a post and with a comment, each join matched (and
+  narrowed by its own `whereJoined*`) on its own rows. Up to
+  `Query.max_joins` (3) joins; a fourth panics, and joining an association
+  already joined is still a no-op. zom-sql renders one `AND EXISTS (...)`
+  per join, in the order joined, for select, update and delete, aliasing a
+  joined table by its association (or `zom_joined_<n>`) when the parent or
+  an earlier join already uses its name. The memory gateway builds one
+  semi-join key set per join. **Breaking (adapters):** `Query.join: ?Join`
+  is now `Query.joins` / `join_count`, read through `joinSlice()`, and
+  `zom.lint`'s join check also seeds and joins `lint_comments`
+  (`zom.lint.Comments`), which a factory for a dataset with `supports.join`
+  must provide. (#88)
+
 - Per-parent paging pushed down to the dataset: a combine target's
   `limit` / `offset` now go to a dataset with the new
   `supports.per_group_limit` capability instead of being applied after

@@ -177,7 +177,7 @@ pub fn writeSelect(
     }
     // A joined query qualifies its columns, since the EXISTS subquery
     // sees both tables and both may have an `id`.
-    const qual: ?[]const u8 = if (query.join == null) null else table;
+    const qual: ?[]const u8 = if (query.join_count == 0) null else table;
     try w.writeAll("SELECT ");
     try writeColumns(dialect, w, qual, comptime columnsOf(T, Out));
     try w.writeAll(" FROM ");
@@ -215,7 +215,7 @@ fn writePerGroup(
     query: *const zom.Query(T),
     group: []const u8,
 ) RenderError!void {
-    const qual: ?[]const u8 = if (query.join == null) null else table;
+    const qual: ?[]const u8 = if (query.join_count == 0) null else table;
     try w.writeAll("SELECT ");
     try writeColumns(dialect, w, null, comptime columnsOf(T, Out));
     try w.writeAll(" FROM (SELECT ");
@@ -250,12 +250,31 @@ fn writePerGroup(
     try writeOrders(dialect, T, w, null, query);
 }
 
-/// What the joined table is called in the `EXISTS` subquery: its own name,
-/// unless that is the parent's (a self-join), then the association's.
-fn joinAlias(table: []const u8, j: *const zom.Join) []const u8 {
-    if (!std.mem.eql(u8, j.table, table)) return j.table;
-    if (!std.mem.eql(u8, j.assoc, table)) return j.assoc;
-    return "zom_joined";
+/// What join `index`'s table is called in its `EXISTS` subquery: its own
+/// name, unless the parent or an earlier join already goes by it (a
+/// self-join, or two joins onto one table), then the association's, and
+/// failing that `zom_joined_<index>`. Each `EXISTS` is its own scope, so
+/// only the parent's name could really clash; keeping every alias unique
+/// keeps the statement readable and safe should the subqueries ever nest.
+fn joinAlias(table: []const u8, joins: []const zom.Join, index: usize) []const u8 {
+    const j = &joins[index];
+    if (aliasFree(table, joins, index, j.table)) return j.table;
+    if (aliasFree(table, joins, index, j.assoc)) return j.assoc;
+    return fallback_aliases[index];
+}
+
+const fallback_aliases = blk: {
+    var names: [zom.Query(struct { x: u8 }).max_joins][]const u8 = undefined;
+    for (&names, 0..) |*n, i| n.* = std.fmt.comptimePrint("zom_joined_{d}", .{i});
+    break :blk names;
+};
+
+fn aliasFree(table: []const u8, joins: []const zom.Join, index: usize, name: []const u8) bool {
+    if (std.mem.eql(u8, name, table)) return false;
+    for (0..index) |k| {
+        if (std.mem.eql(u8, joinAlias(table, joins, k), name)) return false;
+    }
+    return true;
 }
 
 fn writeColumns(comptime dialect: Dialect, w: *Writer, qual: ?[]const u8, columns: []const []const u8) Writer.Error!void {
@@ -547,18 +566,21 @@ pub fn writeDelete(
 }
 
 /// The `WHERE` of a select, update or delete: the query's own filters,
-/// then for a join a correlated semi-join, so a source row is kept (once)
-/// when one joined row passes every joined filter:
+/// then for each join, in the order joined, a correlated semi-join, so a
+/// source row is kept (once) when, for every join, one joined row passes
+/// that join's filters:
 ///
 ///     ... WHERE <own filters> AND EXISTS (SELECT 1 FROM "posts"
 ///         WHERE "posts"."user_id" = "users"."id" AND <joined filters>)
+///         AND EXISTS (SELECT 1 FROM "comments" WHERE ...)
 ///
 /// The same as the memory gateway's hash semi-join. Unlike `SELECT DISTINCT`
 /// over an `INNER JOIN`, it needs no equality on the selected columns
 /// (`json` has none), no derived table for a projection or a
 /// `NULLS LAST`-less sort key, and Postgres plans it as a semi-join that
 /// stops at the first matching row. A self-join aliases the joined table
-/// by the association's name. A join with no filters is just the EXISTS.
+/// by the association's name (see `joinAlias`). A join with no filters is
+/// just the EXISTS.
 fn writeFilters(
     comptime dialect: Dialect,
     comptime T: type,
@@ -567,32 +589,36 @@ fn writeFilters(
     table: []const u8,
     query: *const zom.Query(T),
 ) RenderError!void {
-    try writeWhere(dialect, T, w, params, if (query.join == null) null else table, query);
-    const j = if (query.join) |*join| join else return;
+    const joins = query.joinSlice();
+    try writeWhere(dialect, T, w, params, if (joins.len == 0) null else table, query);
     var own = query.topNodes();
-    try w.writeAll(if (own.next() == null) " WHERE EXISTS (SELECT 1 FROM " else " AND EXISTS (SELECT 1 FROM ");
-    const alias = joinAlias(table, j);
-    try writeIdent(dialect, w, j.table);
-    if (!std.mem.eql(u8, alias, j.table)) {
-        try w.writeAll(" AS ");
-        try writeIdent(dialect, w, alias);
+    var first = own.next() == null;
+    for (joins, 0..) |*j, index| {
+        try w.writeAll(if (first) " WHERE EXISTS (SELECT 1 FROM " else " AND EXISTS (SELECT 1 FROM ");
+        first = false;
+        const alias = joinAlias(table, joins, index);
+        try writeIdent(dialect, w, j.table);
+        if (!std.mem.eql(u8, alias, j.table)) {
+            try w.writeAll(" AS ");
+            try writeIdent(dialect, w, alias);
+        }
+        try w.writeAll(" WHERE ");
+        try writeColumn(dialect, w, alias, j.target_key);
+        try w.writeAll(" = ");
+        try writeColumn(dialect, w, table, j.source_key);
+        var joined = j.topNodes();
+        while (joined.next()) |i| {
+            try w.writeAll(" AND ");
+            try writeJoinNode(dialect, w, params, alias, j, @intCast(i));
+        }
+        try w.writeByte(')');
     }
-    try w.writeAll(" WHERE ");
-    try writeColumn(dialect, w, alias, j.target_key);
-    try w.writeAll(" = ");
-    try writeColumn(dialect, w, table, j.source_key);
-    var joined = j.topNodes();
-    while (joined.next()) |i| {
-        try w.writeAll(" AND ");
-        try writeJoinNode(dialect, w, params, alias, j, @intCast(i));
-    }
-    try w.writeByte(')');
 }
 
 /// A join itself bounds a write; without one, require a source filter or all.
 fn checkBounded(comptime T: type, query: *const zom.Query(T)) error{UnboundedWrite}!void {
     var it = query.topNodes();
-    if (it.next() == null and query.join == null and !query.all) return error.UnboundedWrite;
+    if (it.next() == null and query.join_count == 0 and !query.all) return error.UnboundedWrite;
 }
 
 fn setLater(comptime T: type, rest: []const zom.Query(T).Change, field: zom.Query(T).Field) bool {

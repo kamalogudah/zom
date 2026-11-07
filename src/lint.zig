@@ -11,8 +11,9 @@
 //! tested on the same data. Each check gets a fresh gateway from the factory,
 //! seeded with `users`, and goes through `zom.Relation` like application code.
 //! An adapter with `supports.join` is also given the join check, which seeds
-//! and joins a second schema, `Posts` (dataset `lint_posts`), so its factory
-//! must provide that one too, empty, as it does `lint_users`.
+//! and joins two more schemas, `Posts` and `Comments` (datasets `lint_posts`
+//! and `lint_comments`), so its factory must provide those too, empty, as it
+//! does `lint_users`.
 //!
 //! The factory says how to make a gateway, because each adapter needs a
 //! different setup (memory needs nothing, CSV a temporary directory, Postgres
@@ -66,6 +67,7 @@ pub const User = struct {
 pub const Users = Schema(User, "lint_users", .id, .{
     .associations = struct {
         pub const posts = hasMany(Posts, .user_id);
+        pub const comments = hasMany(Comments, .user_id);
     },
 });
 
@@ -92,6 +94,27 @@ pub const posts = [_]Post{
     .{ .id = 22, .user_id = 2, .title = "a1", .published = false },
     .{ .id = 23, .user_id = 6, .title = "c1", .published = true },
     .{ .id = 24, .user_id = null, .title = "orphan", .published = true },
+};
+
+/// The third side of the join check, joined with `Posts` in the same query.
+pub const Comment = struct {
+    id: u32,
+    user_id: ?u32,
+    body: []const u8,
+    flagged: bool,
+};
+
+pub const Comments = Schema(Comment, "lint_comments", .id, .{});
+
+/// Seeded by the join check only. bob comments twice; dee, who has no
+/// post, once; ada once, flagged. Comment 33 belongs to nobody. So bob and
+/// ada have a post and a comment, cy a post only and dee a comment only.
+pub const comments = [_]Comment{
+    .{ .id = 30, .user_id = 4, .body = "b", .flagged = false },
+    .{ .id = 31, .user_id = 4, .body = "b again", .flagged = false },
+    .{ .id = 32, .user_id = 1, .body = "d", .flagged = false },
+    .{ .id = 34, .user_id = 2, .body = "a", .flagged = true },
+    .{ .id = 33, .user_id = null, .body = "orphan", .flagged = true },
 };
 
 /// The seed rows. They are stored out of key order, and the names do not
@@ -748,6 +771,32 @@ fn checkJoin(comptime G: type, comptime F: type) !void {
     try expectIds(rel.where(.age, .gt, 30).join(.posts), "age gt 30 (bob, dee), join posts", .any, &.{4});
     try expectIds(rel.join(.posts).order(.id, .asc).limit(2), "join posts, order id asc, limit 2", .as_read, &.{ 2, 4 });
     try expectIds(post_rel.join(.author).whereJoined(.author, .role, .eq, .a), "posts join author, role eq .a", .any, &.{ 20, 21 });
+
+    // Two joins: every one must match, each with its own joined row.
+    try Fixture(G, F).seed(&fx.gateway, Comments, &comments);
+    try expectIds(rel.join(.comments), "join comments: bob once, though he has two", .any, &.{ 1, 2, 4 });
+    try expectIds(rel.join(.posts).join(.comments), "join posts, join comments", .any, &.{ 2, 4 });
+    try expectIds(rel.join(.comments).join(.posts), "join comments, join posts", .any, &.{ 2, 4 });
+    try expectIds(
+        rel.join(.posts).whereJoined(.posts, .published, .eq, true).join(.comments),
+        "join posts, published, join comments",
+        .any,
+        &.{4},
+    );
+    try expectIds(
+        rel.join(.posts).join(.comments).whereJoined(.comments, .flagged, .eq, true),
+        "join posts, join comments, flagged",
+        .any,
+        &.{2},
+    );
+    try expectIds(
+        rel.join(.posts).join(.comments).whereJoined(.posts, .published, .eq, true).whereJoined(.comments, .flagged, .eq, true),
+        "join posts, published, join comments, flagged: no one has both",
+        .any,
+        &.{},
+    );
+    try expectIds(rel.where(.role, .eq, .a).join(.posts).join(.comments), "role eq .a (bob, dee), join posts, join comments", .any, &.{4});
+    try expectIds(rel.join(.posts).join(.comments).order(.id, .asc).limit(1), "join posts, join comments, order id asc, limit 1", .as_read, &.{2});
 }
 
 /// Reads `rel` (whose query has `per_group` set) and checks it against

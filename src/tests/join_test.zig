@@ -20,11 +20,20 @@ const Post = struct {
     likes: u32 = 0,
 };
 
+const Comment = struct {
+    id: u32,
+    user_id: ?u32,
+    body: []const u8,
+    flagged: bool = false,
+};
+
 const UserSchema = zom.Schema(User, "users", .id, .{
     .associations = struct {
         pub const posts = zom.hasMany(PostSchema, .user_id);
+        pub const comments = zom.hasMany(CommentSchema, .user_id);
     },
 });
+const CommentSchema = zom.Schema(Comment, "comments", .id, .{});
 const PostSchema = zom.Schema(Post, "posts", .id, .{
     .associations = struct {
         pub const author = zom.belongsTo(UserSchema, .user_id);
@@ -33,10 +42,12 @@ const PostSchema = zom.Schema(Post, "posts", .id, .{
 
 const Users = zom.Relation(UserSchema, zom.memory.Gateway);
 const Posts = zom.Relation(PostSchema, zom.memory.Gateway);
+const Comments = zom.Relation(CommentSchema, zom.memory.Gateway);
 
 /// Achieng has two posts, one published; Otieno one published; Wanjiru one
-/// draft; Kamau none. Post 15 belongs to nobody.
-fn seed(users: Users, posts: Posts) !void {
+/// draft; Kamau none. Post 15 belongs to nobody. Otieno comments twice,
+/// Wanjiru once (flagged), Kamau once; Achieng never.
+fn seed(users: Users, posts: Posts, comments: Comments) !void {
     _ = try users.createMany(&.{
         .{ .id = 1, .name = "Achieng", .age = 31, .role = .admin },
         .{ .id = 2, .name = "Otieno", .age = 24 },
@@ -50,19 +61,27 @@ fn seed(users: Users, posts: Posts) !void {
         .{ .id = 13, .user_id = 3, .title = "Draft", .published = false },
         .{ .id = 15, .user_id = null, .title = "Orphan", .published = true, .likes = 99 },
     }).commit();
+    _ = try comments.createMany(&.{
+        .{ .id = 20, .user_id = 2, .body = "Nice" },
+        .{ .id = 21, .user_id = 3, .body = "Spam", .flagged = true },
+        .{ .id = 22, .user_id = 2, .body = "Again" },
+        .{ .id = 23, .user_id = 4, .body = "First!" },
+    }).commit();
 }
 
 const Fixture = struct {
     gw: zom.memory.Gateway,
     users: Users = undefined,
     posts: Posts = undefined,
+    comments: Comments = undefined,
 
     fn init(self: *Fixture) !void {
         self.gw = .init(testing.allocator, .{});
         errdefer self.gw.deinit();
         self.users = try .init(&self.gw);
         self.posts = try .init(&self.gw);
-        try seed(self.users, self.posts);
+        self.comments = try .init(&self.gw);
+        try seed(self.users, self.posts, self.comments);
     }
 
     fn deinit(self: *Fixture) void {
@@ -193,7 +212,7 @@ test "joining the same association again changes nothing" {
     const a = testing.allocator;
 
     const rel = f.users.join(.posts).whereJoined(.posts, .published, .eq, false).join(.posts);
-    try testing.expectEqual(1, rel.query.join.?.filter_count);
+    try testing.expectEqual(1, rel.query.joinSlice()[0].filter_count);
     const rows = try rel.order(.id, .asc).toSlice(a);
     defer f.users.free(a, rows);
     try expectIds(&.{ 1, 3 }, rows);
@@ -300,7 +319,7 @@ test "fallback: the join goes to the dataset, the unsupported filter runs in mem
     defer rel.free(testing.allocator, rows);
     try expectIds(&.{1}, rows);
     const pushed = gw.dataset(UserSchema) catch unreachable;
-    try testing.expect(pushed.last.join != null);
+    try testing.expect(pushed.last.join_count == 1);
     try testing.expectEqual(0, pushed.last.filter_count);
 }
 
@@ -309,7 +328,7 @@ test "a store no memory gateway handed out can't join" {
     defer store.deinit();
     _ = try store.insert(.{ .id = 1, .name = "a", .age = 1 });
     var query: zom.Query(User) = .{};
-    query.join = .{ .assoc = "posts", .table = "posts", .source_key = "id", .target_key = "user_id" };
+    query.addJoin(.{ .assoc = "posts", .table = "posts", .source_key = "id", .target_key = "user_id" });
     try testing.expectError(error.JoinUnavailable, store.read(query, testing.allocator));
 }
 
@@ -447,4 +466,107 @@ test "Join holds a group as a flat tree, and targetQuery rebuilds it" {
     try testing.expect(!tq.matches(.{ .id = 1, .user_id = null, .title = "y", .published = true }));
     try testing.expect(!tq.matches(.{ .id = 1, .user_id = 2, .title = "x", .published = true, .likes = 3 }));
     try testing.expect(tq.matches(.{ .id = 1, .user_id = 2, .title = "x", .published = true, .likes = 30 }));
+}
+
+test "two joins: the users with a post and with a comment, each joined row on its own" {
+    var f: Fixture = .{ .gw = undefined };
+    try f.init();
+    defer f.deinit();
+    const a = testing.allocator;
+
+    {
+        const rows = try f.users.join(.posts).join(.comments).order(.id, .asc).toSlice(a);
+        defer f.users.free(a, rows);
+        try expectIds(&.{ 2, 3 }, rows);
+    }
+    {
+        // The order joined doesn't matter.
+        const rows = try f.users.join(.comments).join(.posts).order(.id, .asc).toSlice(a);
+        defer f.users.free(a, rows);
+        try expectIds(&.{ 2, 3 }, rows);
+    }
+    try testing.expectEqual(2, try f.users.join(.posts).join(.comments).count());
+    {
+        // Each whereJoined narrows its own join only.
+        const rows = try f.users.join(.posts).join(.comments)
+            .whereJoined(.posts, .published, .eq, true)
+            .order(.id, .asc).toSlice(a);
+        defer f.users.free(a, rows);
+        try expectIds(&.{2}, rows);
+    }
+    {
+        const rows = try f.users.join(.posts).whereJoined(.posts, .published, .eq, false)
+            .join(.comments).whereJoined(.comments, .flagged, .eq, true)
+            .toSlice(a);
+        defer f.users.free(a, rows);
+        try expectIds(&.{3}, rows);
+    }
+    try testing.expectEqual(0, try f.users.join(.posts).whereJoined(.posts, .published, .eq, true)
+        .join(.comments).whereJoined(.comments, .flagged, .eq, true).count());
+    {
+        const rows = try f.users.join(.posts).join(.comments).whereJoinedNot(.comments, .{ .flagged, .eq, true })
+            .where(.age, .gt, 20).order(.id, .desc).toSlice(a);
+        defer f.users.free(a, rows);
+        try expectIds(&.{2}, rows);
+    }
+}
+
+test "joining an association again is a no-op, filters kept, other joins untouched" {
+    var f: Fixture = .{ .gw = undefined };
+    try f.init();
+    defer f.deinit();
+
+    const rel = f.users.join(.posts).whereJoined(.posts, .published, .eq, false)
+        .join(.comments).join(.posts).whereJoined(.comments, .flagged, .eq, true);
+    try testing.expectEqual(2, rel.query.join_count);
+    const joins = rel.query.joinSlice();
+    try testing.expectEqualStrings("posts", joins[0].assoc);
+    try testing.expectEqual(1, joins[0].filter_count);
+    try testing.expectEqualStrings("comments", joins[1].assoc);
+    try testing.expectEqual(1, joins[1].filter_count);
+    try testing.expectEqual(1, try rel.count());
+}
+
+test "two joins on update and delete: every join must match" {
+    var f: Fixture = .{ .gw = undefined };
+    try f.init();
+    defer f.deinit();
+
+    try testing.expectEqual(2, try f.users.join(.posts).join(.comments).update().set(.age, 1).commit());
+    try testing.expectEqual(2, try f.users.where(.age, .eq, 1).count());
+    try testing.expectEqual(1, try f.users.join(.comments).whereJoined(.comments, .flagged, .eq, true).join(.posts).delete());
+    try testing.expectEqual(1, try f.users.join(.posts).join(.comments).delete());
+    const rows = try f.users.order(.id, .asc).toSlice(testing.allocator);
+    defer f.users.free(testing.allocator, rows);
+    try expectIds(&.{ 1, 4 }, rows);
+}
+
+const Person = struct { id: u32, manager_id: ?u32, name: []const u8 };
+const Note = struct { id: u32, person_id: u32 };
+const PersonSchema = zom.Schema(Person, "people", .id, .{
+    .associations = struct {
+        pub const manager = zom.belongsTo(PersonSchema, .manager_id);
+        pub const notes = zom.hasMany(NoteSchema, .person_id);
+    },
+});
+const NoteSchema = zom.Schema(Note, "notes", .id, .{});
+
+test "a self-join and a second join snapshot membership before a delete" {
+    var gw: zom.memory.Gateway = .init(testing.allocator, .{});
+    defer gw.deinit();
+    const people = try zom.Relation(PersonSchema, zom.memory.Gateway).init(&gw);
+    const notes = try zom.Relation(NoteSchema, zom.memory.Gateway).init(&gw);
+    // 2 reports to 1, 3 to 2: deleting 2 first must not drop 3 from the
+    // snapshot.
+    _ = try people.createMany(&.{
+        .{ .id = 1, .manager_id = null, .name = "a" },
+        .{ .id = 2, .manager_id = 1, .name = "b" },
+        .{ .id = 3, .manager_id = 2, .name = "c" },
+    }).commit();
+    _ = try notes.createMany(&.{
+        .{ .id = 10, .person_id = 2 },
+        .{ .id = 11, .person_id = 3 },
+    }).commit();
+    try testing.expectEqual(2, try people.join(.manager).join(.notes).delete());
+    try testing.expectEqual(1, try people.count());
 }

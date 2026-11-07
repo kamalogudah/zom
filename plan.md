@@ -473,11 +473,19 @@ Later decisions:
      set: the planner hashes the 2,000 matching posts and then scans every
      user, where `DISTINCT` probes the users index per post. Both are
      dominated by the scan of `posts`, and it doesn't outweigh the rest.
-   - *More than one join per query:* worth supporting, and with `EXISTS`
-     it is one more `AND EXISTS (...)` per join (one more key set in
-     memory), each for its own joined row. `users.join(.posts).join(.comments)`
-     then means users with a post and with a comment, not with a post
-     that has a comment (that is a nested join through `posts`, which is a
-     separate question). It is left for later (#88): `Query.join` becomes a
-     small fixed array of `Join`s, and `whereJoined` finds its join by
-     association. Until then a second join still panics.
+   - *More than one join per query* (#88, 2026-11-07): one more
+     `AND EXISTS (...)` per join, in the order joined, and one more key set
+     in memory, each for its own joined row. `users.join(.posts).join(.comments)`
+     means users with a post and with a comment, not with a post that has
+     a comment (that is a nested join through `posts`, a separate
+     question). `Query.joins` is a fixed array of `Query.max_joins` = 3
+     `Join`s with a count, so queries stay copyable and allocation-free;
+     each `Join` is about 760 bytes, which takes a query from about 1.9 KiB
+     to 3.4 KiB. `whereJoined*` finds its join by association. The same
+     association joined twice is a no-op, filters kept: a join is named by
+     its association, so "a published post and an unpublished one" would
+     need an explicit alias, not taken up until something asks for it.
+     Aliases stay unique across the statement: a joined table goes by its
+     own name, else its association's (a self-join, or a second join onto
+     the same table), else `zom_joined_<n>`. Sibling `EXISTS` scopes would
+     allow repeats, but unique aliases read better and survive nesting.

@@ -456,7 +456,11 @@ pub const JoinFilter = struct {
 /// `relation.join(.posts)`: keep only the rows that have at least one row
 /// of the association's target dataset, matched on its keys and on the
 /// `whereJoined` filters. Each row comes back once however many rows it
-/// matches, and with its own columns only.
+/// matches, and with its own columns only. A query holds up to
+/// `Query.max_joins` joins, on distinct associations, and keeps a row only
+/// when every one of them matches, each with its own joined row:
+/// `users.join(.posts).join(.comments)` is the users with a post and with
+/// a comment.
 ///
 /// The joined filters form the same flat tree as a `Query`'s (`FilterNode`):
 /// `whereJoined` adds a top-level filter, `whereJoinedAny` / `whereJoinedNot`
@@ -659,6 +663,12 @@ pub fn Query(comptime T: type) type {
         /// Most sort keys in one query: `ORDER BY a, b, c, d`.
         pub const max_orders = 4;
 
+        /// Most joins in one query: `users.join(.posts).join(.comments)`
+        /// is two. Each `Join` carries its own filter tree (about 760
+        /// bytes), and every builder call copies the query, so this stays
+        /// small.
+        pub const max_joins = 3;
+
         pub const Filter = struct { field: Field, op: Op, operand: Operand };
         pub const Order = struct { field: Field, direction: Direction };
         pub const Change = struct { field: Field, value: Value };
@@ -696,9 +706,12 @@ pub fn Query(comptime T: type) type {
         /// refuse an unfiltered `UPDATE` / `DELETE` (`error.UnboundedWrite`)
         /// unless this is true. The memory adapter does not look at it.
         all: bool = false,
-        /// Set by `relation.join`: only rows with a matching row in another
-        /// dataset. See `Join`. `matches` and `truth` do not look at it.
-        join: ?Join = null,
+        /// Set by `relation.join`, in the order joined: only rows with a
+        /// matching row in each of them, every join for its own joined row.
+        /// See `Join`. Read through `joinSlice()`. `matches` and `truth` do
+        /// not look at them.
+        joins: [max_joins]Join = undefined,
+        join_count: u8 = 0,
 
         /// The filters of a query that has no `any` / `not` groups, which
         /// are then all AND-ed. An adapter that does not support `or` reads
@@ -707,6 +720,29 @@ pub fn Query(comptime T: type) type {
         pub fn filterSlice(self: *const Self) []const Filter {
             std.debug.assert(self.isConjunction());
             return self.filters[0..self.filter_count];
+        }
+
+        /// The query's joins, in the order joined. Empty: not joined.
+        pub fn joinSlice(self: *const Self) []const Join {
+            return self.joins[0..self.join_count];
+        }
+
+        /// The join on association `assoc`, if the query has one.
+        pub fn findJoin(self: *Self, assoc: []const u8) ?*Join {
+            for (self.joins[0..self.join_count]) |*j| {
+                if (std.mem.eql(u8, j.assoc, assoc)) return j;
+            }
+            return null;
+        }
+
+        /// Appends `j` as the next join. Panics, naming the limit, past
+        /// `max_joins`. Does not check that `j.assoc` is new; see
+        /// `relation.join`.
+        pub fn addJoin(self: *Self, j: Join) void {
+            if (self.join_count >= max_joins)
+                std.debug.panic("zom: query has more than Query.max_joins ({d}) joins, so it can't join '{s}' too", .{ max_joins, j.assoc });
+            self.joins[self.join_count] = j;
+            self.join_count += 1;
         }
 
         /// The sort keys, most significant first. Empty: no order.

@@ -23,12 +23,15 @@ const Post = struct {
     title: []const u8,
     published: bool,
     rating: ?u8 = null,
+    editor_id: ?u32 = null,
 };
 
 const UserSchema = zom.Schema(User, "users", .id, .{
     .associations = struct {
         pub const posts = zom.hasMany(PostSchema, .user_id);
         pub const manager = zom.belongsTo(UserSchema, .manager_id);
+        pub const reports = zom.hasMany(UserSchema, .manager_id);
+        pub const edited = zom.hasMany(PostSchema, .editor_id);
     },
 });
 const PostSchema = zom.Schema(Post, "posts", .id, .{
@@ -107,7 +110,7 @@ test "joined filters only: WHERE starts with EXISTS" {
 test "an empty joined in list on a nullable column stays unknown for null" {
     const none: []const u8 = &.{};
     var rel = users.join(.posts);
-    rel.query.join.?.addFilter(Post, .{ .field = .rating, .op = .in, .operand = .{ .many = .of(u8, none) } });
+    rel.query.joins[0].addFilter(Post, .{ .field = .rating, .op = .in, .operand = .{ .many = .of(u8, none) } });
     try expectSql(.postgres, rel, select_users ++ " WHERE " ++ exists_posts ++
         \\ AND ("posts"."rating" IS NULL AND NULL))
     , &.{});
@@ -207,7 +210,7 @@ test "belongsTo: posts.join(.author) joins on the post's foreign key" {
     try expectSql(
         .postgres,
         posts.join(.author).whereJoined(.author, .name, .eq, "Achieng"),
-        \\SELECT "posts"."id", "posts"."user_id", "posts"."title", "posts"."published", "posts"."rating" FROM "posts" WHERE EXISTS (SELECT 1 FROM "users" WHERE "users"."id" = "posts"."user_id" AND "users"."name" = $1)
+        \\SELECT "posts"."id", "posts"."user_id", "posts"."title", "posts"."published", "posts"."rating", "posts"."editor_id" FROM "posts" WHERE EXISTS (SELECT 1 FROM "users" WHERE "users"."id" = "posts"."user_id" AND "users"."name" = $1)
     ,
         &.{.{ .string = "Achieng" }},
     );
@@ -260,6 +263,92 @@ test "per_group on a joined select: the inner select is qualified, the outer rea
     var rel = posts.join(.author).whereJoined(.author, .name, .eq, "ada").order(.id, .desc).limit(1);
     rel.query.per_group = .user_id;
     try expectSql(.postgres, rel,
-        \\SELECT "id", "user_id", "title", "published", "rating" FROM (SELECT "posts"."id", "posts"."user_id", "posts"."title", "posts"."published", "posts"."rating", ROW_NUMBER() OVER (PARTITION BY "posts"."user_id" ORDER BY "posts"."id" DESC) AS "zom_rn" FROM "posts" WHERE EXISTS (SELECT 1 FROM "users" WHERE "users"."id" = "posts"."user_id" AND "users"."name" = $1)) AS "zom_paged" WHERE "zom_rn" <= 1 ORDER BY "id" DESC
+        \\SELECT "id", "user_id", "title", "published", "rating", "editor_id" FROM (SELECT "posts"."id", "posts"."user_id", "posts"."title", "posts"."published", "posts"."rating", "posts"."editor_id", ROW_NUMBER() OVER (PARTITION BY "posts"."user_id" ORDER BY "posts"."id" DESC) AS "zom_rn" FROM "posts" WHERE EXISTS (SELECT 1 FROM "users" WHERE "users"."id" = "posts"."user_id" AND "users"."name" = $1)) AS "zom_paged" WHERE "zom_rn" <= 1 ORDER BY "id" DESC
     , &.{.{ .string = "ada" }});
+}
+
+test "two joins: one AND EXISTS per join, in the order joined, each with its own filters" {
+    try expectSql(
+        .postgres,
+        users.join(.posts).join(.manager),
+        select_users ++ " WHERE " ++ exists_posts ++
+            \\) AND EXISTS (SELECT 1 FROM "users" AS "manager" WHERE "manager"."id" = "users"."manager_id")
+        ,
+        &.{},
+    );
+    try expectSql(
+        .postgres,
+        users.where(.age, .gte, 18).join(.posts).join(.manager)
+            .whereJoined(.manager, .age, .gt, 50).whereJoined(.posts, .published, .eq, true).order(.id, .asc),
+        select_users ++
+            \\ WHERE "users"."age" >= $1 AND EXISTS (SELECT 1 FROM "posts" WHERE "posts"."user_id" = "users"."id" AND "posts"."published" = $2) AND EXISTS (SELECT 1 FROM "users" AS "manager" WHERE "manager"."id" = "users"."manager_id" AND "manager"."age" > $3) ORDER BY "users"."id" ASC
+        ,
+        &.{ int(18), .{ .boolean = true }, int(50) },
+    );
+}
+
+test "two joins onto the same table: a self-join plus another association onto users" {
+    try expectSql(
+        .postgres,
+        users.join(.manager).whereJoined(.manager, .age, .gt, 50).join(.reports).whereJoinedAny(.reports, .{ .{ .age, .lt, 30 }, .{ .name, .eq, "x" } }),
+        select_users ++
+            \\ WHERE EXISTS (SELECT 1 FROM "users" AS "manager" WHERE "manager"."id" = "users"."manager_id" AND "manager"."age" > $1) AND EXISTS (SELECT 1 FROM "users" AS "reports" WHERE "reports"."manager_id" = "users"."id" AND ("reports"."age" < $2 OR "reports"."name" = $3))
+        ,
+        &.{ int(50), int(30), .{ .string = "x" } },
+    );
+}
+
+test "two joins onto posts: the second goes by its association, or a fallback when that is taken" {
+    try expectSql(
+        .postgres,
+        users.join(.posts).join(.edited).whereJoined(.edited, .published, .eq, false),
+        select_users ++ " WHERE " ++ exists_posts ++
+            \\) AND EXISTS (SELECT 1 FROM "posts" AS "edited" WHERE "edited"."editor_id" = "users"."id" AND "edited"."published" = $1)
+        ,
+        &.{.{ .boolean = false }},
+    );
+    // `edited` takes the table's name, so `posts`, joined second, can't
+    // go by either.
+    try expectSql(
+        .postgres,
+        users.join(.edited).join(.posts).whereJoined(.posts, .published, .eq, true),
+        select_users ++
+            \\ WHERE EXISTS (SELECT 1 FROM "posts" WHERE "posts"."editor_id" = "users"."id") AND EXISTS (SELECT 1 FROM "posts" AS "zom_joined_1" WHERE "zom_joined_1"."user_id" = "users"."id" AND "zom_joined_1"."published" = $1)
+        ,
+        &.{.{ .boolean = true }},
+    );
+    // Three joins, the most a query holds.
+    try expectSql(
+        .sqlite,
+        users.join(.posts).join(.edited).join(.manager),
+        select_users ++ " WHERE " ++ exists_posts ++
+            \\) AND EXISTS (SELECT 1 FROM "posts" AS "edited" WHERE "edited"."editor_id" = "users"."id") AND EXISTS (SELECT 1 FROM "users" AS "manager" WHERE "manager"."id" = "users"."manager_id")
+        ,
+        &.{},
+    );
+}
+
+test "two joins on UPDATE and DELETE" {
+    const q = users.join(.posts).whereJoined(.posts, .published, .eq, true).join(.reports).where(.id, .eq, 1).query;
+    const deleted = try zom_sql.compileDelete(.postgres, User, testing.allocator, "users", q);
+    defer deleted.deinit(testing.allocator);
+    try testing.expectEqualStrings(
+        \\DELETE FROM "users" WHERE "users"."id" = $1 AND EXISTS (SELECT 1 FROM "posts" WHERE "posts"."user_id" = "users"."id" AND "posts"."published" = $2) AND EXISTS (SELECT 1 FROM "users" AS "reports" WHERE "reports"."manager_id" = "users"."id")
+    , deleted.sql);
+    try testing.expectEqualDeep(&[_]Value{ int(1), .{ .boolean = true } }, deleted.params);
+
+    const changes = [_]zom.Query(User).Change{.{ .field = .age, .value = int(7) }};
+    const updated = try zom_sql.compileUpdate(.postgres, User, testing.allocator, "users", q, &changes);
+    defer updated.deinit(testing.allocator);
+    try testing.expectEqualStrings(
+        \\UPDATE "users" SET "age" = $1 WHERE "users"."id" = $2 AND EXISTS (SELECT 1 FROM "posts" WHERE "posts"."user_id" = "users"."id" AND "posts"."published" = $3) AND EXISTS (SELECT 1 FROM "users" AS "reports" WHERE "reports"."manager_id" = "users"."id")
+    , updated.sql);
+    try testing.expectEqualDeep(&[_]Value{ int(7), int(1), .{ .boolean = true } }, updated.params);
+
+    // Two joins onto the same table, with no source filter: the joins bound it.
+    const same = try zom_sql.compileDelete(.postgres, User, testing.allocator, "users", users.join(.manager).join(.reports).query);
+    defer same.deinit(testing.allocator);
+    try testing.expectEqualStrings(
+        \\DELETE FROM "users" WHERE EXISTS (SELECT 1 FROM "users" AS "manager" WHERE "manager"."id" = "users"."manager_id") AND EXISTS (SELECT 1 FROM "users" AS "reports" WHERE "reports"."manager_id" = "users"."id")
+    , same.sql);
 }

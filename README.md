@@ -1021,11 +1021,19 @@ as on an unjoined query. The memory gateway runs a hash
 semi-join: the matching posts' keys go into a set, and a user is kept when
 its key is in it, in O(users + posts).
 
-A query holds one join: joining the same association again changes
-nothing, and joining a second one panics, as does `whereJoined` without
-the `join`. `update` and `delete` on a joined relation affect each matching
-source row once. The SQL compiler uses the same `EXISTS` subquery;
-memory snapshots the matching rows before changing them.
+Joins add up, to `Query.max_joins` (3) per query:
+`users.join(.posts).join(.comments)` is the users with at least one post
+and at least one comment, each joined association matched (and narrowed by
+its own `whereJoined`) on its own rows. It is not the users with a post
+that has a comment, which would be a join through `posts`. On zom-sql each
+join is one more `AND EXISTS (...)`, in the order joined, and in memory one
+more key set a row's key must be in. Joining an association the relation
+already joins changes nothing, filters and all, so "a published post and an
+unpublished one" can't be two joins on `.posts`. A fourth join panics, as
+does `whereJoined` without its `join`. `update` and `delete` on a joined
+relation affect each matching source row once. The SQL compiler uses the
+same `EXISTS` subqueries; memory snapshots the matching rows before
+changing them.
 
 #### Associated creates
 

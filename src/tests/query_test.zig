@@ -166,9 +166,10 @@ test "building a full query with in, between and like takes no allocator" {
     q = q.where(.id, .in, .{ 1, 2, 3, 4, 5 }).where(.age, .between, .{ 18, 31 }).where(.name, .ilike, "%o%");
     try testing.expectEqual(@as(usize, 3), q.filter_count);
     try expectIds(q, &.{ 2, 4 });
-    // `in` lists are borrowed, not stored per filter: a query stays about
-    // 1 KiB, where `[max_in]Value` in every filter would make it ~24 KiB.
-    try testing.expect(@sizeOf(Q) < 2 * 1024);
+    // `in` lists are borrowed, not stored per filter: a query stays a few
+    // KiB (about 1 KiB of filters plus `max_joins` joins of ~760 bytes
+    // each), where `[max_in]Value` in every filter would make it ~24 KiB.
+    try testing.expect(@sizeOf(Q) < 4 * 1024);
 }
 
 test "between is inclusive and never matches null" {

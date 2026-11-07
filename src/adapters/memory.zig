@@ -193,7 +193,8 @@ pub const Gateway = struct {
 /// rows that match the `whereJoined` filters give a set of keys, and a row
 /// here is kept when its own key is in the set, so it comes back once
 /// however many joined rows it has. That is O(n + m), plus one set entry
-/// per distinct key. The joined store comes from the gateway, so a join on
+/// per distinct key. With several joins each builds its own set, one at a
+/// time, and a row is kept when its key is in every one. The joined store comes from the gateway, so a join on
 /// a store that no memory `Gateway` handed out is `error.JoinUnavailable`;
 /// the file adapters, which own their stores, turn `supports.join` off.
 pub fn Store(comptime S: type) type {
@@ -334,8 +335,12 @@ pub fn Store(comptime S: type) type {
         fn matching(self: *Self, query: Q, allocator: Allocator) !std.ArrayList(T) {
             var hits: std.ArrayList(T) = .empty;
             errdefer hits.deinit(allocator);
-            if (query.join) |*j| {
-                try self.joined(j, &query, allocator, &hits, null);
+            if (query.join_count > 0) {
+                const flags = try self.joinSelection(&query, allocator);
+                defer allocator.free(flags);
+                for (self.list.items, flags) |row, keep| {
+                    if (keep) try hits.append(allocator, row);
+                }
             } else for (self.list.items) |row| {
                 if (query.matches(row)) try hits.append(allocator, row);
             }
@@ -346,30 +351,33 @@ pub fn Store(comptime S: type) type {
             return hits;
         }
 
-        /// Appends to `hits` the rows matching `query` that `j` keeps. The
-        /// association is looked up by name among `S`'s, so each one gets
-        /// its own typed semi-join.
-        fn joined(self: *Self, j: *const q.Join, query: *const Q, allocator: Allocator, hits: *std.ArrayList(T), selected: ?[]bool) !void {
+        /// One flag per row, in insertion order: true for the rows that
+        /// match `query`'s own filters and every one of its joins. The
+        /// caller owns the slice.
+        fn joinSelection(self: *Self, query: *const Q, allocator: Allocator) ![]bool {
+            const flags = try allocator.alloc(bool, self.list.items.len);
+            errdefer allocator.free(flags);
+            for (self.list.items, flags) |row, *keep| keep.* = query.matches(row);
+            for (query.joinSlice()) |*j| try self.keepJoined(j, allocator, flags);
+            return flags;
+        }
+
+        /// Clears the flag of every row that `j` drops. The association is
+        /// looked up by name among `S`'s, so each one gets its own typed
+        /// semi-join.
+        fn keepJoined(self: *Self, j: *const q.Join, allocator: Allocator, flags: []bool) !void {
             inline for (S.association_names) |name| {
                 // A custom association can't be joined (`relation.join`
                 // refuses it), and has no keys to semi-join on.
                 if (comptime @field(S.associations, name).kind == .custom) continue;
                 if (std.mem.eql(u8, name, j.assoc))
-                    return self.semiJoin(@field(S.associations, name), j, query, allocator, hits, selected);
+                    return self.semiJoin(@field(S.associations, name), j, allocator, flags);
             }
             // `relation.join` only stores names of `S`'s associations.
             return error.UnknownAssociation;
         }
 
-        fn semiJoin(
-            self: *Self,
-            comptime a: Association,
-            j: *const q.Join,
-            query: *const Q,
-            allocator: Allocator,
-            hits: *std.ArrayList(T),
-            selected: ?[]bool,
-        ) !void {
+        fn semiJoin(self: *Self, comptime a: Association, j: *const q.Join, allocator: Allocator, flags: []bool) !void {
             const source_key = if (a.kind == .has_many) a.primary_key else a.foreign_key;
             const target_key = if (a.kind == .has_many) a.foreign_key else a.primary_key;
             const Key = Unwrap(@FieldType(a.Parent().Tuple, a.primary_key));
@@ -391,12 +399,10 @@ pub fn Store(comptime S: type) type {
                 const key: Key = keyOf(Key, @field(row, target_key)) orelse continue;
                 try keys.put(allocator, key, {});
             }
-            for (self.list.items, 0..) |row, i| {
-                if (!query.matches(row)) continue;
-                const key: Key = keyOf(Key, @field(row, source_key)) orelse continue;
-                if (keys.contains(key)) {
-                    if (selected) |flags| flags[i] = true else try hits.append(allocator, row);
-                }
+            for (self.list.items, flags) |row, *keep| {
+                if (!keep.*) continue;
+                const key: ?Key = keyOf(Key, @field(row, source_key));
+                keep.* = if (key) |k| keys.contains(k) else false;
             }
         }
 
@@ -407,7 +413,7 @@ pub fn Store(comptime S: type) type {
         /// The number of rows `read` would return: `limit` and `offset`
         /// apply, as with SQL's `count(*)` over a limited subquery.
         pub fn count(self: *Self, query: Q) !usize {
-            if (query.join != null or query.per_group != null) {
+            if (query.join_count > 0 or query.per_group != null) {
                 // The semi-join needs scratch space for its key set, and
                 // per-group paging the rows themselves.
                 var hits = try self.matching(query, self.allocator);
@@ -460,13 +466,8 @@ pub fn Store(comptime S: type) type {
         /// Snapshot joined membership before a write changes either side of
         /// a self-join. Null means the unjoined query needs no scratch space.
         fn writeSelection(self: *Self, query: Q) !?[]bool {
-            const j = if (query.join) |*join| join else return null;
-            const flags = try self.allocator.alloc(bool, self.list.items.len);
-            errdefer self.allocator.free(flags);
-            @memset(flags, false);
-            var unused: std.ArrayList(T) = .empty;
-            try self.joined(j, &query, self.allocator, &unused, flags);
-            return flags;
+            if (query.join_count == 0) return null;
+            return try self.joinSelection(&query, self.allocator);
         }
 
         /// Writes the change's typed value into `patch`, checking its range

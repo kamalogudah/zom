@@ -118,12 +118,13 @@ pub const Supports = struct {
     /// them down.
     projection: bool = false,
     /// Joining another dataset: `relation.join(.assoc)` and `whereJoined`,
-    /// which set `query.join` (a `zom.Join`). A dataset with it must read
-    /// that join in `read` and `count`: keep only the rows with at least one
-    /// row of the joined dataset matching the join's keys and filters, each
-    /// once. If it also supports update or delete, those operations must
-    /// apply the same semi-join selection. A relation without it can't join
-    /// even in `.fallback` mode.
+    /// which set `query.joins` (`zom.Join`s, read through `joinSlice()`).
+    /// A dataset with it must read those joins in `read` and `count`: keep
+    /// only the rows that, for every join, have at least one row of the
+    /// joined dataset matching its keys and filters, each row once. If it
+    /// also supports update or delete, those operations must apply the
+    /// same semi-join selection. A relation without it can't join even in
+    /// `.fallback` mode.
     join: bool = false,
     /// Paging each group of rows: `read` and `readProjected` honour
     /// `query.per_group` (see `Query.per_group`), applying `limit` and

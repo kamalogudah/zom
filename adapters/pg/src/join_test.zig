@@ -1,8 +1,8 @@
 //! `relation.join` on zom-pg, against the memory gateway's semi-join: the
 //! same `scenario`, generic over the gateway, must give the same rows on
 //! both. The Postgres run is skipped unless `ZOM_PG_URL` is set (see
-//! lint_test.zig), and drops and recreates the `pj_users` and `pj_posts`
-//! tables.
+//! lint_test.zig), and drops and recreates the `pj_users`, `pj_posts` and
+//! `pj_comments` tables.
 
 const std = @import("std");
 const zom = @import("zom");
@@ -26,11 +26,20 @@ const Post = struct {
     likes: u32,
 };
 
+const Comment = struct {
+    id: u32,
+    user_id: ?u32,
+    body: []const u8,
+    flagged: bool,
+};
+
 const Users = zom.Schema(User, "pj_users", .id, .{
     .associations = struct {
         pub const posts = zom.hasMany(Posts, .user_id);
+        pub const comments = zom.hasMany(Comments, .user_id);
     },
 });
+const Comments = zom.Schema(Comment, "pj_comments", .id, .{});
 const Posts = zom.Schema(Post, "pj_posts", .id, .{
     .associations = struct {
         pub const author = zom.belongsTo(Users, .user_id);
@@ -54,6 +63,14 @@ const create_posts =
     \\  likes bigint NOT NULL
     \\)
 ;
+const create_comments =
+    \\CREATE TABLE pj_comments (
+    \\  id bigint PRIMARY KEY,
+    \\  user_id bigint REFERENCES pj_users (id),
+    \\  body text NOT NULL,
+    \\  flagged boolean NOT NULL
+    \\)
+;
 
 const users_seed = [_]User{
     .{ .id = 1, .name = "Achieng", .age = 31, .role = .admin },
@@ -73,12 +90,53 @@ const posts_seed = [_]Post{
     .{ .id = 15, .user_id = null, .title = "Orphan", .published = true, .likes = 99 },
 };
 
+/// Otieno comments twice, Wanjiru once (flagged), Kamau once; Achieng
+/// never. Comment 24 belongs to nobody.
+const comments_seed = [_]Comment{
+    .{ .id = 20, .user_id = 2, .body = "Nice", .flagged = false },
+    .{ .id = 21, .user_id = 3, .body = "Spam", .flagged = true },
+    .{ .id = 22, .user_id = 2, .body = "Again", .flagged = false },
+    .{ .id = 23, .user_id = 4, .body = "First!", .flagged = false },
+    .{ .id = 24, .user_id = null, .body = "Orphan", .flagged = false },
+};
+
 fn scenario(comptime G: type, gw: *G) !void {
     const a = testing.allocator;
     const users = try zom.Relation(Users, G).init(gw);
     const posts = try zom.Relation(Posts, G).init(gw);
     try testing.expectEqual(users_seed.len, try users.createMany(&users_seed).commit());
     try testing.expectEqual(posts_seed.len, try posts.createMany(&posts_seed).commit());
+    const comments = try zom.Relation(Comments, G).init(gw);
+    try testing.expectEqual(comments_seed.len, try comments.createMany(&comments_seed).commit());
+
+    // Two joins: a user with a post and with a comment, each matched (and
+    // narrowed) on its own.
+    {
+        const rows = try users.join(.posts).join(.comments).order(.id, .asc).toSlice(a);
+        defer users.free(a, rows);
+        try expectIds(&.{ 2, 3 }, rows);
+    }
+    try testing.expectEqual(2, try users.join(.comments).join(.posts).count());
+    {
+        const rows = try users.join(.posts).whereJoined(.posts, .published, .eq, true).join(.comments).toSlice(a);
+        defer users.free(a, rows);
+        try expectIds(&.{2}, rows);
+    }
+    {
+        const rows = try users.join(.posts).join(.comments).whereJoined(.comments, .flagged, .eq, true).toSlice(a);
+        defer users.free(a, rows);
+        try expectIds(&.{3}, rows);
+    }
+    try testing.expectEqual(0, try users.join(.posts).whereJoined(.posts, .published, .eq, true)
+        .join(.comments).whereJoined(.comments, .flagged, .eq, true).count());
+    {
+        const rel = users.select(.{.name}).join(.posts).join(.comments)
+            .whereJoinedNot(.comments, .{ .flagged, .eq, true }).order(.name, .asc);
+        const rows = try rel.toSlice(a);
+        defer rel.free(a, rows);
+        try testing.expectEqual(1, rows.len);
+        try testing.expectEqualStrings("Otieno", rows[0].name);
+    }
 
     // Each user with a post, once, however many posts they have.
     {
@@ -225,6 +283,13 @@ fn scenario(comptime G: type, gw: *G) !void {
     try testing.expectEqual(0, try posts.join(.author).whereJoined(.author, .age, .eq, 1).where(.id, .eq, 15).delete());
     try testing.expectEqual(2, try posts.join(.author).whereJoined(.author, .age, .eq, 1).where(.published, .eq, false).delete());
     try testing.expectEqual(4, try posts.count());
+
+    // A joined write with two joins. Posts 11 and 13 are gone, so only
+    // Achieng and Otieno still have posts, and only Otieno a comment too.
+    try testing.expectEqual(1, try users.join(.posts).join(.comments).update().set(.age, 5).commit());
+    const otieno = (try users.byPk(2).one(a)).?;
+    defer users.freeOne(a, otieno);
+    try testing.expectEqual(5, otieno.age.?);
 }
 
 fn expectIds(expected: []const u32, rows: anytype) !void {
@@ -248,13 +313,16 @@ test "join: postgres" {
     defer testing.allocator.free(u);
     var gw = try zom_pg.Gateway.init(testing.allocator, .{ .io = testing.io, .url = u, .pool_size = 2 });
     defer gw.deinit();
+    try gw.exec("DROP TABLE IF EXISTS pj_comments");
     try gw.exec("DROP TABLE IF EXISTS pj_posts");
     try gw.exec("DROP TABLE IF EXISTS pj_users");
     defer {
+        gw.exec("DROP TABLE IF EXISTS pj_comments") catch {};
         gw.exec("DROP TABLE IF EXISTS pj_posts") catch {};
         gw.exec("DROP TABLE IF EXISTS pj_users") catch {};
     }
     try gw.exec(create_users);
     try gw.exec(create_posts);
+    try gw.exec(create_comments);
     try scenario(zom_pg.Gateway, &gw);
 }

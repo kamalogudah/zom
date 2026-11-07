@@ -350,8 +350,8 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
 
         fn split(self: *const Self) Plan {
             const query = &self.query;
-            // A join is always the dataset's (see `requireJoin`).
-            var p: Plan = .{ .pushed = .{ .join = query.join } };
+            // Joins are always the dataset's (see `requireJoin`).
+            var p: Plan = .{ .pushed = .{ .joins = query.joins, .join_count = query.join_count } };
             var it = query.topNodes();
             while (it.next()) |i| {
                 const index: u8 = @intCast(i);
@@ -652,26 +652,32 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
         ///
         /// Needs `supports.join`; without it this is a compile error, even
         /// on a `.fallback` relation, because a join reads another dataset
-        /// and can't run in memory on this one's rows. A query has at most
-        /// one join: joining the same association again changes nothing,
-        /// and joining a second one panics. `update` and `delete` keep
-        /// only source rows matched by the join.
+        /// and can't run in memory on this one's rows. `update` and
+        /// `delete` keep only source rows matched by the join.
+        ///
+        /// Joins add up: `users.join(.posts).join(.comments)` is the users
+        /// with at least one post and at least one comment, each matched
+        /// (and narrowed by `whereJoined`) on its own; it is not the users
+        /// with a post that has a comment. At most `Query.max_joins` joins;
+        /// past that, panics. Joining an association the relation already
+        /// joins changes nothing, filters and all: a join is named by its
+        /// association, so "a published post and an unpublished one" can't
+        /// be two joins on `.posts`.
         pub fn join(self: Self, comptime assoc: @TypeOf(.enum_literal)) Self {
             const a = comptime S.association(assoc);
             comptime requireJoin(a, "join(." ++ a.name ++ ")");
-            if (self.query.join) |j| {
-                if (std.mem.eql(u8, j.assoc, a.name)) return self;
-                std.debug.panic("zom: relation '{s}' already joins '{s}'; a query has at most one join, so it can't join '{s}' too", .{
-                    S.name, j.assoc, a.name,
-                });
-            }
             var next = self;
-            next.query.join = .{
+            if (next.query.findJoin(a.name) != null) return self;
+            if (next.query.join_count >= Q.max_joins)
+                std.debug.panic("zom: relation '{s}' already has Query.max_joins ({d}) joins, so it can't join '{s}' too", .{
+                    S.name, Q.max_joins, a.name,
+                });
+            next.query.addJoin(.{
                 .assoc = a.name,
                 .table = a.target.name,
                 .source_key = if (a.kind == .has_many) a.primary_key else a.foreign_key,
                 .target_key = if (a.kind == .has_many) a.foreign_key else a.primary_key,
-            };
+            });
             return next;
         }
 
@@ -681,8 +687,9 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
         /// true)` is the users with at least one published post. Several
         /// joined filters (and groups) are AND-ed, and must all hold for
         /// the same joined row. At most `zom.Join.max_filters` filters and
-        /// `zom.Join.max_nodes` nodes; past that, panics. Panics when the
-        /// relation is not joined with `assoc`.
+        /// `zom.Join.max_nodes` nodes per join; past that, panics. Panics
+        /// when the relation is not joined with `assoc`; other joins it has
+        /// are left alone.
         pub fn whereJoined(
             self: Self,
             comptime assoc: @TypeOf(.enum_literal),
@@ -694,7 +701,8 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
             const call = "whereJoined(." ++ a.name ++ ", ." ++ @tagName(field) ++ ", ." ++ @tagName(op) ++ ", ...)";
             comptime requireJoinedFilter(a, @tagName(field), op, call);
             var next = self;
-            next.query.join = self.joinOf(a, call).where(a.target.Tuple, field, op, value);
+            const j = joinOf(&next.query, a, call);
+            j.* = j.where(a.target.Tuple, field, op, value);
             return next;
         }
 
@@ -712,7 +720,8 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
             const call = "whereJoinedIn(." ++ a.name ++ ", ." ++ @tagName(field) ++ ", ...)";
             comptime requireJoinedFilter(a, @tagName(field), .in, call);
             var next = self;
-            next.query.join = self.joinOf(a, call).whereIn(a.target.Tuple, field, values);
+            const j = joinOf(&next.query, a, call);
+            j.* = j.whereIn(a.target.Tuple, field, values);
             return next;
         }
 
@@ -727,7 +736,8 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
             const call = "whereJoinedNotIn(." ++ a.name ++ ", ." ++ @tagName(field) ++ ", ...)";
             comptime requireJoinedFilter(a, @tagName(field), .not_in, call);
             var next = self;
-            next.query.join = self.joinOf(a, call).whereNotIn(a.target.Tuple, field, values);
+            const j = joinOf(&next.query, a, call);
+            j.* = j.whereNotIn(a.target.Tuple, field, values);
             return next;
         }
 
@@ -741,7 +751,8 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
             const call = "whereJoinedAny(." ++ a.name ++ ", ...)";
             comptime requireJoin(a, call);
             var next = self;
-            next.query.join = self.joinOf(a, call).whereAny(a.target.Tuple, conds);
+            const j = joinOf(&next.query, a, call);
+            j.* = j.whereAny(a.target.Tuple, conds);
             comptime requireJoinedGroup(a, q.Group(.any, @TypeOf(conds)), call);
             return next;
         }
@@ -755,20 +766,16 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
             const call = "whereJoinedNot(." ++ a.name ++ ", ...)";
             comptime requireJoin(a, call);
             var next = self;
-            next.query.join = self.joinOf(a, call).whereNot(a.target.Tuple, cond);
+            const j = joinOf(&next.query, a, call);
+            j.* = j.whereNot(a.target.Tuple, cond);
             comptime requireJoinedGroup(a, q.Not(@TypeOf(cond)), call);
             return next;
         }
 
-        /// The query's join, which must be on `a`; panics otherwise.
-        fn joinOf(self: Self, comptime a: Association, comptime call: []const u8) q.Join {
-            const j = self.query.join orelse
+        /// The query's join on `a`, in `query`; panics when there is none.
+        fn joinOf(query: *Q, comptime a: Association, comptime call: []const u8) *q.Join {
+            return query.findJoin(a.name) orelse
                 std.debug.panic("zom: relation '{s}': " ++ call ++ " needs join(.{s}) first", .{ S.name, a.name });
-            if (!std.mem.eql(u8, j.assoc, a.name))
-                std.debug.panic("zom: relation '{s}' joins '{s}', not '{s}'; " ++ call ++ " needs join(.{s})", .{
-                    S.name, j.assoc, a.name, a.name,
-                });
-            return j;
         }
 
         /// A joined filter is checked against the joined dataset, in either
