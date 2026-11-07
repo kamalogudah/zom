@@ -14,7 +14,9 @@
 //! `.combine(.balances, balances)` load an account's history. Records are
 //! immutable, so there is no update or delete: `create` and `createMany`
 //! are the writes, and fail with the result code's error
-//! (`error.ExceedsCredits`, ...; see results.zig). See gateway.zig, and
+//! (`error.ExceedsCredits`, ...; see results.zig). `relation.linked()`
+//! creates a chain of events all or nothing, in place of a transaction
+//! (see linked.zig). See gateway.zig, and
 //! README.md for how the client library is fetched and linked.
 
 /// TigerBeetle's types: `tb.Account`, `tb.Transfer`, the typed flags, and
@@ -29,6 +31,10 @@ pub const AccountBalance = @import("schemas.zig").AccountBalance;
 
 pub const Gateway = @import("gateway.zig").Gateway;
 
+/// `relation.linked()`: an all-or-nothing chain of events (TigerBeetle's
+/// `flags.linked`) in place of a transaction.
+pub const linked = @import("linked.zig");
+
 /// The result codes of `create_accounts` / `create_transfers` and the
 /// typed errors they become (`error.ExceedsCredits`, ...).
 pub const results = @import("results.zig");
@@ -39,4 +45,5 @@ test {
     _ = @import("read.zig");
     _ = @import("gateway.zig");
     _ = @import("gateway_test.zig");
+    _ = linked;
 }

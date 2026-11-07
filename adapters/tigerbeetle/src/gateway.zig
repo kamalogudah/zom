@@ -49,6 +49,7 @@ const tb = @import("tb.zig");
 const results = @import("results.zig");
 const reads = @import("read.zig");
 const schemas = @import("schemas.zig");
+const chains = @import("linked.zig");
 const c = tb.c;
 
 const Allocator = std.mem.Allocator;
@@ -56,6 +57,11 @@ const log = std.log.scoped(.zom_tigerbeetle);
 
 pub const Gateway = struct {
     pub const adapter_name = "tigerbeetle";
+
+    /// Added to `container.transaction`'s compile error: TigerBeetle's
+    /// atomicity is a linked chain of events in one request.
+    pub const transaction_hint = "TigerBeetle's all-or-nothing writes are linked event chains: " ++
+        "`relation.linked().add(a).add(b).commit()` (see zom_tigerbeetle's linked.zig)";
 
     pub const Config = struct {
         /// The client's replies are waited for through `std.Io`.
@@ -389,7 +395,8 @@ fn TbDataset(comptime S: type) type {
         /// passed in, and why.
         pub const Result = struct { index: usize, code: Code };
 
-        const Reply = if (is_account) c.tb_create_account_result_t else c.tb_create_transfer_result_t;
+        /// One event's result in a `create_*` reply.
+        pub const Reply = if (is_account) c.tb_create_account_result_t else c.tb_create_transfer_result_t;
         const operation = if (is_account) c.TB_OPERATION_CREATE_ACCOUNTS else c.TB_OPERATION_CREATE_TRANSFERS;
         const lookup_operation = if (is_account) c.TB_OPERATION_LOOKUP_ACCOUNTS else c.TB_OPERATION_LOOKUP_TRANSFERS;
         const query_operation = if (is_account) c.TB_OPERATION_QUERY_ACCOUNTS else c.TB_OPERATION_QUERY_TRANSFERS;
@@ -457,6 +464,45 @@ fn TbDataset(comptime S: type) type {
             errdefer list.items.deinit(allocator);
             _ = try self.createAll(rows, &list);
             return list.items.toOwnedSlice(allocator);
+        }
+
+        /// `relation.linked()`: see linked.zig.
+        pub fn LinkedChangeset(comptime Rel: type) type {
+            return chains.LinkedChangeset(Rel);
+        }
+
+        /// The event that made a linked chain fail: its index in the chain,
+        /// and its result code. The other events get `.linked_event_failed`,
+        /// which is only the code here if no event said why.
+        pub const ChainFailure = struct { index: usize, code: Code };
+
+        /// Creates `rows`, one linked chain (every event but the last has
+        /// `flags.linked`), in one request, so all of them are created or
+        /// none is. Returns `rows.len`. On failure the error is the causing
+        /// event's (`error.ExceedsCredits`, ...), and `failure`, when given,
+        /// says which event it was. A chain longer than the cluster takes
+        /// in one request is `error.LinkedChainTooLong`, and nothing is
+        /// created. `reply` has room for one result per event.
+        pub fn insertChain(self: *Self, rows: []const T, reply: []Reply, failure: ?*ChainFailure) InsertError!usize {
+            std.debug.assert(rows.len > 0);
+            for (rows, 0..) |row, i| std.debug.assert(isLinked(row) == (i + 1 < rows.len));
+            if (rows.len > self.shared.batchLimit()) return error.LinkedChainTooLong;
+            const replies = self.createBatch(rows, reply) catch |err| switch (err) {
+                error.TooMuchData => return error.LinkedChainTooLong,
+                else => |e| return e,
+            };
+            // The events that failed only because another one did are
+            // `.linked_event_failed`; the cause is the other code.
+            var cause: ?ChainFailure = null;
+            for (replies, 0..) |r, index| {
+                if (r.status == @intFromEnum(Code.created)) continue;
+                const code: Code = @enumFromInt(r.status);
+                if (cause == null or (cause.?.code == .linked_event_failed and code != .linked_event_failed))
+                    cause = .{ .index = index, .code = code };
+            }
+            const found = cause orelse return rows.len;
+            if (failure) |out| out.* = found;
+            return errorFor(@intFromEnum(found.code)).?;
         }
 
         /// The rows matching `query`, through `lookup_*` or `query_*`
@@ -1106,6 +1152,83 @@ test "a linked chain fails as a whole, and isn't split across requests" {
 
     const too_long = [_]tb.Account{ rows[1], rows[2], rows[2], rows[3] };
     try testing.expectError(error.LinkedChainTooLong, accounts.insertMany(&too_long));
+}
+
+test "linked(): a chain with an invalid second transfer creates none of them" {
+    var gateway = try testGateway(.{});
+    defer gateway.deinit();
+    const accounts = try Accounts.init(&gateway);
+    const transfers = try Transfers.init(&gateway);
+    const alloc = testing.allocator;
+
+    const base = freshIds();
+    const a = base + 1;
+    const b = base + 2;
+    _ = try accounts.createMany(&.{
+        .{ .id = a, .ledger = 700, .code = 10 },
+        .{ .id = b, .ledger = 700, .code = 10 },
+    }).commit();
+    const t1: tb.Transfer = .{ .id = base + 10, .debit_account_id = a, .credit_account_id = b, .amount = 10, .ledger = 700, .code = 1 };
+    const t2: tb.Transfer = .{ .id = base + 11, .debit_account_id = b, .credit_account_id = base + 99, .amount = 5, .ledger = 700, .code = 1 };
+    const t3: tb.Transfer = .{ .id = base + 12, .debit_account_id = b, .credit_account_id = a, .amount = 1, .ledger = 700, .code = 1 };
+
+    // One request; the cause's error, not linked_event_failed, and which
+    // event it was.
+    var failure: Transfers.Linked().Failure = undefined;
+    var before = gateway.requestCount();
+    try testing.expectError(error.CreditAccountNotFound, transfers.linked().add(t1).add(t2).add(t3).reportTo(&failure).commit());
+    try testing.expectEqual(1, gateway.requestCount() - before);
+    try testing.expectEqual(1, failure.index);
+    try testing.expectEqual(.credit_account_not_found, failure.code);
+    const ids = [_]u128{ t1.id, t2.id, t3.id };
+    const none = try transfers.whereIn(.id, &ids).toSlice(alloc);
+    defer alloc.free(none);
+    try testing.expectEqual(0, none.len);
+    // And no balance moved.
+    try testing.expectEqual(0, (try accounts.byPk(a).one(alloc)).?.debits_posted);
+
+    // A transient error (an account not found) spends the failing id:
+    // TigerBeetle won't take it again, even fixed.
+    var fixed = t2;
+    fixed.credit_account_id = a;
+    try testing.expectError(error.IdAlreadyFailed, transfers.linked().add(t1).add(fixed).add(t3).reportTo(&failure).commit());
+    try testing.expectEqual(1, failure.index);
+
+    // The events that only got linked_event_failed keep their ids: fixed
+    // under a new id, the chain creates all three, in one request, linked
+    // but for the last as stored.
+    fixed.id = base + 13;
+    before = gateway.requestCount();
+    try testing.expectEqual(3, try transfers.linked().add(t1).add(fixed).add(t3).commit());
+    try testing.expectEqual(1, gateway.requestCount() - before);
+    const all = try transfers.whereIn(.id, &[_]u128{ t1.id, fixed.id, t3.id }).toSlice(alloc);
+    defer alloc.free(all);
+    try testing.expectEqual(3, all.len);
+    for (all, [_]bool{ true, true, false }) |row, link| try testing.expectEqual(link, tb.TransferFlags.of(row).linked);
+
+    // Created again: the first is `.exists`, the chain fails at 0.
+    try testing.expectError(error.DuplicatePrimaryKey, transfers.linked().add(t1).add(fixed).reportTo(&failure).commit());
+    try testing.expectEqual(0, failure.index);
+
+    // An empty chain sends nothing.
+    before = gateway.requestCount();
+    try testing.expectEqual(0, try transfers.linked().commit());
+    try testing.expectEqual(0, gateway.requestCount() - before);
+}
+
+test "linked(): a chain longer than a request holds is refused unsent" {
+    var gateway = try testGateway(.{ .batch_max = 2 });
+    defer gateway.deinit();
+    const accounts = try Accounts.init(&gateway);
+    const base = freshIds();
+    const before = gateway.requestCount();
+    try testing.expectError(error.LinkedChainTooLong, accounts.linked()
+        .add(.{ .id = base + 1, .ledger = 700, .code = 10 })
+        .add(.{ .id = base + 2, .ledger = 700, .code = 10 })
+        .add(.{ .id = base + 3, .ledger = 700, .code = 10 })
+        .commit());
+    try testing.expectEqual(0, gateway.requestCount() - before);
+    try testing.expectEqual(null, try accounts.byPk(base + 1).one(testing.allocator));
 }
 
 /// Six accounts tagged with a fresh `user_data_128`, so a query can find

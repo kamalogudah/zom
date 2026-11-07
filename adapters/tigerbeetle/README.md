@@ -65,8 +65,8 @@ compile error.
 No `update`, no `delete`, no `transaction`: TigerBeetle records are
 immutable, so `relation.update()` and `relation.delete()` don't compile
 (`zom: adapter 'tigerbeetle' does not support `update` for relation
-'transfers'...`). Linked event chains will take the place of transactions
-(#58).
+'transfers'...`). Linked event chains take the place of transactions:
+see [Linked chains](#linked-chains).
 
 ## Inserts
 
@@ -144,6 +144,51 @@ is caught before anything is sent.
 
 A failed transfer's id stays taken. Sending it again gives
 `error.IdAlreadyFailed`, not a second try.
+
+## Linked chains
+
+TigerBeetle has no transactions. Its atomicity is a chain of events in one
+request, `flags.linked` set on every event but the last: if one fails, none
+is applied. `relation.linked()` builds one:
+
+```zig
+_ = try transfers.linked()
+    .add(.{ .id = 1, .debit_account_id = a, .credit_account_id = b, .amount = 100, .ledger = 700, .code = 1 })
+    .add(.{ .id = 2, .debit_account_id = b, .credit_account_id = c, .amount = 100, .ledger = 700, .code = 1 })
+    .commit(); // both, or neither
+```
+
+- **Flags.** Give the events without `flags.linked`. `commit` sets it on a
+  copy of every event but the last, clears it on the last, and leaves the
+  other flags (`pending`, `history`, ...) alone. `prepared(&buf)` returns
+  the batch `commit` would send.
+- **One request.** The whole chain goes in one `create_transfers` /
+  `create_accounts`. A chain longer than the cluster's batch limit is
+  `error.LinkedChainTooLong`, and nothing is sent.
+- **Capacity.** A chain holds up to `zom_tigerbeetle.linked.linked_capacity`
+  (32) events, kept in the changeset value (Tiger Style: no allocation).
+  Adding more is a bug, and asserts.
+- **Errors.** Every event but the one at fault gets `linked_event_failed`.
+  `commit` returns the cause's own error (`error.CreditAccountNotFound`,
+  `error.ExceedsCredits`, ...), and `reportTo(&failure)` says which event
+  it was:
+
+  ```zig
+  var failure: Transfers.Linked().Failure = undefined;
+  _ = transfers.linked().add(t1).add(t2).reportTo(&failure).commit() catch |err| {
+      // err == error.CreditAccountNotFound, failure.index == 1,
+      // failure.code == .credit_account_not_found
+  };
+  ```
+
+- **Spent ids.** A transient error (an account not found, an overdraft,
+  ...) spends the failing event's id: TigerBeetle answers that id with
+  `id_already_failed` from then on, so a fixed retry needs a new id. The
+  events that only got `linked_event_failed` keep theirs.
+
+`container.transaction(.tb, ...)` doesn't compile, and its message points
+here (`...does not support transactions: ...; TigerBeetle's all-or-nothing
+writes are linked event chains: `relation.linked().add(a).add(b).commit()``).
 
 ## Reads
 

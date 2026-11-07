@@ -199,8 +199,12 @@ pub fn Container(comptime spec: anytype) type {
         fn TransactionGateway(comptime name: []const u8) type {
             for (gateway_names_final, gateway_types_final) |n, G| {
                 if (!std.mem.eql(u8, n, name)) continue;
+                // A gateway without transactions may say what to use instead
+                // (`pub const transaction_hint`), e.g. zom-tigerbeetle's
+                // linked chains.
+                const hint = if (@hasDecl(G, "transaction_hint")) "; " ++ G.transaction_hint else "";
                 if (!@hasDecl(G, "transaction"))
-                    @compileError("zom: gateway '" ++ name ++ "' (adapter '" ++ G.adapter_name ++ "') does not support transactions: `container.transaction` needs the `transaction` capability (the gateway has no `transaction`)");
+                    @compileError("zom: gateway '" ++ name ++ "' (adapter '" ++ G.adapter_name ++ "') does not support transactions: `container.transaction` needs the `transaction` capability (the gateway has no `transaction`)" ++ hint);
                 return G;
             }
             @compileError("zom: container.transaction names unknown gateway '" ++ name ++ "' (gateways: " ++ knownNames(&gateway_names_final) ++ ")");

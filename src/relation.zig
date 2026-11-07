@@ -727,6 +727,26 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
             return .{ .relation = self, .tuples = tuples };
         }
 
+        /// An all-or-nothing chain of creates, for adapters whose atomicity
+        /// is one batch rather than a transaction: zom-tigerbeetle's linked
+        /// events, `transfers.linked().add(a).add(b).commit()`. It is the
+        /// dataset's `LinkedChangeset(Self)`, a changeset type the adapter
+        /// defines (with `.add` and `.commit`); a compile error naming the
+        /// adapter when its dataset has none.
+        pub fn linked(self: Self) Linked() {
+            comptime requireWhole("linked");
+            comptime Adapter.require(S, .writable, "linked");
+            return .{ .relation = self };
+        }
+
+        /// What `linked()` returns.
+        pub fn Linked() type {
+            if (!@hasDecl(DatasetT, "LinkedChangeset"))
+                @compileError("zom: adapter '" ++ Adapter.name ++ "' has no linked changesets for relation '" ++ S.name ++
+                    "' (its dataset has no `LinkedChangeset`); use `createMany`, or a transaction if the adapter has one");
+            return DatasetT.LinkedChangeset(Self);
+        }
+
         /// ROM's `posts.changeset(:create, data).associate(user)`, parent
         /// first: `posts.associate(.author, user).create(.{ ... })` sets the
         /// foreign key of the `belongsTo` association `assoc` from `parent`

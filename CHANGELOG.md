@@ -9,6 +9,19 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- zom-tigerbeetle linked chains: `relation.linked().add(a).add(b).commit()`
+  creates its events (transfers or accounts) all or nothing, in one
+  request, with `flags.linked` set on a copy of every event but the last
+  and the other flags kept. A chain holds up to 32 events, with no
+  allocation. A failure is the causing event's own error, not
+  `linked_event_failed`, and `reportTo(&failure)` gives its index and
+  result code. A chain longer than one request holds is
+  `error.LinkedChainTooLong`, unsent. ([#58])
+- Adapter contract: a dataset may define `LinkedChangeset(Rel)`, which
+  `relation.linked()` returns (a compile error naming the adapter
+  otherwise), and a gateway without transactions may declare
+  `transaction_hint`, which `container.transaction`'s compile error adds.
+  ([#58])
 - zom-tigerbeetle account history: `accounts.combine(.transfers, transfers)`
   loads each account's transfers through `get_account_transfers` (debit
   and credit side), and `.combine(.balances, balances)` its balance history
@@ -752,3 +765,4 @@ mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 [#55]: https://github.com/kamalogudah/zom/issues/55
 [#56]: https://github.com/kamalogudah/zom/issues/56
 [#57]: https://github.com/kamalogudah/zom/issues/57
+[#58]: https://github.com/kamalogudah/zom/issues/58
