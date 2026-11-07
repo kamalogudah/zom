@@ -171,84 +171,19 @@ pub fn writeSelect(
     table: []const u8,
     query: *const zom.Query(T),
 ) RenderError!void {
-    if (query.join) |*j| return writeJoinedSelect(dialect, T, Out, w, params, table, query, j);
-
+    // A joined query qualifies its columns, since the EXISTS subquery
+    // sees both tables and both may have an `id`.
+    const qual: ?[]const u8 = if (query.join == null) null else table;
     try w.writeAll("SELECT ");
-    try writeColumns(dialect, w, null, comptime columnsOf(T, Out));
+    try writeColumns(dialect, w, qual, comptime columnsOf(T, Out));
     try w.writeAll(" FROM ");
     try writeIdent(dialect, w, table);
-    try writeWhere(dialect, T, w, params, null, query, null);
-    try writeOrders(dialect, T, w, null, query);
+    try writeFilters(dialect, T, w, params, table, query);
+    try writeOrders(dialect, T, w, qual, query);
     try writePaging(dialect, w, query);
 }
 
-/// A joined `SELECT` (`relation.join(.posts)`): each row of `table` with at
-/// least one matching row of the joined table, once. Every column is
-/// qualified with its table, since both tables may have an `id`:
-///
-///     SELECT DISTINCT "users"."id", ... FROM "users"
-///     INNER JOIN "posts" ON "posts"."user_id" = "users"."id"
-///     WHERE <the query's filters> AND <the whereJoined filters>
-///     ORDER BY ... LIMIT ... OFFSET ...
-///
-/// `DISTINCT` removes the copies a parent gets from having several joined
-/// rows, so it must see every column of `T` (the primary key among them):
-/// over only a projection's columns it would also merge distinct parents
-/// that happen to agree on them, which memory does not. So a projection
-/// reads its columns from the joined rows in a derived table named after
-/// `table`, and orders and pages outside it:
-///
-///     SELECT "users"."name" FROM (SELECT DISTINCT "users"."id", ... ) AS "users" ORDER BY ...
-///
-/// The same goes for a dialect without `NULLS LAST` that orders by a
-/// nullable column, since its `x IS NULL` sort key is not in the select
-/// list, which `DISTINCT` requires.
-///
-/// A table joined to itself is aliased by the association's name. Columns
-/// whose types have no equality (`json`) can't go through `DISTINCT`.
-fn writeJoinedSelect(
-    comptime dialect: Dialect,
-    comptime T: type,
-    comptime Out: type,
-    w: *Writer,
-    params: *Params,
-    table: []const u8,
-    query: *const zom.Query(T),
-    j: *const zom.Join,
-) RenderError!void {
-    const all = comptime columnsOf(T, T);
-    // Outside `DISTINCT`, ORDER BY may use what the select list leaves out.
-    const derived = Out != T or (!dialect.nulls_order and query.order_count > 0);
-    if (derived) {
-        try w.writeAll("SELECT ");
-        try writeColumns(dialect, w, table, comptime columnsOf(T, Out));
-        try w.writeAll(" FROM (");
-    }
-    const alias = joinAlias(table, j);
-    try w.writeAll("SELECT DISTINCT ");
-    try writeColumns(dialect, w, table, all);
-    try w.writeAll(" FROM ");
-    try writeIdent(dialect, w, table);
-    try w.writeAll(" INNER JOIN ");
-    try writeIdent(dialect, w, j.table);
-    if (!std.mem.eql(u8, alias, j.table)) {
-        try w.writeAll(" AS ");
-        try writeIdent(dialect, w, alias);
-    }
-    try w.writeAll(" ON ");
-    try writeColumn(dialect, w, alias, j.target_key);
-    try w.writeAll(" = ");
-    try writeColumn(dialect, w, table, j.source_key);
-    try writeWhere(dialect, T, w, params, table, query, j);
-    if (derived) {
-        try w.writeAll(") AS ");
-        try writeIdent(dialect, w, table);
-    }
-    try writeOrders(dialect, T, w, table, query);
-    try writePaging(dialect, w, query);
-}
-
-/// What the joined table is called in a joined `SELECT`: its own name,
+/// What the joined table is called in the `EXISTS` subquery: its own name,
 /// unless that is the parent's (a self-join), then the association's.
 fn joinAlias(table: []const u8, j: *const zom.Join) []const u8 {
     if (!std.mem.eql(u8, j.table, table)) return j.table;
@@ -291,9 +226,8 @@ fn writePaging(comptime dialect: Dialect, w: *Writer, query: anytype) Writer.Err
     if (query.offset > 0) try w.print(" OFFSET {d}", .{@min(query.offset, max)});
 }
 
-/// ` WHERE a AND b ...` over the query's top-level nodes, then the joined
-/// ones of `join`; nothing when there are none. Columns of the query's
-/// tuple are qualified with `qual`, joined ones with the joined table.
+/// ` WHERE a AND b ...` over the query's top-level nodes; nothing when
+/// there are none. Columns are qualified with `qual`.
 fn writeWhere(
     comptime dialect: Dialect,
     comptime T: type,
@@ -301,7 +235,6 @@ fn writeWhere(
     params: *Params,
     qual: ?[]const u8,
     query: *const zom.Query(T),
-    join: ?*const zom.Join,
 ) RenderError!void {
     var it = query.topNodes();
     var first = true;
@@ -309,14 +242,6 @@ fn writeWhere(
         try w.writeAll(if (first) " WHERE " else " AND ");
         first = false;
         try writeNode(dialect, T, w, params, qual, query, @intCast(i));
-    }
-    const j = join orelse return;
-    const alias = joinAlias(qual.?, j);
-    var joined = j.topNodes();
-    while (joined.next()) |i| {
-        try w.writeAll(if (first) " WHERE " else " AND ");
-        first = false;
-        try writeJoinNode(dialect, w, params, alias, j, @intCast(i));
     }
 }
 
@@ -536,7 +461,7 @@ pub fn writeUpdate(
         try w.writeAll(" = ");
         try params.bind(dialect, w, c.value);
     }
-    try writeWriteWhere(dialect, T, w, params, table, query);
+    try writeFilters(dialect, T, w, params, table, query);
 }
 
 /// Renders `compileDelete`'s statement into `w`.
@@ -551,12 +476,23 @@ pub fn writeDelete(
     try checkBounded(T, query);
     try w.writeAll("DELETE FROM ");
     try writeIdent(dialect, w, table);
-    try writeWriteWhere(dialect, T, w, params, table, query);
+    try writeFilters(dialect, T, w, params, table, query);
 }
 
-/// A joined write keeps a source row only when one joined row passes every
-/// joined filter. The correlated subquery also handles joins with no filters.
-fn writeWriteWhere(
+/// The `WHERE` of a select, update or delete: the query's own filters,
+/// then for a join a correlated semi-join, so a source row is kept (once)
+/// when one joined row passes every joined filter:
+///
+///     ... WHERE <own filters> AND EXISTS (SELECT 1 FROM "posts"
+///         WHERE "posts"."user_id" = "users"."id" AND <joined filters>)
+///
+/// The same as the memory gateway's hash semi-join. Unlike `SELECT DISTINCT`
+/// over an `INNER JOIN`, it needs no equality on the selected columns
+/// (`json` has none), no derived table for a projection or a
+/// `NULLS LAST`-less sort key, and Postgres plans it as a semi-join that
+/// stops at the first matching row. A self-join aliases the joined table
+/// by the association's name. A join with no filters is just the EXISTS.
+fn writeFilters(
     comptime dialect: Dialect,
     comptime T: type,
     w: *Writer,
@@ -564,7 +500,7 @@ fn writeWriteWhere(
     table: []const u8,
     query: *const zom.Query(T),
 ) RenderError!void {
-    try writeWhere(dialect, T, w, params, if (query.join == null) null else table, query, null);
+    try writeWhere(dialect, T, w, params, if (query.join == null) null else table, query);
     const j = if (query.join) |*join| join else return;
     var own = query.topNodes();
     try w.writeAll(if (own.next() == null) " WHERE EXISTS (SELECT 1 FROM " else " AND EXISTS (SELECT 1 FROM ");

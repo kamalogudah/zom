@@ -7,6 +7,17 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ## [Unreleased]
 
+### Changed
+
+- zom-sql renders a joined select (`users.join(.posts)`) as a correlated
+  `WHERE EXISTS (SELECT 1 FROM "posts" WHERE "posts"."user_id" = "users"."id" AND ...)`
+  instead of `SELECT DISTINCT ... INNER JOIN ... ON ...`. The rows are the
+  same. Joined tables can now have `json` columns, a projection or a
+  `NULLS LAST`-less sort no longer needs a derived table, and Postgres plans
+  it as a semi-join (as fast or faster in the `EXPLAIN ANALYZE` comparison
+  recorded in plan.md §7, item 6). Select, update and delete share one
+  `WHERE` writer. (#82)
+
 ### Added
 
 - Joined `update` and `delete` use the same semi-join selection as reads.

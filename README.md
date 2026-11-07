@@ -971,22 +971,26 @@ a post that is not published, not the users with no published post.
 A join needs `supports.join`. Without it, `join` and `whereJoined` are
 compile errors on a `.fallback` relation too, since a join reads another
 dataset and can't run in memory on this one's rows. zom-pg and the memory
-gateway support it; csv and yaml do not. On zom-sql it compiles to
+gateway support it; csv and yaml do not. On zom-sql it compiles to a
+correlated semi-join
 
 ```sql
-SELECT DISTINCT "users"."id", "users"."name", ... FROM "users"
-INNER JOIN "posts" ON "posts"."user_id" = "users"."id"
-WHERE "posts"."published" = $1 ORDER BY "users"."name" ASC
+SELECT "users"."id", "users"."name", ... FROM "users"
+WHERE EXISTS (SELECT 1 FROM "posts"
+  WHERE "posts"."user_id" = "users"."id" AND "posts"."published" = $1)
+ORDER BY "users"."name" ASC
 ```
 
-with every column qualified by its table. The memory gateway runs a hash
+with every column qualified by its table. Each user comes back once with
+no `DISTINCT`, so columns without equality (`json`) and projections work
+as on an unjoined query. The memory gateway runs a hash
 semi-join: the matching posts' keys go into a set, and a user is kept when
 its key is in it, in O(users + posts).
 
 A query holds one join: joining the same association again changes
 nothing, and joining a second one panics, as does `whereJoined` without
 the `join`. `update` and `delete` on a joined relation affect each matching
-source row once. The SQL compiler uses a correlated `EXISTS` subquery;
+source row once. The SQL compiler uses the same `EXISTS` subquery;
 memory snapshots the matching rows before changing them.
 
 #### Associated creates

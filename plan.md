@@ -291,8 +291,9 @@ for rom.
   replacing today's O(n·m) `combineMany`.
 - Adapters that support `join` (SQL) can also offer `users.join(.posts)`.
   Done: `join` / `whereJoined` on the relation (compile error without
-  `supports.join`), `SELECT DISTINCT ... INNER JOIN` in zom-sql, and a hash
-  semi-join in the memory gateway, checked by `zom.lint`.
+  `supports.join`), a correlated `WHERE EXISTS` in zom-sql (decision 6;
+  first rendered as `SELECT DISTINCT ... INNER JOIN`), and a hash semi-join
+  in the memory gateway, checked by `zom.lint`.
 - Associated changesets (rom-changeset's `associate`) set foreign keys on
   create.
 - **Done when** combine works the same on memory, csv and pg, and
@@ -417,3 +418,41 @@ Later decisions:
      optimisation behind a new adapter capability, left for later (#87).
    - *Not a compile error:* `limit` is a runtime value, and with this
      meaning nothing needs refusing.
+
+6. **A join renders as a correlated `WHERE EXISTS`, not `SELECT DISTINCT`
+   over an `INNER JOIN`** (#82, 2026-11-07). `users.join(.posts)
+   .whereJoined(.posts, .published, .eq, true)` is
+   `SELECT "users"."id", ... FROM "users" WHERE EXISTS (SELECT 1 FROM
+   "posts" WHERE "posts"."user_id" = "users"."id" AND "posts"."published" = $1)`,
+   the same predicate joined `update` / `delete` already used (#81).
+   - *Why:* it is the semi-join the memory gateway computes, so it needs no
+     deduplication. `DISTINCT` compares whole rows, so it fails outright
+     on a column with no equality (`json`: "could not identify an equality
+     operator"), and it needed a derived table for a projection and for a
+     dialect without `NULLS LAST` ordering by a nullable column. Both are
+     gone. Select, update and delete now share one `WHERE` writer.
+   - *Evidence:* `EXPLAIN ANALYZE` on Postgres 17, 100k users and 1M posts
+     (about 10 per user, index on `posts.user_id`), times after a warm run:
+
+     | query | DISTINCT + JOIN | EXISTS | EXISTS plan |
+     |---|---|---|---|
+     | published posts, `ORDER BY id LIMIT 20` | 4.0 ms | 3.9 ms | Merge Semi Join |
+     | selective parent filter (`id < 100`) | 10.1 ms | 2.5 ms | Nested Loop Semi Join |
+     | every user with a published post (100k rows) | 1244 ms | 756 ms | Hash Join over the aggregated keys |
+     | the same, projected to `name`, `ORDER BY name LIMIT 20` | 1287 ms | 704 ms | the same, no Subquery Scan |
+     | very selective joined filter (`likes >= 499`, 200 rows) | 143 ms | 160 ms | Hash Semi Join |
+
+     `DISTINCT` sorts or hashes every joined copy of a parent row, which
+     is what costs it. `EXISTS` stops at the first match per parent. The one
+     case where it was slower, by 10 to 20% over two runs, is a tiny joined
+     set: the planner hashes the 2,000 matching posts and then scans every
+     user, where `DISTINCT` probes the users index per post. Both are
+     dominated by the scan of `posts`, and it doesn't outweigh the rest.
+   - *More than one join per query:* worth supporting, and with `EXISTS`
+     it is one more `AND EXISTS (...)` per join (one more key set in
+     memory), each for its own joined row. `users.join(.posts).join(.comments)`
+     then means users with a post and with a comment, not with a post
+     that has a comment (that is a nested join through `posts`, which is a
+     separate question). It is left for later (#88): `Query.join` becomes a
+     small fixed array of `Join`s, and `whereJoined` finds its join by
+     association. Until then a second join still panics.
