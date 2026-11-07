@@ -185,11 +185,22 @@ through theirs, as zom-pg imports `zom_sql`), never by relative path into
 move to a repo of its own later without code changes, if it ever needs its
 own release schedule (see plan.md, section 3.2).
 
-To add an adapter: create `adapters/<name>/src/root.zig`, add one
-`addAdapter` call in the root `build.zig` (with the modules it imports),
-and add `adapters/<name>/src` to `.paths` in `build.zig.zon`. A third-party
-adapter can still be its own package: depend on zom and import
-`dep.module("zom")` the same way.
+To add an adapter:
+
+1. Create `adapters/<name>/src/root.zig` and `adapters/<name>/README.md`.
+2. Add one `addAdapter` call in the root `build.zig` (with the modules it
+   imports), and add `adapters/<name>/src` to `.paths` in `build.zig.zon`.
+3. List it everywhere the adapters are listed, in the same PR:
+   - the [Adapters](../README.md#adapters) table in the root README (and
+     the Install section, if it needs a build option such as `.pg = true`);
+   - the comparison table, "Choosing one" and "Testing them" in
+     [adapters/README.md](../adapters/README.md);
+   - the file map in section 2 of [contributing.md](contributing.md);
+   - [roadmap.md](roadmap.md), and an `### Added` entry in
+     [CHANGELOG.md](../CHANGELOG.md).
+
+A third-party adapter can still be its own package: depend on zom and
+import `dep.module("zom")` the same way.
 
 A file adapter (one that loads files into `zom.memory.Store`) doesn't write
 a gateway at all. It writes a `Format` with `load` and `dump`, and

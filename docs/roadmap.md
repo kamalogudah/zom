@@ -18,4 +18,6 @@ rom-yaml:
    instrumentation plugins, pagination, and the
    [Postgres example](postgres-walkthrough.md#a-repository-and-a-transaction-on-postgres).*
 6. `zom-tigerbeetle` on the native Zig client: immutable accounts and
-   transfers, batched writes.
+   transfers, batched writes. *Done: `adapters/tigerbeetle`.*
+7. `zom-sqlite` on the SQLite amalgamation, compiled in, on zom-sql's
+   `.sqlite` dialect. *Done in 0.16.1: `adapters/sqlite`.*

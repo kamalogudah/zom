@@ -44,6 +44,9 @@ links to the topics below.
 | `adapters/csv/` | The `zom_csv` module, a CSV `Format` for `zom.file` | Modules and imports in `build.zig`, `b.dependency(...).module(...)` |
 | `adapters/sql/` | The `zom_sql` module: compiles a query to SQL for a comptime `Dialect` | Comptime struct parameters, rendering into a `*std.Io.Writer`, recursion with an explicit error set, multiline string literals in tests |
 | `adapters/yaml/` | The `zom_yaml` module: a YAML-subset parser and writer, and a YAML `Format` for `zom.file` | A hand-written line parser, arenas, escaping that round-trips |
+| `adapters/pg/` | The `zom_pg` module: a PostgreSQL gateway on pg.zig, plus schema checks and `zig build infer` | Lazy dependencies, connection pools, decoding rows with `@typeInfo` |
+| `adapters/sqlite/` | The `zom_sqlite` module: a SQLite gateway on the amalgamation, compiled into the module | Compiling C with `addCSourceFile`, `translate-c`, calling a C API from Zig |
+| `adapters/tigerbeetle/` | The `zom_tigerbeetle` module: a gateway for TigerBeetle accounts and transfers | Linking a prebuilt C client, `u128` ids, mapping result codes to errors |
 
 ## 3. Zig concepts used everywhere in zom
 

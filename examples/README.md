@@ -30,9 +30,10 @@ Every example has the same three parts in its `build.zig`:
    const zom_csv = zom_dep.module("zom_csv");
    ```
 
-   zom-pg and zom-tigerbeetle need a third-party dependency (pg.zig, or
-   TigerBeetle's prebuilt C client). They only exist when you turn them
-   on, with `.pg = true` or `.tigerbeetle = true`, so an application that
+   zom-pg, zom-sqlite and zom-tigerbeetle need a third-party dependency
+   (pg.zig, the SQLite amalgamation, or TigerBeetle's prebuilt C client).
+   They only exist when you turn them on, with `.pg = true`,
+   `.sqlite = true` or `.tigerbeetle = true`, so an application that
    doesn't use them never fetches those dependencies.
 
 2. **A `run` step.** It builds the executable and runs it, passing on
