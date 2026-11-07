@@ -157,7 +157,7 @@ pub const Format = struct {
     /// Fills `columns[field] = cell index` from the header, and reports every
     /// problem with it in one message.
     fn mapHeader(comptime S: type, ctx: zom.file.LoadContext(Format), header: csv.Row, columns: []?usize) !void {
-        const fields = @typeInfo(S.Tuple).@"struct".fields;
+        const info = @typeInfo(S.Tuple).@"struct";
         const index = comptime zom.file.fieldIndex(S.Tuple);
         const ignore = ctx.config.unknown_columns == .ignore;
 
@@ -174,9 +174,9 @@ pub const Format = struct {
             }
             columns[field] = cell;
         }
-        inline for (fields, 0..) |f, i| {
-            if (comptime zom.file.isRequired(f)) {
-                if (columns[i] == null) problems.add("missing column \"{s}\"", .{f.name});
+        inline for (info.field_names, info.field_types, info.field_attrs, 0..) |field_name, F, attrs, i| {
+            if (comptime zom.file.isRequired(F, attrs)) {
+                if (columns[i] == null) problems.add("missing column \"{s}\"", .{field_name});
             }
         }
         if (problems.finish()) return error.SchemaMismatch;
@@ -236,11 +236,11 @@ fn writeRows(
     allocator: Allocator,
     options: WriteOptions,
 ) WriteError!void {
-    const fields = @typeInfo(T).@"struct".fields;
+    const fields = @typeInfo(T).@"struct".field_names;
     const csv_options: csv.Options = .{ .separator = options.separator, .line_ending = options.line_ending };
     const names = comptime blk: {
         var n: [fields.len][]const u8 = undefined;
-        for (fields, 0..) |f, i| n[i] = f.name;
+        for (fields, 0..) |f, i| n[i] = f;
         break :blk n;
     };
 
@@ -254,7 +254,7 @@ fn writeRows(
     for (rows) |row| {
         text.clearRetainingCapacity();
         inline for (fields, 0..) |f, i| {
-            zom.codec.encodeField(&text.writer, @field(row, f.name), .{ .null_text = options.null_text }) catch |err| switch (err) {
+            zom.codec.encodeField(&text.writer, @field(row, f), .{ .null_text = options.null_text }) catch |err| switch (err) {
                 // `text` only fails when it cannot grow.
                 error.WriteFailed => return error.OutOfMemory,
                 else => |e| return e,

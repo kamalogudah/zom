@@ -117,7 +117,7 @@ pub fn verify(self: *Gateway, comptime S: type, diagnostics: ?*Diagnostics) !voi
 }
 
 fn check(self: *Gateway, comptime S: type, diag: *Diagnostics, scratch: Allocator) !void {
-    const fields = @typeInfo(S.Tuple).@"struct".fields;
+    const info = @typeInfo(S.Tuple).@"struct";
     const table = S.name;
 
     const conn = try self.source.acquire();
@@ -128,19 +128,19 @@ fn check(self: *Gateway, comptime S: type, diag: *Diagnostics, scratch: Allocato
     const namespace = namespaces[0];
 
     const columns = try catalog.queryColumns(conn, scratch, namespace, table);
-    inline for (fields) |f| {
-        const zig = @typeName(f.type);
-        const optional = @typeInfo(f.type) == .optional;
-        if (catalog.findColumn(columns, f.name)) |col| {
-            if (!accepts(f.type, col)) {
-                try diag.add(.{ .table = table, .column = f.name, .problem = .{ .wrong_type = .{ .zig = zig, .pg = try diag.dupe(col.typeName()) } } });
+    inline for (info.field_names, info.field_types) |name, F| {
+        const zig = @typeName(F);
+        const optional = @typeInfo(F) == .optional;
+        if (catalog.findColumn(columns, name)) |col| {
+            if (!accepts(F, col)) {
+                try diag.add(.{ .table = table, .column = name, .problem = .{ .wrong_type = .{ .zig = zig, .pg = try diag.dupe(col.typeName()) } } });
             } else if (col.nullable and !optional) {
-                try diag.add(.{ .table = table, .column = f.name, .problem = .{ .nullable_column = .{ .zig = zig } } });
+                try diag.add(.{ .table = table, .column = name, .problem = .{ .nullable_column = .{ .zig = zig } } });
             } else if (!col.nullable and optional) {
-                try diag.add(.{ .table = table, .column = f.name, .problem = .{ .not_null_column = .{ .zig = zig } } });
+                try diag.add(.{ .table = table, .column = name, .problem = .{ .not_null_column = .{ .zig = zig } } });
             }
         } else {
-            try diag.add(.{ .table = table, .column = f.name, .problem = .{ .missing_column = .{ .zig = zig } } });
+            try diag.add(.{ .table = table, .column = name, .problem = .{ .missing_column = .{ .zig = zig } } });
         }
     }
 

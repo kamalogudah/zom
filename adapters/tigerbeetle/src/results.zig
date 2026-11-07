@@ -6,7 +6,7 @@
 //! `tb_client.h`, so they always match the linked client: `TB_CREATE_TRANSFER_EXCEEDS_CREDITS`
 //! is `.exceeds_credits`, with the same value.
 //!
-//! Zig can't build an error set at compile time (0.16 has `@Enum`, `@Struct`
+//! Zig can't build an error set at compile time (it has `@Enum`, `@Struct`
 //! and `@Union`, but nothing for error sets), so `CreateAccountError` and
 //! `CreateTransferError` are written out below: `.exceeds_credits` is
 //! `error.ExceedsCredits`. `errorOf` maps a code to its error by name, and it
@@ -124,13 +124,14 @@ pub const OtherError = error{ DuplicatePrimaryKey, UnknownResult };
 pub fn errorOf(comptime Code: type, comptime E: type, code: Code) ?(E || OtherError) {
     @setEvalBranchQuota(100_000);
     if (code == .created) return null;
-    inline for (@typeInfo(Code).@"enum".fields) |f| {
-        if (comptime std.mem.eql(u8, f.name, "created")) continue;
-        if (@intFromEnum(code) == f.value) {
-            if (comptime isExists(f.name)) return error.DuplicatePrimaryKey;
-            const err_name = comptime pascal(f.name);
+    const info = @typeInfo(Code).@"enum";
+    inline for (info.field_names, info.field_values) |name, value| {
+        if (comptime std.mem.eql(u8, name, "created")) continue;
+        if (@backingInt(code) == value) {
+            if (comptime isExists(name)) return error.DuplicatePrimaryKey;
+            const err_name = comptime pascal(name);
             if (comptime !hasError(E, err_name))
-                @compileError("zom-tigerbeetle: result code `." ++ f.name ++ "` of " ++ setName(Code) ++
+                @compileError("zom-tigerbeetle: result code `." ++ name ++ "` of " ++ setName(Code) ++
                     "Result has no error: add `" ++ err_name ++ "` to " ++ setName(Code) ++ "Error in results.zig");
             return @field(E, err_name);
         }
@@ -148,7 +149,7 @@ fn isExists(comptime name: []const u8) bool {
 }
 
 fn hasError(comptime E: type, comptime name: []const u8) bool {
-    for (@typeInfo(E).error_set.?) |e| if (std.mem.eql(u8, e.name, name)) return true;
+    for (@typeInfo(E).error_set.error_names.?) |e| if (std.mem.eql(u8, e, name)) return true;
     return false;
 }
 
@@ -161,11 +162,11 @@ fn CodeEnum(comptime prefix: []const u8) type {
         @setEvalBranchQuota(100_000);
         var names: []const []const u8 = &.{};
         var values: []const u32 = &.{};
-        for (@typeInfo(c).@"struct".decls) |decl| {
-            if (!std.mem.startsWith(u8, decl.name, prefix)) continue;
-            const value = @field(c, decl.name);
+        for (@typeInfo(c).@"struct".decl_names) |decl| {
+            if (!std.mem.startsWith(u8, decl, prefix)) continue;
+            const value = @field(c, decl);
             if (@typeInfo(@TypeOf(value)) != .int) continue;
-            names = names ++ .{lower(decl.name[prefix.len..])};
+            names = names ++ .{lower(decl[prefix.len..])};
             values = values ++ .{@as(u32, value)};
         }
         if (names.len == 0) @compileError("zom-tigerbeetle: tb_client.h has no " ++ prefix ++ "* constants");
@@ -198,30 +199,31 @@ fn pascal(comptime s: []const u8) []const u8 {
 const testing = std.testing;
 
 test "the codes are the header's" {
-    try testing.expectEqual(c.TB_CREATE_ACCOUNT_CREATED, @intFromEnum(CreateAccountResult.created));
-    try testing.expectEqual(c.TB_CREATE_ACCOUNT_EXISTS, @intFromEnum(CreateAccountResult.exists));
-    try testing.expectEqual(c.TB_CREATE_TRANSFER_EXCEEDS_CREDITS, @intFromEnum(CreateTransferResult.exceeds_credits));
-    try testing.expectEqual(c.TB_CREATE_TRANSFER_LINKED_EVENT_FAILED, @intFromEnum(CreateTransferResult.linked_event_failed));
+    try testing.expectEqual(c.TB_CREATE_ACCOUNT_CREATED, @backingInt(CreateAccountResult.created));
+    try testing.expectEqual(c.TB_CREATE_ACCOUNT_EXISTS, @backingInt(CreateAccountResult.exists));
+    try testing.expectEqual(c.TB_CREATE_TRANSFER_EXCEEDS_CREDITS, @backingInt(CreateTransferResult.exceeds_credits));
+    try testing.expectEqual(c.TB_CREATE_TRANSFER_LINKED_EVENT_FAILED, @backingInt(CreateTransferResult.linked_event_failed));
 }
 
 fn expectMapping(comptime Code: type, comptime E: type) !void {
     @setEvalBranchQuota(100_000);
     // Every code maps (errorOf would not compile otherwise)...
     var mapped: usize = 0;
-    inline for (@typeInfo(Code).@"enum".fields) |f| {
-        const code: Code = @enumFromInt(f.value);
+    const info = @typeInfo(Code).@"enum";
+    inline for (info.field_names, info.field_values) |name, value| {
+        const code: Code = @fromBackingInt(value);
         const err = errorOf(Code, E, code);
-        if (std.mem.eql(u8, f.name, "created")) {
+        if (std.mem.eql(u8, name, "created")) {
             try testing.expectEqual(null, err);
-        } else if (comptime isExists(f.name)) {
+        } else if (comptime isExists(name)) {
             try testing.expectEqual(error.DuplicatePrimaryKey, err.?);
         } else {
-            try testing.expectEqualStrings(comptime pascal(f.name), @errorName(err.?));
+            try testing.expectEqualStrings(comptime pascal(name), @errorName(err.?));
             mapped += 1;
         }
     }
     // ...and every error is some code's, so none is left over.
-    try testing.expectEqual(@typeInfo(E).error_set.?.len, mapped);
+    try testing.expectEqual(@typeInfo(E).error_set.error_names.?.len, mapped);
 }
 
 test "every result code has an error, and every error a code" {
@@ -230,6 +232,6 @@ test "every result code has an error, and every error a code" {
 }
 
 test "a code the client doesn't know is UnknownResult" {
-    const code: CreateTransferResult = @enumFromInt(9999);
+    const code: CreateTransferResult = @fromBackingInt(9999);
     try testing.expectEqual(error.UnknownResult, errorOf(CreateTransferResult, CreateTransferError, code).?);
 }

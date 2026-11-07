@@ -39,7 +39,7 @@ jobs:
 
       - uses: mlugg/setup-zig@v2.2.1
         with:
-          version: 0.16.0
+          version: 0.17.1
           use-cache: false
 
       - name: Cache Zig
@@ -51,10 +51,10 @@ jobs:
             zig-pkg
             examples/pg_repo/.zig-cache
             examples/pg_repo/zig-pkg
-          key: pg-zig-0.16.0-${{ runner.os }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
+          key: pg-zig-0.17.1-${{ runner.os }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
           restore-keys: |
-            pg-zig-0.16.0-${{ runner.os }}-${{ hashFiles('build.zig.zon') }}-
-            pg-zig-0.16.0-${{ runner.os }}-
+            pg-zig-0.17.1-${{ runner.os }}-${{ hashFiles('build.zig.zon') }}-
+            pg-zig-0.17.1-${{ runner.os }}-
 
       - name: zig build test-pg (against Postgres)
         env:

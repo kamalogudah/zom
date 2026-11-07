@@ -29,7 +29,7 @@ pub fn build(b: *std.Build) void {
     // The cluster comes from TB_ADDRESSES, or from the first argument:
     // `zig build run -- 3000`.
     const run = b.addRunArtifact(exe);
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     const run_step = b.step("run", "Open two accounts, post transfers and read the balances (needs TB_ADDRESSES)");
     run_step.dependOn(&run.step);
 

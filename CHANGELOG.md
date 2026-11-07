@@ -7,6 +7,32 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ## [Unreleased]
 
+zom now builds with **Zig 0.17.1** (`minimum_zig_version = "0.17.1"`), and
+its version moves to 0.17.0 to follow it. Zig 0.16 is no longer supported:
+stay on the `v0.16.x` tags for it. Nothing changes in how zom behaves; the
+test suite is the same as on 0.16.
+
+### Changed
+
+- **Breaking:** `zom.file.isRequired` takes a field's type and attributes,
+  `isRequired(F, attrs)`, instead of a `std.builtin.Type.StructField`,
+  which Zig 0.17 removed (`@typeInfo` gives a struct's fields as the
+  parallel arrays `field_names`, `field_types` and `field_attrs`). A file
+  format of your own calls it as
+  `inline for (info.field_names, info.field_types, info.field_attrs) |name, F, attrs| ... zom.file.isRequired(F, attrs)`.
+- zom-sqlite and zom-tigerbeetle translate their C headers with the
+  [translate-c](https://codeberg.org/ziglang/translate-c) package (2.0.1)
+  instead of the deprecated `b.addTranslateC`. It is a lazy dependency,
+  fetched only with `.sqlite = true` or `.tigerbeetle = true`, and the same
+  commit pg.zig uses, so the three share one copy.
+- zom-pg pins pg.zig's `master` (`a9fb170`), which supports Zig 0.17, in
+  place of its `zig-0.16.0` branch.
+- `build.zig`: `zig build infer -- <args>` passes the arguments through
+  `addPassthruArgs` (Zig 0.17 no longer shows them to `build.zig`), and the
+  compile-error cases are registered as configure-time inputs, so adding or
+  editing a case under `tests/compile_errors/` reconfigures the build.
+- `-Doptimize` takes Zig 0.17's names: `debug`, `safe`, `fast`, `small`.
+
 ## [0.16.1] - 2026-11-07
 
 ### Added

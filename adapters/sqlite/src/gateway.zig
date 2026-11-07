@@ -234,7 +234,7 @@ pub const Conn = struct {
     prepared: usize = 0,
 
     fn open(allocator: Allocator, config: Gateway.Config) Gateway.Error!Conn {
-        const path = try allocator.dupeZ(u8, config.path);
+        const path = try allocator.dupeSentinel(u8, config.path, 0);
         defer allocator.free(path);
         const flags: c_int = c.SQLITE_OPEN_URI | c.SQLITE_OPEN_NOMUTEX | c.SQLITE_OPEN_EXRESCODE | switch (config.mode) {
             .read_write_create => c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE,
@@ -283,7 +283,7 @@ pub const Conn = struct {
     }
 
     fn exec(self: *Conn, sql: []const u8) Gateway.Error!void {
-        const z = try self.allocator.dupeZ(u8, sql);
+        const z = try self.allocator.dupeSentinel(u8, sql, 0);
         defer self.allocator.free(z);
         const rc = c.sqlite3_exec(self.db, z.ptr, null, null, null);
         if (rc != c.SQLITE_OK) return self.fail(rc);
@@ -504,7 +504,7 @@ fn SqliteDataset(comptime S: type) type {
             };
             defer compiled.deinit(a);
             // Counting the SELECT keeps its limit and offset.
-            const sql = try std.fmt.allocPrint(a, "SELECT COUNT(*) FROM ({s}) AS \"zom_count\"", .{compiled.sql});
+            const sql = try a.print("SELECT COUNT(*) FROM ({s}) AS \"zom_count\"", .{compiled.sql});
             defer a.free(sql);
 
             const conn = self.conn;
@@ -695,15 +695,15 @@ fn record(db: *c.sqlite3, rc: c_int) void {
 /// For each field of `P`, the index of its column in the statement's
 /// result, found by name: `RETURNING *` lists the table's columns in table
 /// order, which need not be the struct's.
-fn columnMap(comptime P: type, stmt: *c.sqlite3_stmt) ![@typeInfo(P).@"struct".fields.len]c_int {
-    var columns: [@typeInfo(P).@"struct".fields.len]c_int = undefined;
+fn columnMap(comptime P: type, stmt: *c.sqlite3_stmt) ![@typeInfo(P).@"struct".field_names.len]c_int {
+    var columns: [@typeInfo(P).@"struct".field_names.len]c_int = undefined;
     const n = c.sqlite3_column_count(stmt);
-    inline for (@typeInfo(P).@"struct".fields, &columns) |f, *col| {
+    inline for (@typeInfo(P).@"struct".field_names, &columns) |field_name, *col| {
         col.* = for (0..@intCast(n)) |i| {
             const name = c.sqlite3_column_name(stmt, @intCast(i)) orelse return error.OutOfMemory;
-            if (std.mem.eql(u8, std.mem.span(name), f.name)) break @intCast(i);
+            if (std.mem.eql(u8, std.mem.span(name), field_name)) break @intCast(i);
         } else {
-            log.debug("the result has no column '{s}'", .{f.name});
+            log.debug("the result has no column '{s}'", .{field_name});
             return error.MissingColumn;
         };
     }
@@ -713,20 +713,20 @@ fn columnMap(comptime P: type, stmt: *c.sqlite3_stmt) ![@typeInfo(P).@"struct".f
 /// Decodes the current row into `P`, copying strings into `allocator`. On
 /// error the strings copied so far are freed.
 fn decodeRow(comptime P: type, stmt: *c.sqlite3_stmt, columns: []const c_int, allocator: Allocator) !P {
-    const fields = @typeInfo(P).@"struct".fields;
+    const info = @typeInfo(P).@"struct";
     var out: P = undefined;
     var done: usize = 0;
-    errdefer inline for (fields, 0..) |f, i| {
-        if (comptime zom.strings.isStringField(f.type)) {
-            if (i < done) switch (@typeInfo(f.type)) {
-                .optional => if (@field(out, f.name)) |s| allocator.free(s),
-                else => allocator.free(@field(out, f.name)),
+    errdefer inline for (info.field_names, info.field_types, 0..) |field_name, F, i| {
+        if (comptime zom.strings.isStringField(F)) {
+            if (i < done) switch (@typeInfo(F)) {
+                .optional => if (@field(out, field_name)) |s| allocator.free(s),
+                else => allocator.free(@field(out, field_name)),
             };
         }
     };
-    inline for (fields, 0..) |f, i| {
-        @field(out, f.name) = decodeField(f.type, stmt, columns[i], allocator) catch |err| {
-            log.debug("column '{s}' (type {d}) could not be read as {s}: {t}", .{ f.name, c.sqlite3_column_type(stmt, columns[i]), @typeName(f.type), err });
+    inline for (info.field_names, info.field_types, 0..) |field_name, F, i| {
+        @field(out, field_name) = decodeField(F, stmt, columns[i], allocator) catch |err| {
+            log.debug("column '{s}' (type {d}) could not be read as {s}: {t}", .{ field_name, c.sqlite3_column_type(stmt, columns[i]), @typeName(F), err });
             return err;
         };
         done = i + 1;
@@ -770,7 +770,7 @@ fn decodeField(comptime F: type, stmt: *c.sqlite3_stmt, col: c_int, allocator: A
             if (comptime !zom.strings.isFreeableString(F)) @compileError("zom-sqlite: string attributes must be slices such as []const u8, found " ++ @typeName(F));
             if (class != c.SQLITE_TEXT and class != c.SQLITE_BLOB) return error.ColumnTypeMismatch;
             const raw = columnBytes(stmt, col, class);
-            if (comptime @typeInfo(F).pointer.sentinel() != null) return allocator.dupeZ(u8, raw);
+            if (comptime @typeInfo(F).pointer.sentinel() != null) return allocator.dupeSentinel(u8, raw, 0);
             return allocator.dupe(u8, raw);
         },
         else => @compileError("zom-sqlite: unsupported attribute type " ++ @typeName(F)),

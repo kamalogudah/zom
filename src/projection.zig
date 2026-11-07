@@ -32,16 +32,14 @@ pub fn Project(comptime T: type, comptime fields: anytype) type {
 fn Projection(comptime T: type, comptime n: usize, comptime fields: [n]std.meta.FieldEnum(T)) type {
     var names: [n][]const u8 = undefined;
     var types: [n]type = undefined;
-    var attrs: [n]std.builtin.Type.StructField.Attributes = undefined;
+    var attrs: [n]std.lang.Type.Struct.FieldAttributes = undefined;
+    const info = @typeInfo(T).@"struct";
     for (fields, 0..) |f, i| {
-        const sf = std.meta.fieldInfo(T, f);
-        names[i] = sf.name;
-        types[i] = sf.type;
-        attrs[i] = .{
-            .@"comptime" = sf.is_comptime,
-            .@"align" = sf.alignment,
-            .default_value_ptr = sf.default_value_ptr,
-        };
+        // A `FieldEnum` value is the field's index.
+        const index = @backingInt(f);
+        names[i] = info.field_names[index];
+        types[i] = info.field_types[index];
+        attrs[i] = info.field_attrs[index];
     }
     const names_final = names;
     const types_final = types;
@@ -90,6 +88,6 @@ fn notAName(comptime f: anytype) noreturn {
 
 fn fieldList(comptime T: type) []const u8 {
     var out: []const u8 = "";
-    for (@typeInfo(T).@"struct".fields, 0..) |f, i| out = out ++ (if (i == 0) "" else ", ") ++ f.name;
+    for (@typeInfo(T).@"struct".field_names, 0..) |name, i| out = out ++ (if (i == 0) "" else ", ") ++ name;
     return out;
 }

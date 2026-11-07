@@ -266,7 +266,7 @@ pub fn Adapter(comptime G: type) type {
         pub fn insertTakesAllocator(comptime S: type) bool {
             const D = Dataset(S);
             if (!@hasDecl(D, "insert")) return false;
-            return @typeInfo(@TypeOf(D.insert)).@"fn".params.len == 3;
+            return @typeInfo(@TypeOf(D.insert)).@"fn".param_types.len == 3;
         }
 
         pub fn has(comptime S: type, comptime cap: Capability) bool {
@@ -404,10 +404,11 @@ fn checkDataset(comptime G: type, comptime S: type) void {
         }
     }
     if (ownership == .caller) {
-        for (@typeInfo(T).@"struct".fields) |f| {
-            if (strings.isStringField(f.type) and !strings.isFreeableString(f.type))
-                problems = problems ++ "\n  - `strings` is `.caller`, so '" ++ f.name ++ "' must be a slice such as []const u8, found `" ++
-                    @typeName(f.type) ++ "`";
+        const info = @typeInfo(T).@"struct";
+        for (info.field_names, info.field_types) |name, F| {
+            if (strings.isStringField(F) and !strings.isFreeableString(F))
+                problems = problems ++ "\n  - `strings` is `.caller`, so '" ++ name ++ "' must be a slice such as []const u8, found `" ++
+                    @typeName(F) ++ "`";
         }
     }
     const insert_plain: Signature = .{
@@ -515,10 +516,10 @@ fn fnName(comptime F: type) []const u8 {
         else => return @typeName(F),
     };
     var out: []const u8 = "fn (";
-    for (f.params, 0..) |p, i| {
+    for (f.param_types, 0..) |param, i| {
         if (i > 0) out = out ++ ", ";
-        out = out ++ if (p.is_generic) "comptime " else "";
-        out = out ++ if (p.type) |P| @typeName(P) else "anytype";
+        // Null is `anytype`, or a type that depends on an earlier parameter.
+        out = out ++ if (param) |P| @typeName(P) else "anytype";
     }
     out = out ++ ") ";
     const R = f.return_type orelse return out ++ "anytype";
@@ -537,15 +538,15 @@ fn matches(comptime Owner: type, comptime F: type, comptime sig: Signature) bool
         else => return false,
     };
     const skip: usize = @intFromBool(sig.self);
-    if (f.params.len < skip) return false;
+    if (f.param_types.len < skip) return false;
     if (sig.self) {
-        if (f.params[0].type) |P| if (P != Owner and P != *Owner and P != *const Owner) return false;
+        if (f.param_types[0]) |P| if (P != Owner and P != *Owner and P != *const Owner) return false;
     }
     if (sig.params) |params| {
-        if (f.params.len != skip + params.len) return false;
-        for (params, f.params[skip..]) |want, p| {
+        if (f.param_types.len != skip + params.len) return false;
+        for (params, f.param_types[skip..]) |want, param| {
             const W = want orelse continue;
-            const P = p.type orelse continue; // anytype
+            const P = param orelse continue; // anytype
             if (P != W) return false;
         }
     }

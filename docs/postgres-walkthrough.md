@@ -131,7 +131,7 @@ prints the same thing.
 
 ## Debugging: error return traces
 
-When `main` returns an error, a Debug or ReleaseSafe build prints the error
+When `main` returns an error, a `debug` or `safe` build prints the error
 and its **error return trace**: every `try` the error passed through on its
 way out, innermost first. Run the example before applying `schema.sql`:
 
@@ -160,8 +160,8 @@ zom-pg and pg.zig as well as your code. A wrong password or a stopped server
 gives `ConnectionFailed`, with a trace down to the socket `connect` in
 pg.zig. Some tips:
 
-- The trace is only kept in Debug and ReleaseSafe builds. `zig build run
-  -Doptimize=ReleaseFast` prints just `error: SchemaMismatch`.
+- The trace is only kept in `debug` and `safe` builds. `zig build run
+  -Doptimize=fast` prints just `error: SchemaMismatch`.
 - `catch |err| switch (err)` is where you decide which errors are expected
   (here `error.DuplicatePrimaryKey`) and pass the others on with
   `else => return err`, which keeps the trace going.

@@ -277,16 +277,17 @@ test "encodeField floats: decimal for everyday magnitudes, scientific outside" {
 /// Field-by-field equality: strings by content, floats by bits (so -0 and
 /// nan compare as themselves).
 fn expectRowEqual(comptime T: type, want: T, got: T) !void {
-    inline for (@typeInfo(T).@"struct".fields) |f| {
-        const w = @field(want, f.name);
-        const g = @field(got, f.name);
-        errdefer std.debug.print("field {s}: want {any}, got {any}\n", .{ f.name, w, g });
-        switch (@typeInfo(f.type)) {
+    const info = @typeInfo(T).@"struct";
+    inline for (info.field_names, info.field_types) |name, F| {
+        const w = @field(want, name);
+        const g = @field(got, name);
+        errdefer std.debug.print("field {s}: want {any}, got {any}\n", .{ name, w, g });
+        switch (@typeInfo(F)) {
             .optional => |o| {
                 try testing.expectEqual(w == null, g == null);
                 if (w) |wv| try expectValueEqual(o.child, wv, g.?);
             },
-            else => try expectValueEqual(f.type, w, g),
+            else => try expectValueEqual(F, w, g),
         }
     }
 }
@@ -305,7 +306,7 @@ fn roundTrip(comptime T: type, row: T, opts: codec.Options, sep: []const u8) !vo
     defer out.deinit();
     try codec.encodeRow(&out.writer, T, row, opts, sep);
 
-    var cells: [@typeInfo(T).@"struct".fields.len][]const u8 = undefined;
+    var cells: [@typeInfo(T).@"struct".field_names.len][]const u8 = undefined;
     var it = std.mem.splitSequence(u8, out.written(), sep);
     var n: usize = 0;
     while (it.next()) |cell| : (n += 1) cells[n] = cell;

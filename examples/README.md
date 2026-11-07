@@ -13,7 +13,7 @@ build and run each one from inside its directory with `zig build run`, and
 | [double_entry](#double_entry-a-ledger-on-tigerbeetle) | [zom-tigerbeetle](../adapters/tigerbeetle/README.md) | a TigerBeetle cluster | tigerbeetle.yml |
 | [readme.zig](#readmezig-the-docs-code-blocks) | `zom.memory` | nothing | `zig build test` at the repo root |
 
-You need Zig 0.16.0. The examples are not in zom's `.paths`, so a project
+You need Zig 0.17.1. The examples are not in zom's `.paths`, so a project
 that fetches zom doesn't download them; they only run from a checkout.
 
 ## How an example is wired

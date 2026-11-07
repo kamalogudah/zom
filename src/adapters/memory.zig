@@ -505,13 +505,14 @@ pub fn Store(comptime S: type) type {
         fn dupeStrings(self: *Self, row: T) !T {
             const a = self.arena.allocator();
             var out = row;
-            inline for (@typeInfo(T).@"struct".fields) |f| {
-                switch (@typeInfo(f.type)) {
+            const info = @typeInfo(T).@"struct";
+            inline for (info.field_names, info.field_types) |name, F| {
+                switch (@typeInfo(F)) {
                     .optional => |o| if (comptime q.isString(o.child)) {
-                        if (@field(row, f.name)) |s| @field(out, f.name) = try dupeString(o.child, a, s);
+                        if (@field(row, name)) |s| @field(out, name) = try dupeString(o.child, a, s);
                     },
-                    else => if (comptime q.isString(f.type)) {
-                        @field(out, f.name) = try dupeString(f.type, a, @field(row, f.name));
+                    else => if (comptime q.isString(F)) {
+                        @field(out, name) = try dupeString(F, a, @field(row, name));
                     },
                 }
             }

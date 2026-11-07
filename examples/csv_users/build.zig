@@ -29,7 +29,7 @@ pub fn build(b: *std.Build) void {
     // whichever directory `zig build` was started in.
     const run = b.addRunArtifact(exe);
     run.setCwd(b.path("."));
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     const run_step = b.step("run", "Print each CSV user with their in-memory posts");
     run_step.dependOn(&run.step);
 

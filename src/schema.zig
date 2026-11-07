@@ -186,9 +186,9 @@ pub fn Schema(
     const O = @TypeOf(options);
     if (@typeInfo(O) != .@"struct")
         @compileError(label ++ ": options must be a struct literal such as .{} or .{ .associations = ... }, found `" ++ @typeName(O) ++ "`");
-    for (@typeInfo(O).@"struct".fields) |f| {
-        if (!std.mem.eql(u8, f.name, "associations") and !std.mem.eql(u8, f.name, "plugins"))
-            @compileError(label ++ ": unknown option '" ++ f.name ++ "' (options: associations, plugins)");
+    for (@typeInfo(O).@"struct".field_names) |option| {
+        if (!std.mem.eql(u8, option, "associations") and !std.mem.eql(u8, option, "plugins"))
+            @compileError(label ++ ": unknown option '" ++ option ++ "' (options: associations, plugins)");
     }
     const defs = if (@hasField(O, "associations")) options.associations else struct {};
     const plugin_list = if (@hasField(O, "plugins")) plugins_mod.checkList(dataset_name, options.plugins) else .{};
@@ -223,7 +223,7 @@ pub fn Schema(
         pub const associations = blk: {
             const n = association_names.len;
             var types: [n]type = @splat(Association);
-            var attrs: [n]std.builtin.Type.StructField.Attributes = undefined;
+            var attrs: [n]std.lang.Type.Struct.FieldAttributes = undefined;
             for (association_names, 0..) |a, i| attrs[i] = .{
                 .@"comptime" = true,
                 .default_value_ptr = &resolve(a),
@@ -315,9 +315,9 @@ fn associationNames(comptime defs: anytype) []const []const u8 {
             @typeName(D) ++ "`");
     var names: []const []const u8 = &.{};
     if (lazy) {
-        for (@typeInfo(D).@"struct".decls) |d| names = names ++ .{d.name};
+        for (@typeInfo(D).@"struct".decl_names) |d| names = names ++ .{d};
     } else {
-        for (@typeInfo(D).@"struct".fields) |f| names = names ++ .{f.name};
+        for (@typeInfo(D).@"struct".field_names) |f| names = names ++ .{f};
     }
     for (names) |n| {
         const V = @TypeOf(@field(defs, n));
@@ -342,7 +342,7 @@ fn isSchema(comptime S: type) bool {
 
 fn fieldList(comptime T: type) []const u8 {
     var out: []const u8 = "";
-    for (@typeInfo(T).@"struct".fields, 0..) |f, i| out = out ++ (if (i == 0) "" else ", ") ++ f.name;
+    for (@typeInfo(T).@"struct".field_names, 0..) |f, i| out = out ++ (if (i == 0) "" else ", ") ++ f;
     return out;
 }
 

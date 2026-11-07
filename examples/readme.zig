@@ -82,7 +82,7 @@ test "README: Projections" {
     // @TypeOf(names[0]) has exactly `id` and `name`; `names[0].age` does not compile.
 
     // ---------------------------------------------------------------------
-    try testing.expectEqual(2, @typeInfo(@TypeOf(names[0])).@"struct".fields.len);
+    try testing.expectEqual(2, @typeInfo(@TypeOf(names[0])).@"struct".field_names.len);
     try testing.expectEqualStrings("Achieng", names[0].name);
 }
 

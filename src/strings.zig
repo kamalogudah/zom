@@ -54,9 +54,9 @@ pub fn isFreeableString(comptime F: type) bool {
 
 /// The names of `T`'s fields, for `freeFields`' `keep`.
 pub fn fieldNames(comptime T: type) []const []const u8 {
-    const fields = @typeInfo(T).@"struct".fields;
+    const fields = @typeInfo(T).@"struct".field_names;
     var names: [fields.len][]const u8 = undefined;
-    for (fields, &names) |f, *n| n.* = f.name;
+    for (fields, &names) |f, *n| n.* = f;
     const final = names;
     return &final;
 }
@@ -65,14 +65,15 @@ pub fn fieldNames(comptime T: type) []const []const u8 {
 /// named in `keep` (whose strings now belong to something else, e.g. a
 /// narrower struct mapped from `item`). Null optionals are skipped.
 pub fn freeFields(comptime T: type, allocator: std.mem.Allocator, item: T, comptime keep: []const []const u8) void {
-    inline for (@typeInfo(T).@"struct".fields) |f| {
-        if (comptime !isStringField(f.type) or contains(keep, f.name)) continue;
-        if (comptime !isFreeableString(f.type))
-            @compileError("zom: '" ++ f.name ++ "' of " ++ @typeName(T) ++ " is `" ++ @typeName(f.type) ++
+    const info = @typeInfo(T).@"struct";
+    inline for (info.field_names, info.field_types) |name, F| {
+        if (comptime !isStringField(F) or contains(keep, name)) continue;
+        if (comptime !isFreeableString(F))
+            @compileError("zom: '" ++ name ++ "' of " ++ @typeName(T) ++ " is `" ++ @typeName(F) ++
                 "`; caller-owned strings must be slices such as []const u8");
-        switch (@typeInfo(f.type)) {
-            .optional => if (@field(item, f.name)) |s| allocator.free(s),
-            else => allocator.free(@field(item, f.name)),
+        switch (@typeInfo(F)) {
+            .optional => if (@field(item, name)) |s| allocator.free(s),
+            else => allocator.free(@field(item, name)),
         }
     }
 }
@@ -87,24 +88,24 @@ pub fn freeAll(comptime T: type, allocator: std.mem.Allocator, items: []const T)
 /// copies made so far are freed.
 pub fn dupeFields(comptime T: type, allocator: std.mem.Allocator, item: T) error{OutOfMemory}!T {
     var out = item;
-    const fields = @typeInfo(T).@"struct".fields;
+    const info = @typeInfo(T).@"struct";
     // Freed on error: the strings of `out` copied so far.
     var done: usize = 0;
-    errdefer inline for (fields, 0..) |f, i| {
-        if (comptime isStringField(f.type)) {
-            if (i < done) switch (@typeInfo(f.type)) {
-                .optional => if (@field(out, f.name)) |s| allocator.free(s),
-                else => allocator.free(@field(out, f.name)),
+    errdefer inline for (info.field_names, info.field_types, 0..) |name, F, i| {
+        if (comptime isStringField(F)) {
+            if (i < done) switch (@typeInfo(F)) {
+                .optional => if (@field(out, name)) |s| allocator.free(s),
+                else => allocator.free(@field(out, name)),
             };
         }
     };
-    inline for (fields, 0..) |f, i| {
-        if (comptime isStringField(f.type)) {
-            switch (@typeInfo(f.type)) {
-                .optional => |o| if (@field(item, f.name)) |s| {
-                    @field(out, f.name) = try dupe(o.child, allocator, s);
+    inline for (info.field_names, info.field_types, 0..) |name, F, i| {
+        if (comptime isStringField(F)) {
+            switch (@typeInfo(F)) {
+                .optional => |o| if (@field(item, name)) |s| {
+                    @field(out, name) = try dupe(o.child, allocator, s);
                 },
-                else => @field(out, f.name) = try dupe(f.type, allocator, @field(item, f.name)),
+                else => @field(out, name) = try dupe(F, allocator, @field(item, name)),
             }
         }
         done = i + 1;
@@ -115,7 +116,7 @@ pub fn dupeFields(comptime T: type, allocator: std.mem.Allocator, item: T) error
 fn dupe(comptime S: type, allocator: std.mem.Allocator, s: S) error{OutOfMemory}!S {
     if (comptime !isFreeableString(S))
         @compileError("zom: caller-owned strings must be slices such as []const u8, found `" ++ @typeName(S) ++ "`");
-    if (comptime @typeInfo(S).pointer.sentinel() != null) return allocator.dupeZ(u8, s);
+    if (comptime @typeInfo(S).pointer.sentinel() != null) return allocator.dupeSentinel(u8, s, 0);
     return allocator.dupe(u8, s);
 }
 

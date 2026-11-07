@@ -33,7 +33,7 @@ jobs:
 
       - uses: mlugg/setup-zig@v2.2.1
         with:
-          version: 0.16.0
+          version: 0.17.1
           use-cache: false
 
       - name: Cache Zig
@@ -45,10 +45,10 @@ jobs:
             zig-pkg
             examples/double_entry/.zig-cache
             examples/double_entry/zig-pkg
-          key: tb-zig-0.16.0-${{ runner.os }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
+          key: tb-zig-0.17.1-${{ runner.os }}-${{ hashFiles('build.zig.zon') }}-${{ github.sha }}
           restore-keys: |
-            tb-zig-0.16.0-${{ runner.os }}-${{ hashFiles('build.zig.zon') }}-
-            tb-zig-0.16.0-${{ runner.os }}-
+            tb-zig-0.17.1-${{ runner.os }}-${{ hashFiles('build.zig.zon') }}-
+            tb-zig-0.17.1-${{ runner.os }}-
 
       - name: Install TigerBeetle ${{ env.TB_VERSION }}
         shell: bash

@@ -26,7 +26,7 @@ const Writer = std.Io.Writer;
 
 /// The Zig type of a column's field.
 pub const Type = union(enum) {
-    int: std.builtin.Type.Int,
+    int: std.lang.Type.Int,
     /// The bit count: 32 or 64.
     float: u16,
     bool,
@@ -162,7 +162,7 @@ pub fn render(gpa: Allocator, catalog: Catalog, options: Options) Error![]u8 {
     out.writer.writeByte(0) catch return error.OutOfMemory;
     const source = out.written();
 
-    var tree = try std.zig.Ast.parse(gpa, source[0 .. source.len - 1 :0], .zig);
+    var tree = try std.zig.Ast.parse(gpa, source[0 .. source.len - 1 :0], .{});
     defer tree.deinit(gpa);
     // A parse error here is a bug in `writeSource`, not in the catalog.
     if (tree.errors.len != 0) {

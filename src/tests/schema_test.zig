@@ -34,7 +34,7 @@ const CommentSchema = zom.Schema(Comment, "comments", .id, .{
 test "Schema: the 4-argument form with no associations" {
     const S = zom.Schema(Post, "posts", .id, .{});
     try testing.expectEqual(0, S.association_names.len);
-    try testing.expectEqual(0, @typeInfo(@TypeOf(S.associations)).@"struct".fields.len);
+    try testing.expectEqual(0, @typeInfo(@TypeOf(S.associations)).@"struct".field_names.len);
     try testing.expectEqualStrings("posts", S.name);
     try testing.expect(S.primary_key == .id);
 }
@@ -65,12 +65,12 @@ test "Schema: has-many and belongs-to referring to each other" {
 }
 
 test "Schema: S.associations has one field per association, in order" {
-    const fields = @typeInfo(@TypeOf(UserSchema.associations)).@"struct".fields;
+    const fields = @typeInfo(@TypeOf(UserSchema.associations)).@"struct".field_names;
     try testing.expectEqual(3, fields.len);
     inline for (.{ "posts", "reports", "manager" }, UserSchema.association_names, fields) |want, name, f| {
         try testing.expectEqualStrings(want, name);
-        try testing.expectEqualStrings(want, f.name);
-        try testing.expectEqualStrings(want, @field(UserSchema.associations, f.name).name);
+        try testing.expectEqualStrings(want, f);
+        try testing.expectEqualStrings(want, @field(UserSchema.associations, f).name);
     }
     try testing.expect(UserSchema.associations.posts.target == PostSchema);
 }

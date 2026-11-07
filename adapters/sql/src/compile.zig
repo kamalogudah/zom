@@ -385,7 +385,7 @@ pub const Batch = struct {
 /// binding one parameter per field. A tuple too wide for a single row is a
 /// compile error.
 pub fn rowsPerStatement(comptime dialect: Dialect, comptime T: type) comptime_int {
-    const fields = @typeInfo(T).@"struct".fields.len;
+    const fields = @typeInfo(T).@"struct".field_names.len;
     if (fields == 0) @compileError("zom_sql: " ++ @typeName(T) ++ " has no fields to insert");
     const n = @divFloor(dialect.max_params, fields);
     if (n == 0) @compileError(std.fmt.comptimePrint(
@@ -457,7 +457,7 @@ pub fn writeInsert(
     table: []const u8,
     rows: []const T,
 ) (Allocator.Error || Writer.Error)!void {
-    const fields = @typeInfo(T).@"struct".fields;
+    const fields = @typeInfo(T).@"struct".field_names;
     std.debug.assert(rows.len > 0 and rows.len <= rowsPerStatement(dialect, T));
 
     try w.writeAll("INSERT INTO ");
@@ -465,7 +465,7 @@ pub fn writeInsert(
     try w.writeAll(" (");
     inline for (fields, 0..) |f, i| {
         if (i > 0) try w.writeAll(", ");
-        try writeIdent(dialect, w, f.name);
+        try writeIdent(dialect, w, f);
     }
     try w.writeAll(") VALUES ");
     for (rows, 0..) |row, r| {
@@ -473,7 +473,7 @@ pub fn writeInsert(
         try w.writeByte('(');
         inline for (fields, 0..) |f, i| {
             if (i > 0) try w.writeAll(", ");
-            try params.bind(dialect, w, zom.query.toValue(@field(row, f.name)));
+            try params.bind(dialect, w, zom.query.toValue(@field(row, f)));
         }
         try w.writeByte(')');
     }
@@ -628,12 +628,12 @@ fn setLater(comptime T: type, rest: []const zom.Query(T).Change, field: zom.Quer
 
 /// The column names `Out` reads, each checked to be a field of `T`.
 fn columnsOf(comptime T: type, comptime Out: type) []const []const u8 {
-    const fields = @typeInfo(Out).@"struct".fields;
+    const fields = @typeInfo(Out).@"struct".field_names;
     var names: [fields.len][]const u8 = undefined;
     for (fields, 0..) |f, i| {
-        if (!@hasField(T, f.name))
-            @compileError("zom_sql: '" ++ f.name ++ "' is not a field of " ++ @typeName(T));
-        names[i] = f.name;
+        if (!@hasField(T, f))
+            @compileError("zom_sql: '" ++ f ++ "' is not a field of " ++ @typeName(T));
+        names[i] = f;
     }
     const final = names;
     return &final;

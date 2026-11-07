@@ -230,8 +230,8 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
         pub fn reorder(self: Self, keys: anytype) Self {
             var next = self;
             next.query = self.query.reorder(keys);
-            inline for (@typeInfo(@TypeOf(keys)).@"struct".fields) |f| {
-                const key_field: Field = comptime @typeInfo(f.type).@"struct".fields[0].defaultValue().?;
+            inline for (@typeInfo(@TypeOf(keys)).@"struct".field_types) |K| {
+                const key_field: Field = comptime tupleConst(K, 0);
                 comptime requireOrder(key_field, "reorder(.{ .{ ." ++ @tagName(key_field) ++ ", ... } })");
             }
             return next;
@@ -275,9 +275,9 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
         fn Selected(comptime fields: anytype) type {
             const P = projection.Project(Tuple, fields);
             if (projected) {
-                for (@typeInfo(P).@"struct".fields) |f| {
-                    if (!@hasField(Output, f.name))
-                        @compileError("zom.select: '" ++ f.name ++ "' was not selected on this relation, so it cannot be selected again");
+                for (@typeInfo(P).@"struct".field_names) |name| {
+                    if (!@hasField(Output, name))
+                        @compileError("zom.select: '" ++ name ++ "' was not selected on this relation, so it cannot be selected again");
                 }
             }
             return RelationWith(S, Gateway, P, mode);
@@ -311,13 +311,12 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
         /// shape, so every leaf is a tuple with a comptime field and op.
         fn requireCond(comptime C: type, comptime call: []const u8) void {
             if (@hasDecl(C, "zom_group")) {
-                for (@typeInfo(@FieldType(C, "conds")).@"struct".fields) |f| requireCond(f.type, call);
+                for (@typeInfo(@FieldType(C, "conds")).@"struct".field_types) |Cond| requireCond(Cond, call);
             } else if (@hasDecl(C, "zom_not")) {
                 requireCond(@FieldType(C, "cond"), call);
             } else {
-                const fields = @typeInfo(C).@"struct".fields;
-                const field: Field = fields[0].defaultValue().?;
-                const op: q.Op = fields[1].defaultValue().?;
+                const field: Field = tupleConst(C, 0);
+                const op: q.Op = tupleConst(C, 1);
                 if (Adapter.filterGap(S, @tagName(field), op)) |why|
                     unsupported(call ++ " with ." ++ @tagName(field) ++ ", ." ++ @tagName(op), why);
             }
@@ -398,11 +397,11 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
         }
 
         fn filterPushable(f: Q.Filter) bool {
-            return pushable.filter[@intFromEnum(f.field)][@intFromEnum(f.op)];
+            return pushable.filter[@backingInt(f.field)][@backingInt(f.op)];
         }
 
         fn orderPushable(field: Field) bool {
-            return pushable.order[@intFromEnum(field)];
+            return pushable.order[@backingInt(field)];
         }
 
         /// Which filters and sort keys the dataset evaluates, worked out
@@ -412,8 +411,8 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
             var table: Pushable = undefined;
             for (std.enums.values(Field)) |field| {
                 for (std.enums.values(q.Op)) |op|
-                    table.filter[@intFromEnum(field)][@intFromEnum(op)] = Adapter.filterGap(S, @tagName(field), op) == null;
-                table.order[@intFromEnum(field)] = Adapter.orderGap(S, @tagName(field)) == null;
+                    table.filter[@backingInt(field)][@backingInt(op)] = Adapter.filterGap(S, @tagName(field), op) == null;
+                table.order[@backingInt(field)] = Adapter.orderGap(S, @tagName(field)) == null;
             }
             const final = table;
             break :blk final;
@@ -800,13 +799,12 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
 
         fn requireJoinedCond(comptime a: Association, comptime C: type, comptime call: []const u8) void {
             if (@hasDecl(C, "zom_group")) {
-                for (@typeInfo(@FieldType(C, "conds")).@"struct".fields) |f| requireJoinedCond(a, f.type, call);
+                for (@typeInfo(@FieldType(C, "conds")).@"struct".field_types) |Cond| requireJoinedCond(a, Cond, call);
             } else if (@hasDecl(C, "zom_not")) {
                 requireJoinedCond(a, @FieldType(C, "cond"), call);
             } else {
-                const fields = @typeInfo(C).@"struct".fields;
-                const field: std.meta.FieldEnum(a.target.Tuple) = fields[0].defaultValue().?;
-                const op: q.Op = fields[1].defaultValue().?;
+                const field: std.meta.FieldEnum(a.target.Tuple) = tupleConst(C, 0);
+                const op: q.Op = tupleConst(C, 1);
                 if (Adapter.filterGap(a.target, @tagName(field), op)) |why|
                     unsupportedJoined(a, call ++ " with ." ++ @tagName(field) ++ ", ." ++ @tagName(op), why);
             }
@@ -916,4 +914,11 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
                     "' is projected by `select`; call it on the relation before `select`");
         }
     };
+}
+
+/// The comptime value of element `i` of the tuple type `C`, e.g. the field
+/// of a `.{ .age, .gt, 30 }` condition (`Query` has checked it is comptime).
+fn tupleConst(comptime C: type, comptime i: usize) @typeInfo(C).@"struct".field_types[i] {
+    const info = @typeInfo(C).@"struct";
+    return info.field_attrs[i].defaultValue(info.field_types[i]).?;
 }

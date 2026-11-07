@@ -261,7 +261,7 @@ test "double-quoted scalars and their escapes" {
     try expectValue("\"\\/\\0\\a\\b\\v\\f\\e\\ \"", "/\x00\x07\x08\x0b\x0c\x1b ");
     try expectValue("\"\\x41\\u00e9\\U0001F600\"", "A\xc3\xa9\xf0\x9f\x98\x80");
     try expectValue("\"\\N\\_\\L\\P\"", "\xc2\x85\xc2\xa0\xe2\x80\xa8\xe2\x80\xa9");
-    try expectValue("\"\\L\\L\\L\\L\"", "\xe2\x80\xa8" ** 4);
+    try expectValue("\"\\L\\L\\L\\L\"", "\xe2\x80\xa8\xe2\x80\xa8\xe2\x80\xa8\xe2\x80\xa8");
     try expectValue("\"a # b\"", "a # b");
     try expectValue("\"x: y\"", "x: y");
 }
@@ -517,12 +517,12 @@ test "writeScalar: every value reads back unchanged, as a value and as a key, in
     }
     for (0..256) |b| {
         const c: u8 = @intCast(b);
-        try cases.append(testing.allocator, try std.fmt.allocPrint(testing.allocator, "{c}", .{c}));
-        try cases.append(testing.allocator, try std.fmt.allocPrint(testing.allocator, "a{c}b", .{c}));
-        try cases.append(testing.allocator, try std.fmt.allocPrint(testing.allocator, "{c}a", .{c}));
-        try cases.append(testing.allocator, try std.fmt.allocPrint(testing.allocator, "a{c}", .{c}));
-        try cases.append(testing.allocator, try std.fmt.allocPrint(testing.allocator, "a {c}b", .{c}));
-        try cases.append(testing.allocator, try std.fmt.allocPrint(testing.allocator, "{c} a", .{c}));
+        try cases.append(testing.allocator, try testing.allocator.print("{c}", .{c}));
+        try cases.append(testing.allocator, try testing.allocator.print("a{c}b", .{c}));
+        try cases.append(testing.allocator, try testing.allocator.print("{c}a", .{c}));
+        try cases.append(testing.allocator, try testing.allocator.print("a{c}", .{c}));
+        try cases.append(testing.allocator, try testing.allocator.print("a {c}b", .{c}));
+        try cases.append(testing.allocator, try testing.allocator.print("{c} a", .{c}));
     }
     for ([_][]const u8{
         "",      "~",   "null", "NULL",            "---",         "...", "--- a", "- a", "? a", ": a", "a: b", "a:", "a #b",

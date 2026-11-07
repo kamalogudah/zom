@@ -26,9 +26,9 @@ pub fn FieldMapper(
         /// caller-owned strings it stays the reader's to free.
         pub const sources: []const []const u8 = blk: {
             var names: []const []const u8 = &.{};
-            for (@typeInfo(Dst).@"struct".fields) |f| {
-                if (skipped(f.name)) continue;
-                const src_name = sourceName(f.name);
+            for (@typeInfo(Dst).@"struct".field_names) |name| {
+                if (skipped(name)) continue;
+                const src_name = sourceName(name);
                 if (@hasField(Src, src_name)) names = names ++ .{src_name};
             }
             break :blk names;
@@ -50,16 +50,17 @@ pub fn FieldMapper(
 
         pub fn call(src: Src) Dst {
             var dst: Dst = undefined;
-            inline for (@typeInfo(Dst).@"struct".fields) |f| {
-                const src_name = comptime sourceName(f.name);
-                if (comptime skipped(f.name)) {
+            const info = @typeInfo(Dst).@"struct";
+            inline for (info.field_names, info.field_types, info.field_attrs) |name, F, attrs| {
+                const src_name = comptime sourceName(name);
+                if (comptime skipped(name)) {
                     // Left for the caller.
                 } else if (comptime @hasField(Src, src_name)) {
-                    @field(dst, f.name) = @field(src, src_name);
-                } else if (comptime f.defaultValue() != null) {
-                    @field(dst, f.name) = comptime f.defaultValue().?;
+                    @field(dst, name) = @field(src, src_name);
+                } else if (comptime attrs.defaultValue(F) != null) {
+                    @field(dst, name) = comptime attrs.defaultValue(F).?;
                 } else {
-                    @compileError("zom.Mapper: " ++ @typeName(Dst) ++ "." ++ f.name ++
+                    @compileError("zom.Mapper: " ++ @typeName(Dst) ++ "." ++ name ++
                         " has no source attribute `" ++ src_name ++ "` and no default");
                 }
             }

@@ -595,20 +595,22 @@ fn withoutBom(bytes: []const u8) []const u8 {
 // ---------------------------------------------------------------- for formats
 
 pub fn fieldCount(comptime T: type) usize {
-    return @typeInfo(T).@"struct".fields.len;
+    return @typeInfo(T).@"struct".field_names.len;
 }
 
 /// Field name to index, in declaration order.
 pub fn fieldIndex(comptime T: type) std.StaticStringMap(usize) {
-    const fields = @typeInfo(T).@"struct".fields;
+    const fields = @typeInfo(T).@"struct".field_names;
     var kvs: [fields.len]struct { []const u8, usize } = undefined;
-    for (fields, 0..) |f, i| kvs[i] = .{ f.name, i };
+    for (fields, 0..) |f, i| kvs[i] = .{ f, i };
     return .initComptime(kvs);
 }
 
-/// A field a file must give: neither optional nor defaulted.
-pub fn isRequired(comptime f: std.builtin.Type.StructField) bool {
-    return @typeInfo(f.type) != .optional and f.defaultValue() == null;
+/// A field a file must give: neither optional nor defaulted. `F` and
+/// `attrs` are the field's entries in `@typeInfo(T).@"struct"`'s
+/// `field_types` and `field_attrs`.
+pub fn isRequired(comptime F: type, comptime attrs: std.lang.Type.Struct.FieldAttributes) bool {
+    return @typeInfo(F) != .optional and attrs.defaultValue(F) == null;
 }
 
 // ---------------------------------------------------------------- contract

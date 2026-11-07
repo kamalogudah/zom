@@ -2,7 +2,7 @@
     .name = .pg_repo,
     .version = "0.0.0",
     .fingerprint = 0xa3ae0c4e93a380ec,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.1",
     .dependencies = .{
         .zom = .{ .path = "../.." },
     },

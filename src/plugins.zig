@@ -167,9 +167,9 @@ pub fn checkList(comptime schema_name: []const u8, comptime list: anytype) @Type
     if (info != .@"struct" or !info.@"struct".is_tuple)
         @compileError(where ++ "`.plugins` must be a tuple of plugin types such as `.{zom.plugins.timestamps(.{})}`, found `" ++
             @typeName(L) ++ "`");
-    for (info.@"struct".fields, 0..) |f, i| {
-        if (f.type != type)
-            @compileError(std.fmt.comptimePrint("{s}plugin {d} must be a type, found a value of type `{s}`", .{ where, i, @typeName(f.type) }));
+    for (info.@"struct".field_types, 0..) |F, i| {
+        if (F != type)
+            @compileError(std.fmt.comptimePrint("{s}plugin {d} must be a type, found a value of type `{s}`", .{ where, i, @typeName(F) }));
         const P = list[i];
         const ok = switch (@typeInfo(P)) {
             .@"struct", .@"union", .@"enum", .@"opaque" => blk: {

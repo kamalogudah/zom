@@ -8,8 +8,8 @@ links to the topics below.
 
 ## 1. Set up
 
-1. Install **Zig 0.16.0** exactly (`build.zig.zon` sets `minimum_zig_version = "0.16.0"`). Get it from https://ziglang.org/download/, or use a version manager like [`zvm`](https://github.com/tristanisham/zvm) or [`anyzig`](https://github.com/marler8997/anyzig).
-2. Check it: `zig version` should print `0.16.0`.
+1. Install **Zig 0.17.1** (`build.zig.zon` sets `minimum_zig_version = "0.17.1"`; 0.17.0 has bugs fixed in 0.17.1). Get it from https://ziglang.org/download/, or use a version manager like [`zvm`](https://github.com/tristanisham/zvm) or [`anyzig`](https://github.com/marler8997/anyzig).
+2. Check it: `zig version` should print `0.17.1`.
 3. Clone and run the tests:
    ```sh
    git clone git@github.com:kamalogudah/zom.git
@@ -17,7 +17,7 @@ links to the topics below.
    zig build test
    ```
    If nothing is printed and the exit code is 0, every test passed. Add `--summary all` to see each step.
-4. Editor support: install [ZLS](https://github.com/zigtools/zls) built for 0.16, which gives you go-to-definition into the standard library. That's the fastest way to learn the std API.
+4. Editor support: install [ZLS](https://github.com/zigtools/zls) built for 0.17, which gives you go-to-definition into the standard library. That's the fastest way to learn the std API. (Zig 0.17 removed the build runner override ZLS relied on, so check that your ZLS release supports 0.17.)
 
 ## 2. A tour of the code (about 1,400 lines, a third of them tests)
 
@@ -47,18 +47,18 @@ links to the topics below.
 
 ## 3. Zig concepts used everywhere in zom
 
-The language reference for this version is https://ziglang.org/documentation/0.16.0/ (called **langref** in the tickets). Also useful: [ziglang.org/learn](https://ziglang.org/learn/), and the standard library source, which lives under `lib/std/` next to your `zig` binary (`zig env` prints the path).
+The language reference for this version is https://ziglang.org/documentation/0.17.1/ (called **langref** in the tickets). Also useful: [ziglang.org/learn](https://ziglang.org/learn/), and the standard library source, which lives under `lib/std/` next to your `zig` binary (`zig env` prints the path).
 
-- **Comptime and generic types.** `Schema`, `Query`, `Relation` and `Mapper` are all *functions that return a `type`*. They run at compile time. See langref [comptime](https://ziglang.org/documentation/0.16.0/#comptime) and [Generic Data Structures](https://ziglang.org/documentation/0.16.0/#Generic-Data-Structures).
-- **Reflection.** `@typeInfo(T)` returns a tagged union describing a type (struct fields, int signedness and bits, optional child type and so on). zom uses it to inspect your tuple struct. See [@typeInfo](https://ziglang.org/documentation/0.16.0/#typeInfo), [@FieldType](https://ziglang.org/documentation/0.16.0/#FieldType), [@field](https://ziglang.org/documentation/0.16.0/#field), [@hasDecl](https://ziglang.org/documentation/0.16.0/#hasDecl) and [@hasField](https://ziglang.org/documentation/0.16.0/#hasField).
-- **`inline for` and `inline else`.** These unroll a loop or a switch at compile time, so every iteration can use a different type. `switch (field) { inline else => |tag| ... }` turns a runtime enum value into a comptime one. See [inline for](https://ziglang.org/documentation/0.16.0/#inline-for) and [Inline Switch Prongs](https://ziglang.org/documentation/0.16.0/#Inline-Switch-Prongs).
-- **Custom compile errors.** `@compileError("...")` is how zom rejects bad queries at build time. See [@compileError](https://ziglang.org/documentation/0.16.0/#compileError).
-- **Errors.** `!T`, `try`, `catch`, `errdefer`, error sets and inferred error sets. See [Errors](https://ziglang.org/documentation/0.16.0/#Errors) and [errdefer](https://ziglang.org/documentation/0.16.0/#errdefer).
-- **Allocators.** Nothing allocates behind your back. Any function that returns heap memory takes a `std.mem.Allocator`, and the caller frees the result. In tests, use `std.testing.allocator`, which fails the test if you leak memory. See [Memory](https://ziglang.org/documentation/0.16.0/#Memory) and [Choosing an Allocator](https://ziglang.org/documentation/0.16.0/#Choosing-an-Allocator).
-- **Unmanaged containers.** In 0.16, `std.ArrayList(T)` doesn't store its allocator. You start it with `.empty` and pass the allocator to each call: `list.append(gpa, x)`, `list.deinit(gpa)`.
-- **Tagged unions.** `Value` is `union(enum)`. Use `switch` to read it. See [Tagged union](https://ziglang.org/documentation/0.16.0/#Tagged-union).
-- **Optionals.** `?T`, `orelse`, `if (x) |v|`. See [Optionals](https://ziglang.org/documentation/0.16.0/#Optionals).
-- **Tests.** `test "name" { ... }` blocks, `try std.testing.expectEqual(...)`. See [Zig Test](https://ziglang.org/documentation/0.16.0/#Zig-Test).
+- **Comptime and generic types.** `Schema`, `Query`, `Relation` and `Mapper` are all *functions that return a `type`*. They run at compile time. See langref [comptime](https://ziglang.org/documentation/0.17.1/#comptime) and [Generic Data Structures](https://ziglang.org/documentation/0.17.1/#Generic-Data-Structures).
+- **Reflection.** `@typeInfo(T)` returns a tagged union describing a type (struct fields, int signedness and bits, optional child type and so on). zom uses it to inspect your tuple struct. Since 0.17 a struct's fields are parallel arrays: `inline for (info.field_names, info.field_types, info.field_attrs) |name, F, attrs|`, with `attrs.defaultValue(F)` for a default. See [@typeInfo](https://ziglang.org/documentation/0.17.1/#typeInfo), [@FieldType](https://ziglang.org/documentation/0.17.1/#FieldType), [@field](https://ziglang.org/documentation/0.17.1/#field), [@hasDecl](https://ziglang.org/documentation/0.17.1/#hasDecl) and [@hasField](https://ziglang.org/documentation/0.17.1/#hasField).
+- **`inline for` and `inline else`.** These unroll a loop or a switch at compile time, so every iteration can use a different type. `switch (field) { inline else => |tag| ... }` turns a runtime enum value into a comptime one. See [inline for](https://ziglang.org/documentation/0.17.1/#inline-for) and [Inline Switch Prongs](https://ziglang.org/documentation/0.17.1/#Inline-Switch-Prongs).
+- **Custom compile errors.** `@compileError("...")` is how zom rejects bad queries at build time. See [@compileError](https://ziglang.org/documentation/0.17.1/#compileError).
+- **Errors.** `!T`, `try`, `catch`, `errdefer`, error sets and inferred error sets. See [Errors](https://ziglang.org/documentation/0.17.1/#Errors) and [errdefer](https://ziglang.org/documentation/0.17.1/#errdefer).
+- **Allocators.** Nothing allocates behind your back. Any function that returns heap memory takes a `std.mem.Allocator`, and the caller frees the result. In tests, use `std.testing.allocator`, which fails the test if you leak memory. See [Memory](https://ziglang.org/documentation/0.17.1/#Memory) and [Choosing an Allocator](https://ziglang.org/documentation/0.17.1/#Choosing-an-Allocator).
+- **Unmanaged containers.** Since 0.16, `std.ArrayList(T)` doesn't store its allocator. You start it with `.empty` and pass the allocator to each call: `list.append(gpa, x)`, `list.deinit(gpa)`.
+- **Tagged unions.** `Value` is `union(enum)`. Use `switch` to read it. See [Tagged union](https://ziglang.org/documentation/0.17.1/#Tagged-union).
+- **Optionals.** `?T`, `orelse`, `if (x) |v|`. See [Optionals](https://ziglang.org/documentation/0.17.1/#Optionals).
+- **Tests.** `test "name" { ... }` blocks, `try std.testing.expectEqual(...)`. See [Zig Test](https://ziglang.org/documentation/0.17.1/#Zig-Test).
 - **Build system.** `build.zig` and `build.zig.zon`. See [Zig Build System](https://ziglang.org/learn/build-system/).
 
 ## 4. How we work

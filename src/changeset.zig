@@ -20,7 +20,7 @@
 //!   silently belongs to user 0. zom doesn't ask for this.
 //! - `create(data: anytype)` taking a partial struct would match ROM's
 //!   order, and could even track the unset fields in the changeset's type.
-//!   But Zig 0.16 doesn't coerce an anonymous struct value to a named
+//!   But Zig doesn't coerce an anonymous struct value to a named
 //!   struct, so the literal would lose its result type: `.id = @intCast(n)`
 //!   or `.at = .now()` stop compiling, and a type error is reported inside
 //!   zom instead of at the literal. That is too high a price on every
@@ -280,8 +280,9 @@ pub fn checkAssociate(comptime Rel: type, comptime assoc: EnumLiteral, comptime 
     if (P == Target) return a;
     const fits = blk: {
         if (@typeInfo(P) != .@"struct" or !@hasField(P, a.primary_key)) break :blk false;
-        for (@typeInfo(P).@"struct".fields) |f| {
-            if (!@hasField(Target, f.name) or @FieldType(Target, f.name) != f.type) break :blk false;
+        const info = @typeInfo(P).@"struct";
+        for (info.field_names, info.field_types) |name, F| {
+            if (!@hasField(Target, name) or @FieldType(Target, name) != F) break :blk false;
         }
         break :blk true;
     };
@@ -293,20 +294,20 @@ pub fn checkAssociate(comptime Rel: type, comptime assoc: EnumLiteral, comptime 
 
 /// `Rel.Tuple` without the fields in `keys`.
 fn Without(comptime Rel: type, comptime keys: FieldSet(Rel)) type {
-    const fields = @typeInfo(Rel.Tuple).@"struct".fields;
+    const info = @typeInfo(Rel.Tuple).@"struct";
     var n: usize = 0;
-    for (fields) |f| {
-        if (!@field(keys, f.name)) n += 1;
+    for (info.field_names) |name| {
+        if (!@field(keys, name)) n += 1;
     }
     var names: [n][]const u8 = undefined;
     var types: [n]type = undefined;
-    var attrs: [n]std.builtin.Type.StructField.Attributes = undefined;
+    var attrs: [n]std.lang.Type.Struct.FieldAttributes = undefined;
     var i: usize = 0;
-    for (fields) |f| {
-        if (@field(keys, f.name)) continue;
-        names[i] = f.name;
-        types[i] = f.type;
-        attrs[i] = .{ .@"comptime" = f.is_comptime, .@"align" = f.alignment, .default_value_ptr = f.default_value_ptr };
+    for (info.field_names, info.field_types, info.field_attrs) |name, F, field_attrs| {
+        if (@field(keys, name)) continue;
+        names[i] = name;
+        types[i] = F;
+        attrs[i] = field_attrs;
         i += 1;
     }
     const names_final = names;
@@ -319,21 +320,21 @@ fn Without(comptime Rel: type, comptime keys: FieldSet(Rel)) type {
 fn merge(comptime Rel: type, comptime keys: FieldSet(Rel), in: anytype, patch: Rel.Tuple) Rel.Tuple {
     if (@TypeOf(in) == Rel.Tuple) {
         var t = in;
-        inline for (@typeInfo(Rel.Tuple).@"struct".fields) |f| {
-            if (comptime @field(keys, f.name)) @field(t, f.name) = @field(patch, f.name);
+        inline for (@typeInfo(Rel.Tuple).@"struct".field_names) |name| {
+            if (comptime @field(keys, name)) @field(t, name) = @field(patch, name);
         }
         return t;
     }
     var t: Rel.Tuple = undefined;
-    inline for (@typeInfo(Rel.Tuple).@"struct".fields) |f| {
-        @field(t, f.name) = if (comptime @field(keys, f.name)) @field(patch, f.name) else @field(in, f.name);
+    inline for (@typeInfo(Rel.Tuple).@"struct".field_names) |name| {
+        @field(t, name) = if (comptime @field(keys, name)) @field(patch, name) else @field(in, name);
     }
     return t;
 }
 
 fn isEmpty(comptime Rel: type, comptime keys: FieldSet(Rel)) bool {
-    for (@typeInfo(Rel.Tuple).@"struct".fields) |f| {
-        if (@field(keys, f.name)) return false;
+    for (@typeInfo(Rel.Tuple).@"struct".field_names) |name| {
+        if (@field(keys, name)) return false;
     }
     return true;
 }

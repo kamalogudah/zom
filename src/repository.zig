@@ -61,9 +61,9 @@ pub fn Repository(comptime ContainerT: type, comptime spec: anytype) type {
     if (!@hasField(Spec, "relations")) @compileError("zom: Repository spec is missing `.relations`");
     if (@TypeOf(spec.root) != @TypeOf(.enum_literal))
         @compileError("zom: Repository `.root` must be an enum literal naming a relation, found `" ++ @typeName(@TypeOf(spec.root)) ++ "`");
-    for (@typeInfo(Spec).@"struct".fields) |f| {
-        if (!std.mem.eql(u8, f.name, "root") and !std.mem.eql(u8, f.name, "relations"))
-            @compileError("zom: Repository spec has unknown option `." ++ f.name ++ "` (options: `.root`, `.relations`)");
+    for (@typeInfo(Spec).@"struct".field_names) |option| {
+        if (!std.mem.eql(u8, option, "root") and !std.mem.eql(u8, option, "relations"))
+            @compileError("zom: Repository spec has unknown option `." ++ option ++ "` (options: `.root`, `.relations`)");
     }
 
     const entries = relationEntries(ContainerRelations, spec.relations);
@@ -176,15 +176,15 @@ fn relationEntries(comptime ContainerRelations: type, comptime relations: anytyp
     const info = @typeInfo(R);
     if (info != .@"struct")
         @compileError("zom: Repository `.relations` must be `.{ .users, .posts }` or `.{ .users = Wrapper, .posts = .plain }`, found `" ++ @typeName(R) ++ "`");
-    const fields = info.@"struct".fields;
+    const fields = info.@"struct".field_names;
     var out: [fields.len]Entry = undefined;
     for (fields, 0..) |f, i| {
-        const value = @field(relations, f.name);
+        const value = @field(relations, f);
         const name = if (info.@"struct".is_tuple) blk: {
             if (@TypeOf(value) != @TypeOf(.enum_literal))
-                @compileError("zom: Repository `.relations` element " ++ f.name ++ " must be an enum literal naming a relation, found `" ++ @typeName(@TypeOf(value)) ++ "`");
+                @compileError("zom: Repository `.relations` element " ++ f ++ " must be an enum literal naming a relation, found `" ++ @typeName(@TypeOf(value)) ++ "`");
             break :blk @tagName(value);
-        } else f.name;
+        } else f;
         const Rel = containerRelation(ContainerRelations, name);
         for (out[0..i]) |prev| {
             if (std.mem.eql(u8, prev.name, name)) @compileError("zom: repository relation '" ++ name ++ "' is listed twice");
@@ -217,9 +217,9 @@ fn wrapperEntry(comptime name: []const u8, comptime Rel: type, comptime value: a
 
 fn containerRelation(comptime ContainerRelations: type, comptime name: []const u8) type {
     if (@hasField(ContainerRelations, name)) return @FieldType(ContainerRelations, name);
-    const fields = @typeInfo(ContainerRelations).@"struct".fields;
+    const fields = @typeInfo(ContainerRelations).@"struct".field_names;
     var names: [fields.len][]const u8 = undefined;
-    for (fields, 0..) |f, i| names[i] = f.name;
+    for (fields, 0..) |f, i| names[i] = f;
     @compileError("zom: repository relation '" ++ name ++ "' is not in the container (relations: " ++ list(&names) ++ ")");
 }
 

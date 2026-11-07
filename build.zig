@@ -16,7 +16,7 @@ const std = @import("std");
 /// the SQLite amalgamation, so it only exists with `.sqlite = true`. The adapters' code lives under `adapters/<name>/src` and imports
 /// zom only through its public module, so an adapter can still move to a
 /// repo of its own later without code changes (see plan.md, section 3.2).
-pub fn build(b: *std.Build) void {
+pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     // On by default in a checkout of zom itself (the root package, whose
@@ -61,8 +61,12 @@ pub fn build(b: *std.Build) void {
     _ = addAdapter(b, test_adapters, "yaml", &.{.{ .name = "zom", .module = mod }}, target, optimize);
     const zom_sql = addAdapter(b, test_adapters, "sql", &.{.{ .name = "zom", .module = mod }}, target, optimize);
 
+    // Every lazy dependency this configuration needs is asked for before
+    // returning `error.LazyDependencyNeeded`, so they are all fetched in one go.
+    var missing = false;
+
     if (with_pg) {
-        if (b.lazyDependency("pg", .{ .target = target, .optimize = optimize })) |pg_dep| {
+        if (lazyDependency(b, "pg", .{ .target = target, .optimize = optimize }, &missing)) |pg_dep| {
             addPg(b, test_adapters, mod, zom_sql.module, pg_dep.module("pg"), target, optimize);
         }
     } else {
@@ -72,8 +76,10 @@ pub fn build(b: *std.Build) void {
 
     const test_sqlite = b.step("test-sqlite", "Run zom-sqlite's tests (in-memory databases, no server needed)");
     if (with_sqlite) {
-        if (b.lazyDependency("sqlite", .{})) |sqlite_dep| {
-            addSqlite(b, test_adapters, test_sqlite, mod, zom_sql.module, sqlite_dep, target, optimize);
+        const sqlite_dep = lazyDependency(b, "sqlite", .{}, &missing);
+        const translate_c = lazyTranslator(b, &missing);
+        if (sqlite_dep != null and translate_c != null) {
+            addSqlite(b, test_adapters, test_sqlite, mod, zom_sql.module, sqlite_dep.?, translate_c.?, target, optimize);
         }
     } else {
         const fail = b.addFail("zom-sqlite is off: pass -Dsqlite=true (or `.sqlite = true` to b.dependency)");
@@ -82,8 +88,10 @@ pub fn build(b: *std.Build) void {
 
     const test_tigerbeetle = b.step("test-tigerbeetle", "Run zom-tigerbeetle's tests (its cluster test needs ZOM_TB_ADDRESSES)");
     if (with_tigerbeetle) {
-        if (b.lazyDependency("tigerbeetle_go", .{})) |tb_dep| {
-            addTigerBeetle(b, test_adapters, test_tigerbeetle, mod, tb_dep, target, optimize);
+        const tb_dep = lazyDependency(b, "tigerbeetle_go", .{}, &missing);
+        const translate_c = lazyTranslator(b, &missing);
+        if (tb_dep != null and translate_c != null) {
+            addTigerBeetle(b, test_adapters, test_tigerbeetle, mod, tb_dep.?, translate_c.?, target, optimize);
         }
     } else {
         const fail = b.addFail("zom-tigerbeetle is off: pass -Dtigerbeetle=true (or `.tigerbeetle = true` to b.dependency)");
@@ -94,6 +102,64 @@ pub fn build(b: *std.Build) void {
     const test_examples = b.step("test-examples", "Build and run each examples/<name> package, checking its output");
     addExampleTests(b, test_examples, optimize);
     test_step.dependOn(test_examples);
+
+    if (missing) return error.LazyDependencyNeeded;
+}
+
+/// `b.dependencyLazy`, except that a dependency not fetched yet sets
+/// `missing` and returns null, so the caller can go on asking for the others.
+fn lazyDependency(b: *std.Build, name: []const u8, args: anytype, missing: *bool) ?*std.Build.Dependency {
+    return b.dependencyLazy(name, args) catch |err| switch (err) {
+        error.LazyDependencyNeeded => {
+            missing.* = true;
+            return null;
+        },
+    };
+}
+
+/// The translate-c package, which turns a C header into a Zig module (Zig
+/// 0.17 removed `@cImport` and deprecated `b.addTranslateC`). It is lazy:
+/// only zom-sqlite and zom-tigerbeetle need it.
+fn lazyTranslator(b: *std.Build, missing: *bool) ?*std.Build.Dependency {
+    return lazyDependency(b, "translate_c", .{}, missing);
+}
+
+/// A C header translated to Zig: the module to import, and the generated
+/// file (the compile-error cases pass it to `zig build-obj` themselves).
+const Translated = struct {
+    module: *std.Build.Module,
+    output_file: std.Build.LazyPath,
+};
+
+const TranslateOptions = struct {
+    name: []const u8,
+    header: std.Build.LazyPath,
+    link_libc: bool,
+    /// Gives every struct field a zero default, as Zig 0.16's built-in
+    /// translate-c did, so `.{ .id = x }` leaves the rest zeroed.
+    default_init: bool = false,
+};
+
+/// Translates a C header with translate-c's `Translator`. `translate_c`
+/// comes from `lazyTranslator`, so the package is fetched and its build.zig
+/// can be imported.
+fn translateHeader(
+    b: *std.Build,
+    translate_c: *std.Build.Dependency,
+    options: TranslateOptions,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+) Translated {
+    const Translator = if (b.lazyImport(@This(), "translate_c")) |tc| tc.Translator else @panic("translate_c is not fetched");
+    const t: Translator = .init(translate_c, .{
+        .name = options.name,
+        .c_source_file = options.header,
+        .target = target,
+        .optimize = optimize,
+        .link_libc = options.link_libc,
+        .default_init = options.default_init,
+    });
+    return .{ .module = t.mod, .output_file = t.output_file };
 }
 
 const Adapter = struct {
@@ -109,7 +175,7 @@ fn addAdapter(
     comptime name: []const u8,
     imports: []const std.Build.Module.Import,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) Adapter {
     const module = b.addModule("zom_" ++ name, .{
         .root_source_file = b.path("adapters/" ++ name ++ "/src/root.zig"),
@@ -133,7 +199,7 @@ fn addPg(
     zom_sql: *std.Build.Module,
     pg: *std.Build.Module,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) void {
     const adapter = addAdapter(b, test_adapters, "pg", &.{
         .{ .name = "zom", .module = zom },
@@ -162,7 +228,7 @@ fn addPg(
     test_adapters.dependOn(&infer_exe.step);
 
     const run_infer = b.addRunArtifact(infer_exe);
-    if (b.args) |args| run_infer.addArgs(args);
+    run_infer.addPassthruArgs();
     b.step("infer", "Run zom-pg-infer (pass its options after --)").dependOn(&run_infer.step);
 }
 
@@ -176,19 +242,19 @@ fn addSqlite(
     zom: *std.Build.Module,
     zom_sql: *std.Build.Module,
     sqlite_dep: *std.Build.Dependency,
+    translate_c: *std.Build.Dependency,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) void {
-    const header = b.addTranslateC(.{
-        .root_source_file = sqlite_dep.path("sqlite3.h"),
-        .target = target,
-        .optimize = optimize,
+    const header = translateHeader(b, translate_c, .{
+        .name = "sqlite3",
+        .header = sqlite_dep.path("sqlite3.h"),
         .link_libc = true,
-    });
+    }, target, optimize);
     const adapter = addAdapter(b, test_adapters, "sqlite", &.{
         .{ .name = "zom", .module = zom },
         .{ .name = "zom_sql", .module = zom_sql },
-        .{ .name = "sqlite3", .module = header.createModule() },
+        .{ .name = "sqlite3", .module = header.module },
     }, target, optimize);
     adapter.module.link_libc = true;
     adapter.module.addCSourceFile(.{
@@ -228,8 +294,9 @@ fn addTigerBeetle(
     test_tigerbeetle: *std.Build.Step,
     zom: *std.Build.Module,
     tb_dep: *std.Build.Dependency,
+    translate_c: *std.Build.Dependency,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) void {
     const t = target.result;
     const library: ?[]const u8 = switch (t.os.tag) {
@@ -248,14 +315,17 @@ fn addTigerBeetle(
         return;
     };
 
-    const tb_client = b.addTranslateC(.{
-        .root_source_file = tb_dep.path("native/tb_client.h"),
-        .target = target,
-        .optimize = optimize,
-    });
+    // zom-tigerbeetle builds the client's records as `.{ .id = x, ... }`
+    // and relies on the other fields being zero.
+    const tb_client = translateHeader(b, translate_c, .{
+        .name = "tb_client",
+        .header = tb_dep.path("native/tb_client.h"),
+        .link_libc = false,
+        .default_init = true,
+    }, target, optimize);
     const adapter = addAdapter(b, test_adapters, "tigerbeetle", &.{
         .{ .name = "zom", .module = zom },
-        .{ .name = "tb_client", .module = tb_client.createModule() },
+        .{ .name = "tb_client", .module = tb_client.module },
     }, target, optimize);
     // The library starts a thread and does its own I/O through libc.
     adapter.module.link_libc = true;
@@ -273,7 +343,7 @@ fn addTigerBeetle(
     // of immutable transfers). They only type-check, so nothing is linked.
     addCompileErrorCases(b, test_tigerbeetle, "adapters/tigerbeetle/tests/compile_errors", &.{
         .{ .name = "zom_tigerbeetle", .root = b.path("adapters/tigerbeetle/src/root.zig"), .deps = &.{ "zom", "tb_client" } },
-        .{ .name = "tb_client", .root = tb_client.getOutput(), .deps = &.{} },
+        .{ .name = "tb_client", .root = tb_client.output_file, .deps = &.{} },
     });
     test_adapters.dependOn(test_tigerbeetle);
 }
@@ -325,7 +395,7 @@ pub fn addInferStep(b: *std.Build, options: InferOptions) Infer {
     run.has_side_effects = true;
     if (options.url) |url| run.addArgs(&.{ "--url", url }) else run.addArgs(&.{ "--url-env", options.url_env });
     run.addArgs(&.{ "--schema", options.schema, "--zom-import", options.zom_import, "--quiet", "--out" });
-    const output = run.addOutputFileArg(if (options.out) |out| std.fs.path.basename(out) else "schemas.zig");
+    const output = run.addOutputFileArg2(if (options.out) |out| std.fs.path.basename(out) else "schemas.zig", .{});
 
     var step = &run.step;
     if (options.out) |out| {
@@ -353,7 +423,7 @@ const example_dirs = [_][]const u8{"csv_users"};
 
 /// Runs `zig build test` inside each example's directory: it builds the
 /// program, runs it, and compares its stdout with the expected output.
-fn addExampleTests(b: *std.Build, step: *std.Build.Step, optimize: std.builtin.OptimizeMode) void {
+fn addExampleTests(b: *std.Build, step: *std.Build.Step, optimize: std.lang.Optimize) void {
     for (example_dirs) |name| {
         const run = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test", b.fmt("-Doptimize={t}", .{optimize}) });
         run.setName(b.fmt("test examples/{s}", .{name}));
@@ -390,7 +460,10 @@ const CaseModule = struct {
 fn addCompileErrorCases(b: *std.Build, step: *std.Build.Step, cases_dir: []const u8, extra: []const CaseModule) void {
     const io = b.graph.io;
     const build_options = buildOptions(b, true).getOutput();
-    var dir = b.build_root.handle.openDir(io, cases_dir, .{ .iterate = true }) catch |err|
+    // The cases are listed and read at configure time, so tell the
+    // configuration cache: a new, removed or edited case reconfigures.
+    b.dependOnDirectoryContents(b.path(cases_dir));
+    var dir = b.root.openDir(io, cases_dir, .{ .iterate = true }) catch |err|
         std.debug.panic("unable to open {s}: {t}", .{ cases_dir, err });
     defer dir.close(io);
 
@@ -398,6 +471,8 @@ fn addCompileErrorCases(b: *std.Build, step: *std.Build.Step, cases_dir: []const
     while (it.next(io) catch |err| std.debug.panic("unable to list {s}: {t}", .{ cases_dir, err })) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zig")) continue;
 
+        const case_path = b.path(b.fmt("{s}/{s}", .{ cases_dir, entry.name }));
+        b.dependOnFileContents(case_path);
         const source = dir.readFileAlloc(io, entry.name, b.allocator, .limited(64 * 1024)) catch |err|
             std.debug.panic("unable to read {s}/{s}: {t}", .{ cases_dir, entry.name, err });
         if (!std.mem.startsWith(u8, source, expect_prefix))
@@ -406,14 +481,14 @@ fn addCompileErrorCases(b: *std.Build, step: *std.Build.Step, cases_dir: []const
         const run = b.addSystemCommand(&.{ b.graph.zig_exe, "build-obj", "-fno-emit-bin", "--dep", "zom" });
         run.setName(b.fmt("compile-error {s}", .{entry.name}));
         for (extra) |m| run.addArgs(&.{ "--dep", m.name });
-        run.addPrefixedFileArg("-Mroot=", b.path(b.fmt("{s}/{s}", .{ cases_dir, entry.name })));
+        run.addFileArg2(case_path, .{ .prefix = "-Mroot=" });
         run.addArgs(&.{ "--dep", "build_options" });
-        run.addPrefixedFileArg("-Mzom=", b.path("src/root.zig"));
+        run.addFileArg2(b.path("src/root.zig"), .{ .prefix = "-Mzom=" });
         for (extra) |m| {
             for (m.deps) |dep| run.addArgs(&.{ "--dep", dep });
-            run.addPrefixedFileArg(b.fmt("-M{s}=", .{m.name}), m.root);
+            run.addFileArg2(m.root, .{ .prefix = b.fmt("-M{s}=", .{m.name}) });
         }
-        run.addPrefixedFileArg("-Mbuild_options=", build_options);
+        run.addFileArg2(build_options, .{ .prefix = "-Mbuild_options=" });
         run.expectExitCode(1);
         var lines = std.mem.splitScalar(u8, source, '\n');
         while (lines.next()) |line| {
