@@ -9,6 +9,17 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- Boolean groups and runtime lists on joined rows:
+  `whereJoinedAny(.assoc, conds)` and `whereJoinedNot(.assoc, cond)` take
+  the conditions `whereAny` / `whereNot` take, over the joined tuple (so
+  "users with a post that is published or has 10+ likes" can be written),
+  and need `supports.or` on the joined dataset (a compile error
+  otherwise). `whereJoinedIn` / `whereJoinedNotIn` take a runtime slice,
+  borrowed like `whereIn`. `zom.Join` now stores its filters as the same
+  flat node tree as `Query` (`zom.query.FilterNode`, up to
+  `Join.max_nodes = 16`), zom-sql renders it, and `Join.targetQuery`
+  rebuilds the groups for the memory semi-join. `Join.filterSlice()` now
+  asserts `isConjunction()`; walk `topNodes()` for a join with groups. (#80)
 - `combine` checks its key type: a key it can't hash (a float, a struct, an
   array or a slice other than a string) is a `zom.combine` compile error
   naming the type, not an error from inside `std.hash`. `u128` keys

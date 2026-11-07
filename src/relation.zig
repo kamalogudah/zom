@@ -47,6 +47,7 @@ const projection = @import("projection.zig");
 const strings = @import("strings.zig");
 const combine_mod = @import("combine.zig");
 const pagination = @import("pagination.zig");
+const Association = @import("schema.zig").Association;
 
 /// What a relation does with a query feature its dataset does not support.
 pub const Mode = enum {
@@ -666,8 +667,9 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
         /// `join(assoc)`, typed and checked like `where` on the target's
         /// tuple: `users.join(.posts).whereJoined(.posts, .published, .eq,
         /// true)` is the users with at least one published post. Several
-        /// are AND-ed, and must all hold for the same joined row. At most
-        /// `zom.Join.max_filters`; past that, panics. Panics when the
+        /// joined filters (and groups) are AND-ed, and must all hold for
+        /// the same joined row. At most `zom.Join.max_filters` filters and
+        /// `zom.Join.max_nodes` nodes; past that, panics. Panics when the
         /// relation is not joined with `assoc`.
         pub fn whereJoined(
             self: Self,
@@ -678,23 +680,126 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
         ) Self {
             const a = comptime S.association(assoc);
             const call = "whereJoined(." ++ a.name ++ ", ." ++ @tagName(field) ++ ", ." ++ @tagName(op) ++ ", ...)";
+            comptime requireJoinedFilter(a, @tagName(field), op, call);
+            var next = self;
+            next.query.join = self.joinOf(a, call).where(a.target.Tuple, field, op, value);
+            return next;
+        }
+
+        /// `whereJoined(assoc, field, .in, ...)` for a runtime slice (or
+        /// pointer to an array) of values, like `whereIn`: at most
+        /// `Query.max_in` long, and borrowed, not copied, so it must stay
+        /// alive and unchanged while the relation is used.
+        pub fn whereJoinedIn(
+            self: Self,
+            comptime assoc: @TypeOf(.enum_literal),
+            comptime field: std.meta.FieldEnum(S.association(assoc).target.Tuple),
+            values: anytype,
+        ) Self {
+            const a = comptime S.association(assoc);
+            const call = "whereJoinedIn(." ++ a.name ++ ", ." ++ @tagName(field) ++ ", ...)";
+            comptime requireJoinedFilter(a, @tagName(field), .in, call);
+            var next = self;
+            next.query.join = self.joinOf(a, call).whereIn(a.target.Tuple, field, values);
+            return next;
+        }
+
+        /// `whereJoinedIn` for `not_in`, with the same borrowing rule.
+        pub fn whereJoinedNotIn(
+            self: Self,
+            comptime assoc: @TypeOf(.enum_literal),
+            comptime field: std.meta.FieldEnum(S.association(assoc).target.Tuple),
+            values: anytype,
+        ) Self {
+            const a = comptime S.association(assoc);
+            const call = "whereJoinedNotIn(." ++ a.name ++ ", ." ++ @tagName(field) ++ ", ...)";
+            comptime requireJoinedFilter(a, @tagName(field), .not_in, call);
+            var next = self;
+            next.query.join = self.joinOf(a, call).whereNotIn(a.target.Tuple, field, values);
+            return next;
+        }
+
+        /// `whereAny` on the joined rows: `users.join(.posts)
+        /// .whereJoinedAny(.posts, .{ .{ .published, .eq, true }, .{ .likes,
+        /// .gte, 10 } })` is the users with a post that is published or has
+        /// 10+ likes. The conditions are those `whereAny` takes, over the
+        /// target's tuple. Needs `supports.or` on the joined dataset.
+        pub fn whereJoinedAny(self: Self, comptime assoc: @TypeOf(.enum_literal), conds: anytype) Self {
+            const a = comptime S.association(assoc);
+            const call = "whereJoinedAny(." ++ a.name ++ ", ...)";
             comptime requireJoin(a, call);
-            if (comptime Adapter.filterGap(a.target, @tagName(field), op)) |why|
-                @compileError("zom: adapter '" ++ Adapter.name ++ "' cannot evaluate `" ++ call ++ "` on relation '" ++
-                    S.name ++ "': on the joined dataset '" ++ a.target.name ++ "', " ++ why);
+            var next = self;
+            next.query.join = self.joinOf(a, call).whereAny(a.target.Tuple, conds);
+            comptime requireJoinedGroup(a, q.Group(.any, @TypeOf(conds)), call);
+            return next;
+        }
+
+        /// `whereNot` on the joined rows: a joined row for which `cond` is
+        /// false (not unknown, as in SQL). This is "has a post that is not
+        /// published", not "has no published post". Needs `supports.or` on
+        /// the joined dataset.
+        pub fn whereJoinedNot(self: Self, comptime assoc: @TypeOf(.enum_literal), cond: anytype) Self {
+            const a = comptime S.association(assoc);
+            const call = "whereJoinedNot(." ++ a.name ++ ", ...)";
+            comptime requireJoin(a, call);
+            var next = self;
+            next.query.join = self.joinOf(a, call).whereNot(a.target.Tuple, cond);
+            comptime requireJoinedGroup(a, q.Not(@TypeOf(cond)), call);
+            return next;
+        }
+
+        /// The query's join, which must be on `a`; panics otherwise.
+        fn joinOf(self: Self, comptime a: Association, comptime call: []const u8) q.Join {
             const j = self.query.join orelse
                 std.debug.panic("zom: relation '{s}': " ++ call ++ " needs join(.{s}) first", .{ S.name, a.name });
             if (!std.mem.eql(u8, j.assoc, a.name))
                 std.debug.panic("zom: relation '{s}' joins '{s}', not '{s}'; " ++ call ++ " needs join(.{s})", .{
                     S.name, j.assoc, a.name, a.name,
                 });
-            var next = self;
-            next.query.join = j.where(a.target.Tuple, field, op, value);
-            return next;
+            return j;
+        }
+
+        /// A joined filter is checked against the joined dataset, in either
+        /// mode, since a join never runs in memory.
+        fn requireJoinedFilter(
+            comptime a: Association,
+            comptime field: []const u8,
+            comptime op: q.Op,
+            comptime call: []const u8,
+        ) void {
+            requireJoin(a, call);
+            if (Adapter.filterGap(a.target, field, op)) |why| unsupportedJoined(a, call, why);
+        }
+
+        /// `requireGroup` against the joined dataset: the group needs its
+        /// `supports.or`, and each condition is checked like `whereJoined`.
+        fn requireJoinedGroup(comptime a: Association, comptime C: type, comptime call: []const u8) void {
+            if (!Adapter.supports(a.target).@"or")
+                unsupportedJoined(a, call, "boolean groups (`whereJoinedAny`, `whereJoinedNot`) need `supports.or`");
+            requireJoinedCond(a, C, call);
+        }
+
+        fn requireJoinedCond(comptime a: Association, comptime C: type, comptime call: []const u8) void {
+            if (@hasDecl(C, "zom_group")) {
+                for (@typeInfo(@FieldType(C, "conds")).@"struct".fields) |f| requireJoinedCond(a, f.type, call);
+            } else if (@hasDecl(C, "zom_not")) {
+                requireJoinedCond(a, @FieldType(C, "cond"), call);
+            } else {
+                const fields = @typeInfo(C).@"struct".fields;
+                const field: std.meta.FieldEnum(a.target.Tuple) = fields[0].defaultValue().?;
+                const op: q.Op = fields[1].defaultValue().?;
+                if (Adapter.filterGap(a.target, @tagName(field), op)) |why|
+                    unsupportedJoined(a, call ++ " with ." ++ @tagName(field) ++ ", ." ++ @tagName(op), why);
+            }
+        }
+
+        fn unsupportedJoined(comptime a: Association, comptime call: []const u8, comptime why: []const u8) noreturn {
+            @compileError("zom: adapter '" ++ Adapter.name ++ "' cannot evaluate `" ++ call ++ "` on relation '" ++
+                S.name ++ "': on the joined dataset '" ++ a.target.name ++ "', " ++ why);
         }
 
         /// Joins never fall back to memory, so this is checked in either mode.
-        fn requireJoin(comptime a: @import("schema.zig").Association, comptime call: []const u8) void {
+        fn requireJoin(comptime a: Association, comptime call: []const u8) void {
             if (a.kind == .custom)
                 @compileError("zom: `" ++ call ++ "` on relation '" ++ S.name ++ "': '" ++ a.name ++
                     "' is a custom association, which has no foreign key to join on; use `combine(." ++ a.name ++ ", ...)` to load its rows");

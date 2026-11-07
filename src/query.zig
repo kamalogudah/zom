@@ -415,6 +415,28 @@ pub fn not3(a: ?bool) ?bool {
     return if (a) |b| !b else null;
 }
 
+// -- the filter tree ---------------------------------------------------------
+
+/// The filter tree of a `Query` (and of a `Join`), stored flat so that
+/// copying a query copies the whole tree: nodes refer to each other by
+/// index into `nodes`, and to their filter by index into `filters`, never
+/// by pointer. It does not depend on the tuple, so a join's tree has the
+/// same shape as the query over the joined tuple it stands for. `Query(T)`
+/// names them `Node` and `Children`.
+pub const FilterNode = union(enum) {
+    /// Index into `filters`.
+    filter: u8,
+    /// Children AND-ed: `nodes[first..][0..len]`.
+    and_group: FilterChildren,
+    /// Children OR-ed: `nodes[first..][0..len]`.
+    or_group: FilterChildren,
+    /// Index into `nodes` of the negated child.
+    not: u8,
+};
+/// A group's children are contiguous; their own children come after all
+/// of them.
+pub const FilterChildren = struct { first: u8, len: u8 };
+
 // -- joins -------------------------------------------------------------------
 
 /// One `whereJoined` filter: a filter on the joined dataset's tuple. The
@@ -436,12 +458,18 @@ pub const JoinFilter = struct {
 /// `whereJoined` filters. Each row comes back once however many rows it
 /// matches, and with its own columns only.
 ///
-/// Every field is plain data (static strings and a fixed array), so a query
+/// The joined filters form the same flat tree as a `Query`'s (`FilterNode`):
+/// `whereJoined` adds a top-level filter, `whereJoinedAny` / `whereJoinedNot`
+/// a group, and the top-level nodes are AND-ed, all for one joined row.
+///
+/// Every field is plain data (static strings and fixed arrays), so a query
 /// holding a join is still copied by value and never allocates. Only an
 /// adapter with `supports.join` reads it; `Query.matches` ignores it.
 pub const Join = struct {
-    /// Most `whereJoined` filters on one join, AND-ed.
+    /// Most joined filters on one join, top-level or inside a group.
     pub const max_filters = 8;
+    /// Most nodes (filters plus `any` / `all` / `not` groups) on one join.
+    pub const max_nodes = 16;
 
     /// The association's name, on the schema of the query's tuple.
     assoc: []const u8,
@@ -453,49 +481,157 @@ pub const Join = struct {
     /// The column of the joined tuple in `ON`: the foreign key for a
     /// `hasMany`, the target's primary key for a `belongsTo`.
     target_key: []const u8,
+    /// Every joined filter, top-level or inside a group, in the order added.
     filters: [max_filters]JoinFilter = undefined,
     filter_count: u8 = 0,
+    nodes: [max_nodes]FilterNode = undefined,
+    node_count: u8 = 0,
+    /// The nodes the join AND-s together; the others sit in a group.
+    top: std.StaticBitSet(max_nodes) = .initEmpty(),
 
+    comptime {
+        // `targetQuery` copies the tree into a query of any tuple as is.
+        std.debug.assert(max_filters <= Query(struct { x: u8 }).max_filters);
+        std.debug.assert(max_nodes <= Query(struct { x: u8 }).max_nodes);
+    }
+
+    /// True when every joined filter is top-level (no groups), so the join
+    /// is `filterSlice()` AND-ed.
+    pub fn isConjunction(self: *const Join) bool {
+        return self.node_count == self.filter_count;
+    }
+
+    /// The joined filters of a join without groups. Asserts
+    /// `isConjunction()`; a join with groups is read by walking
+    /// `nodeSlice()` from `topNodes()`, as for a `Query`.
     pub fn filterSlice(self: *const Join) []const JoinFilter {
+        std.debug.assert(self.isConjunction());
         return self.filters[0..self.filter_count];
     }
 
-    /// Appends `f`, a filter over the joined tuple `C`. Panics, naming the
-    /// limit, past `max_filters`.
+    pub fn nodeSlice(self: *const Join) []const FilterNode {
+        return self.nodes[0..self.node_count];
+    }
+
+    /// The indices into `nodeSlice()` of the nodes the join AND-s.
+    pub fn topNodes(self: *const Join) std.StaticBitSet(max_nodes).Iterator(.{}) {
+        return self.top.iterator(.{});
+    }
+
+    /// Appends `f`, a filter over the joined tuple `C`, as a top-level
+    /// node. Panics, naming the limit, past `max_filters`.
     pub fn addFilter(self: *Join, comptime C: type, f: Query(C).Filter) void {
-        if (self.filter_count >= max_filters)
+        var one: Query(C) = .{};
+        one.addFilter(f);
+        self.addFrom(C, &one);
+    }
+
+    /// Appends every top-level node of `src`, a query over the joined
+    /// tuple `C`, with everything under it, as top-level nodes of this
+    /// join. Only `src`'s filter tree is read. Panics, naming the limit,
+    /// unless it all fits.
+    pub fn addFrom(self: *Join, comptime C: type, src: *const Query(C)) void {
+        if (@as(usize, self.filter_count) + src.filter_count > max_filters)
             std.debug.panic("zom: join '{s}' has more than Join.max_filters ({d}) filters", .{ self.assoc, max_filters });
-        self.filters[self.filter_count] = switch (f.field) {
-            inline else => |tag| .{
-                .column = @tagName(tag),
-                .nullable = @typeInfo(@FieldType(C, @tagName(tag))) == .optional,
-                .op = f.op,
-                .operand = f.operand,
+        if (@as(usize, self.node_count) + src.node_count > max_nodes)
+            std.debug.panic("zom: join '{s}' has more than Join.max_nodes ({d}) nodes (filters plus any/all/not groups)", .{
+                self.assoc, max_nodes,
+            });
+        var it = src.topNodes();
+        while (it.next()) |i| {
+            const slot = self.node_count;
+            self.node_count += 1;
+            self.top.set(slot);
+            self.copyNode(C, slot, src, @intCast(i));
+        }
+    }
+
+    /// Writes `src.nodes[index]` into `nodes[slot]`, which the caller
+    /// reserved, laying out children as `Query.writeCond` does.
+    fn copyNode(self: *Join, comptime C: type, slot: u8, src: *const Query(C), index: u8) void {
+        switch (src.nodes[index]) {
+            .filter => |f| {
+                const filter = src.filters[f];
+                const at = self.filter_count;
+                self.filter_count += 1;
+                self.filters[at] = switch (filter.field) {
+                    inline else => |tag| .{
+                        .column = @tagName(tag),
+                        .nullable = @typeInfo(@FieldType(C, @tagName(tag))) == .optional,
+                        .op = filter.op,
+                        .operand = filter.operand,
+                    },
+                };
+                self.nodes[slot] = .{ .filter = at };
             },
-        };
-        self.filter_count += 1;
+            .not => |child| {
+                const copy = self.node_count;
+                self.node_count += 1;
+                self.nodes[slot] = .{ .not = copy };
+                self.copyNode(C, copy, src, child);
+            },
+            .and_group, .or_group => |g| {
+                const children: FilterChildren = .{ .first = self.node_count, .len = g.len };
+                self.node_count += g.len;
+                self.nodes[slot] = if (src.nodes[index] == .and_group)
+                    .{ .and_group = children }
+                else
+                    .{ .or_group = children };
+                for (0..g.len) |k| self.copyNode(C, @intCast(children.first + k), src, @intCast(g.first + k));
+            },
+        }
     }
 
     /// A copy of this join with one more filter on the joined tuple `C`,
     /// type-checked exactly like `Query(C).where`.
     pub fn where(self: Join, comptime C: type, comptime field: Query(C).Field, comptime op: Op, value: anytype) Join {
-        const one = (Query(C){}).where(field, op, value);
+        return self.with(C, (Query(C){}).where(field, op, value));
+    }
+
+    /// `Query(C).whereIn` on the joined tuple: borrows `values` the same way.
+    pub fn whereIn(self: Join, comptime C: type, comptime field: Query(C).Field, values: anytype) Join {
+        return self.with(C, (Query(C){}).whereIn(field, values));
+    }
+
+    /// `Query(C).whereNotIn` on the joined tuple.
+    pub fn whereNotIn(self: Join, comptime C: type, comptime field: Query(C).Field, values: anytype) Join {
+        return self.with(C, (Query(C){}).whereNotIn(field, values));
+    }
+
+    /// `Query(C).whereAny` on the joined tuple: some condition holds for
+    /// the joined row.
+    pub fn whereAny(self: Join, comptime C: type, conds: anytype) Join {
+        return self.with(C, (Query(C){}).whereAny(conds));
+    }
+
+    /// `Query(C).whereNot` on the joined tuple: `cond` is false for the
+    /// joined row (not unknown, as in SQL).
+    pub fn whereNot(self: Join, comptime C: type, cond: anytype) Join {
+        return self.with(C, (Query(C){}).whereNot(cond));
+    }
+
+    fn with(self: Join, comptime C: type, src: Query(C)) Join {
         var next = self;
-        next.addFilter(C, one.filters[0]);
+        next.addFrom(C, &src);
         return next;
     }
 
-    /// The joined filters as a query over the joined tuple `C`, for an
-    /// adapter that evaluates the join itself. Copies nothing but the
-    /// filters; list operands still borrow what they borrowed.
+    /// The joined filters as a query over the joined tuple `C`, groups and
+    /// all, for an adapter that evaluates the join itself. Copies nothing
+    /// but the filter tree; list operands still borrow what they borrowed.
     pub fn targetQuery(self: *const Join, comptime C: type) Query(C) {
         const QC = Query(C);
         var out: QC = .{};
-        for (self.filterSlice()) |f| {
+        for (self.filters[0..self.filter_count], 0..) |f, i| {
             const field = std.meta.stringToEnum(QC.Field, f.column) orelse
                 std.debug.panic("zom: join '{s}': '{s}' is not a field of {s}", .{ self.assoc, f.column, @typeName(C) });
-            out.addFilter(.{ .field = field, .op = f.op, .operand = f.operand });
+            out.filters[i] = .{ .field = field, .op = f.op, .operand = f.operand };
         }
+        out.filter_count = self.filter_count;
+        @memcpy(out.nodes[0..self.node_count], self.nodeSlice());
+        out.node_count = self.node_count;
+        var it = self.topNodes();
+        while (it.next()) |i| out.top.set(i);
         return out;
     }
 };
@@ -527,22 +663,8 @@ pub fn Query(comptime T: type) type {
         pub const Order = struct { field: Field, direction: Direction };
         pub const Change = struct { field: Field, value: Value };
 
-        /// The filter tree, stored flat so that copying a query copies the
-        /// whole tree: nodes refer to each other by index into `nodes`, and
-        /// to their filter by index into `filters`, never by pointer.
-        pub const Node = union(enum) {
-            /// Index into `filters`.
-            filter: u8,
-            /// Children AND-ed: `nodes[first..][0..len]`.
-            and_group: Children,
-            /// Children OR-ed: `nodes[first..][0..len]`.
-            or_group: Children,
-            /// Index into `nodes` of the negated child.
-            not: u8,
-        };
-        /// A group's children are contiguous; their own children come after
-        /// all of them.
-        pub const Children = struct { first: u8, len: u8 };
+        pub const Node = FilterNode;
+        pub const Children = FilterChildren;
 
         /// Every filter, top-level or inside a group, in the order added.
         filters: [max_filters]Filter = undefined,

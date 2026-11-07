@@ -314,7 +314,7 @@ breaking change needs a minor version bump and an entry in
 | `zom.Project(T, .{ fields })` | The struct `select` reads into: only `fields` of `T`, in the order given, with their types and defaults. An empty tuple, an unknown field or a repeated one is a compile error. Equal arguments return the same type. |
 | `zom.Adapter(G)` | Checks gateway `G` against the [adapter contract](#the-adapter-contract), reporting every problem in one compile error. Has `Gateway`, `name` (`G.adapter_name`), `Dataset(S)` (checks the dataset for schema `S`), `capabilities(S) Capabilities`, `has(S, cap) bool`, `readOnly(S) bool`, `require(S, cap, method)`, `supports(S) Supports`, and `filterGap(S, field, op)` / `orderGap(S, field)`, which return null when the dataset can evaluate that filter or sort key, else why not. |
 | `zom.Supports` | The query features a dataset evaluates itself: `or` (boolean groups), `in` (`in`, `not_in`), `like` (`like`, `ilike`), `order_on` (order by any attribute, not only the key), `offset`, `projection`, `join` (`relation.join`). `Supports.all` sets them all. |
-| `zom.Join`, `zom.JoinFilter` | What `relation.join(.assoc)` stores in `query.join`: the association's name, the joined table, the key column on each side and up to `Join.max_filters = 8` `whereJoined` filters, each by column name. Plain data, so a query is still copied by value without allocating; `join.targetQuery(C)` gives the filters back as a `zom.Query(C)`. Only an adapter with `supports.join` reads it. |
+| `zom.Join`, `zom.JoinFilter` | What `relation.join(.assoc)` stores in `query.join`: the association's name, the joined table, the key column on each side and its joined filters, each by column name: up to `Join.max_filters = 8` filters in `Join.max_nodes = 16` nodes, as the same flat tree a `Query` uses (`zom.query.FilterNode`; read it from `topNodes()`, or through `filterSlice()` when `isConjunction()`). Plain data, so a query is still copied by value without allocating; `join.targetQuery(C)` gives the filters back, groups and all, as a `zom.Query(C)`. Only an adapter with `supports.join` reads it. |
 | `zom.Capability` | `writable`, `batch_insert`, `updatable`, `deletable`, `transaction`. |
 | `zom.StringOwnership` | `dataset` or `caller`: who frees the strings in the tuples a dataset returns. See [Memory rules](#memory-rules). |
 | `zom.strings` | Helpers for caller-owned strings: `freeFields(T, allocator, item, keep)` frees an item's string attributes except those named in `keep`, `freeAll(T, allocator, items)` frees every item's strings and the slice, and `dupeFields(T, allocator, item)` copies them (freeing its copies on error). |
@@ -371,6 +371,8 @@ relation and never touch the dataset. `field` is always an enum literal, and
 | `combine(.assoc, target)` | `zom.Combined(...)` | This relation with association `assoc` of its schema, read from `target`, a relation over the association's target schema, or a combine of one for nested levels. Lazy; its `mapTo(E, allocator)` and `mapWith(M, allocator)` return a `zom.CombineResult(E)`. See [Associations](#associations). |
 | `join(.assoc)` | `Relation` | The rows that have at least one row of association `assoc`, each once, as the same relation type. Needs `supports.join` (a compile error otherwise, even on a `.fallback` relation). See [Join](#join). |
 | `whereJoined(.assoc, field, op, value)` | `Relation` | A filter on the joined rows, typed like `where` on the target's tuple. Needs `join(.assoc)` first. |
+| `whereJoinedIn(.assoc, field, values)`, `whereJoinedNotIn(...)` | `Relation` | `whereIn` / `whereNotIn` on the joined rows: a runtime slice, borrowed, at most `max_in` long. |
+| `whereJoinedAny(.assoc, conds)`, `whereJoinedNot(.assoc, cond)` | `Relation` | `whereAny` / `whereNot` on the joined rows. Needs `supports.or` on the joined dataset. |
 | `create(tuple)` | `Create` | `.map(f)` applies `f: fn (Tuple) Tuple`; `.associate(.assoc, parent)` overwrites the tuple's foreign key from `parent`; `.commit()` returns `!Tuple`, the stored tuple. `.commitAlloc(allocator)` does the same on every adapter, allocating the returned strings when they are caller-owned (zom-pg, where plain `commit()` is a compile error); free the result with `freeOne`. A compile error after `select`. |
 | `createMany(tuples)` | `CreateMany` | A compile error after `select`. `tuples: []const Tuple`, borrowed until commit. `.commit()` returns `!usize`, the rows inserted. Uses the dataset's `insertMany`, else loops over `insert` (see [the adapter contract](#the-adapter-contract)). `.associate(.assoc, parent)` sets every tuple's foreign key on a copy, so the changeset then commits with `.commitAlloc(allocator)`. |
 | `associate(.assoc, parent)` | `zom.changeset.Scoped(...)` | Sets the foreign key of `belongsTo` association `assoc` from `parent`, the target's tuple or a `select` of it that kept the key. Its `create(data)` and `createMany(rows)` take `Input`, the tuple without that key; chain `.associate` for more associations. Its `createMany` commits with `commitAlloc(allocator)`. A compile error after `select`. See [Associated creates](#associated-creates). |
@@ -948,6 +950,23 @@ post. A user with several matching posts still comes back once. `belongsTo`
 joins the other way: `posts.join(.author).whereJoined(.author, .role, .eq,
 .admin)` is the posts written by admins, and a post whose foreign key is
 null has no author to join.
+
+`whereJoinedAny` and `whereJoinedNot` take the same conditions as
+`whereAny` and `whereNot`, over the joined tuple, and need `supports.or` on
+the joined dataset. `whereJoinedIn` and `whereJoinedNotIn` take a runtime
+slice and borrow it, like `whereIn`:
+
+```zig
+// The users with a post that is published or has 10+ likes.
+const busy = users.join(.posts)
+    .whereJoinedAny(.posts, .{ .{ .published, .eq, true }, .{ .likes, .gte, 10 } });
+// The users with one of these posts.
+const picked = users.join(.posts).whereJoinedIn(.posts, .id, post_ids);
+```
+
+Everything on a join is AND-ed for the same joined row, groups included.
+So `whereJoinedNot(.posts, .{ .published, .eq, true })` is the users with
+a post that is not published, not the users with no published post.
 
 A join needs `supports.join`. Without it, `join` and `whereJoined` are
 compile errors on a `.fallback` relation too, since a join reads another

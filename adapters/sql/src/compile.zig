@@ -296,7 +296,7 @@ fn writePaging(comptime dialect: Dialect, w: *Writer, query: anytype) Writer.Err
 }
 
 /// ` WHERE a AND b ...` over the query's top-level nodes, then the joined
-/// filters of `join`; nothing when there are none. Columns of the query's
+/// ones of `join`; nothing when there are none. Columns of the query's
 /// tuple are qualified with `qual`, joined ones with the joined table.
 fn writeWhere(
     comptime dialect: Dialect,
@@ -316,10 +316,44 @@ fn writeWhere(
     }
     const j = join orelse return;
     const alias = joinAlias(qual.?, j);
-    for (j.filterSlice()) |f| {
+    var joined = j.topNodes();
+    while (joined.next()) |i| {
         try w.writeAll(if (first) " WHERE " else " AND ");
         first = false;
-        try writeCondition(dialect, w, params, alias, f.column, f.nullable, f.op, f.operand);
+        try writeJoinNode(dialect, w, params, alias, j, @intCast(i));
+    }
+}
+
+/// `writeNode` for a node of the join's filter tree, on the joined table.
+fn writeJoinNode(
+    comptime dialect: Dialect,
+    w: *Writer,
+    params: *Params,
+    alias: []const u8,
+    j: *const zom.Join,
+    index: u8,
+) RenderError!void {
+    switch (j.nodes[index]) {
+        .filter => |i| {
+            const f = j.filters[i];
+            try writeCondition(dialect, w, params, alias, f.column, f.nullable, f.op, f.operand);
+        },
+        .not => |child| {
+            try w.writeAll("NOT ");
+            const bare = j.nodes[child] == .filter or j.nodes[child] == .not;
+            if (bare) try w.writeByte('(');
+            try writeJoinNode(dialect, w, params, alias, j, child);
+            if (bare) try w.writeByte(')');
+        },
+        .and_group, .or_group => |g| {
+            const sep = if (j.nodes[index] == .and_group) " AND " else " OR ";
+            try w.writeByte('(');
+            for (g.first..g.first + g.len) |c| {
+                if (c > g.first) try w.writeAll(sep);
+                try writeJoinNode(dialect, w, params, alias, j, @intCast(c));
+            }
+            try w.writeByte(')');
+        },
     }
 }
 

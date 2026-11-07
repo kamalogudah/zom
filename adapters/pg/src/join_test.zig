@@ -155,6 +155,71 @@ fn scenario(comptime G: type, gw: *G) !void {
         try testing.expectEqual(1, result.items[1].posts.len);
     }
 
+    // Runtime lists on the joined table, borrowed like whereIn's.
+    {
+        const ids = [_]u32{ 13, 14, 15 };
+        const rows = try users.join(.posts).whereJoinedIn(.posts, .id, ids[0..]).order(.id, .asc).toSlice(a);
+        defer users.free(a, rows);
+        try expectIds(&.{ 1, 3 }, rows);
+    }
+    {
+        // A null user_id is in no list and outside none: the orphan never joins anyway.
+        const ones = [_]u32{1};
+        const rows = try users.join(.posts).whereJoinedNotIn(.posts, .user_id, &ones).order(.id, .asc).toSlice(a);
+        defer users.free(a, rows);
+        try expectIds(&.{ 2, 3 }, rows);
+    }
+    {
+        // Empty runtime lists on a nullable joined column.
+        const none: []const u32 = &.{};
+        try testing.expectEqual(0, try users.join(.posts).whereJoinedIn(.posts, .user_id, none).count());
+        try testing.expectEqual(3, try users.join(.posts).whereJoinedNotIn(.posts, .user_id, none).count());
+    }
+
+    // Groups on the joined rows: a draft or 10+ likes...
+    {
+        const rows = try users.join(.posts)
+            .whereJoinedAny(.posts, .{ .{ .published, .eq, false }, .{ .likes, .gte, 10 } })
+            .order(.id, .asc).toSlice(a);
+        defer users.free(a, rows);
+        try expectIds(&.{ 1, 3 }, rows);
+    }
+    // ...AND-ed with a top-level joined filter, all for one post (#11 or #14).
+    {
+        const rows = try users.join(.posts)
+            .whereJoinedAny(.posts, .{ .{ .published, .eq, false }, .{ .title, .ilike, "%sql" } })
+            .whereJoined(.posts, .likes, .gte, 10)
+            .toSlice(a);
+        defer users.free(a, rows);
+        try expectIds(&.{1}, rows);
+    }
+    {
+        const rows = try users.join(.posts).whereJoinedNot(.posts, .{ .published, .eq, true }).order(.id, .asc).toSlice(a);
+        defer users.free(a, rows);
+        try expectIds(&.{ 1, 3 }, rows);
+    }
+    {
+        // Published with fewer than 10 likes (#10, #12), and the user's own filter.
+        const rows = try users.where(.role, .eq, .member).join(.posts)
+            .whereJoinedNot(.posts, zom.any(.{ .{ .published, .eq, false }, .{ .likes, .gte, 10 } }))
+            .toSlice(a);
+        defer users.free(a, rows);
+        try expectIds(&.{2}, rows);
+    }
+    {
+        const rows = try posts.join(.author)
+            .whereJoinedAny(.author, .{ .{ .role, .eq, .admin }, .{ .age, .is_null, {} } })
+            .order(.id, .asc).toSlice(a);
+        defer posts.free(a, rows);
+        try expectIds(&.{ 10, 11, 13, 14 }, rows);
+    }
+    {
+        // NOT keeps unknown unknown: Wanjiru's null age is not "not over 30".
+        const rows = try posts.join(.author).whereJoinedNot(.author, .{ .age, .gt, 30 }).toSlice(a);
+        defer posts.free(a, rows);
+        try expectIds(&.{12}, rows);
+    }
+
     // Writes never take a join, and nothing changed.
     try testing.expectError(error.JoinedWrite, users.join(.posts).delete());
     try testing.expectError(error.JoinedWrite, users.join(.posts).update().set(.age, 1).commit());

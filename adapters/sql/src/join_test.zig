@@ -107,6 +107,59 @@ test "an empty joined in list on a nullable column stays unknown for null" {
     , &.{});
 }
 
+test "a runtime IN list on the joined table binds one placeholder per value" {
+    const ids = [_]u32{ 3, 5, 8 };
+    try expectSql(
+        .postgres,
+        users.where(.age, .gt, 20).join(.posts).whereJoinedIn(.posts, .id, &ids).whereJoinedNotIn(.posts, .user_id, ids[0..1]),
+        users_join_posts ++
+            \\ WHERE "users"."age" > $1 AND "posts"."id" IN ($2, $3, $4) AND "posts"."user_id" NOT IN ($5)
+        ,
+        &.{ int(20), int(3), int(5), int(8), int(3) },
+    );
+    // An empty runtime list renders like an empty tuple would.
+    const none: []const u32 = &.{};
+    try expectSql(.postgres, users.join(.posts).whereJoinedIn(.posts, .id, none), users_join_posts ++
+        \\ WHERE 1=0
+    , &.{});
+}
+
+test "whereJoinedAny / whereJoinedNot render as groups on the joined table" {
+    try expectSql(
+        .postgres,
+        users.join(.posts).whereJoinedAny(.posts, .{ .{ .published, .eq, true }, .{ .rating, .gte, 4 } }),
+        users_join_posts ++
+            \\ WHERE ("posts"."published" = $1 OR "posts"."rating" >= $2)
+        ,
+        &.{ .{ .boolean = true }, int(4) },
+    );
+    // Groups of both tuples, nested groups, NOT and a runtime list, AND-ed
+    // in the order they were added: the query's own first, then the join's.
+    const ids = [_]u32{ 7, 9 };
+    try expectSql(
+        .postgres,
+        users.join(.posts)
+            .whereJoined(.posts, .title, .like, "Zig%")
+            .whereJoinedAny(.posts, .{ zom.all(.{ .{ .published, .eq, true }, .{ .rating, .is_null, {} } }), .{ .id, .in, ids[0..] } })
+            .whereJoinedNot(.posts, .{ .published, .eq, false })
+            .whereJoinedNot(.posts, zom.any(.{ .{ .rating, .lt, 2 }, .{ .title, .eq, "x" } }))
+            .whereAny(.{ .{ .age, .lt, 3 }, .{ .name, .eq, "y" } }),
+        users_join_posts ++
+            \\ WHERE ("users"."age" < $1 OR "users"."name" = $2) AND "posts"."title" LIKE $3 ESCAPE '\' AND (("posts"."published" = $4 AND "posts"."rating" IS NULL) OR "posts"."id" IN ($5, $6)) AND NOT ("posts"."published" = $7) AND NOT ("posts"."rating" < $8 OR "posts"."title" = $9)
+        ,
+        &.{ int(3), .{ .string = "y" }, .{ .string = "Zig%" }, .{ .boolean = true }, int(7), int(9), .{ .boolean = false }, int(2), .{ .string = "x" } },
+    );
+    // On a self-join, the group uses the alias.
+    try expectSql(
+        .sqlite,
+        users.join(.manager).whereJoinedAny(.manager, .{ .{ .age, .gt, 50 }, .{ .name, .eq, "Boss" } }),
+        "SELECT DISTINCT " ++ users_cols ++
+            \\ FROM "users" INNER JOIN "users" AS "manager" ON "manager"."id" = "users"."manager_id" WHERE ("manager"."age" > ? OR "manager"."name" = ?)
+        ,
+        &.{ int(50), .{ .string = "Boss" } },
+    );
+}
+
 test "groups, order and paging on a joined select are qualified too" {
     try expectSql(
         .postgres,

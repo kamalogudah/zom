@@ -324,3 +324,124 @@ test "Join.targetQuery gives back typed filters over the joined tuple" {
     try testing.expect(tq.matches(.{ .id = 1, .user_id = null, .title = "", .published = true }));
     try testing.expect(!tq.matches(.{ .id = 1, .user_id = 3, .title = "", .published = true }));
 }
+
+test "whereJoinedIn / whereJoinedNotIn take a runtime slice of joined values" {
+    var f: Fixture = .{ .gw = undefined };
+    try f.init();
+    defer f.deinit();
+    const a = testing.allocator;
+
+    var ids = [_]u32{ 11, 13 };
+    {
+        const rows = try f.users.join(.posts).whereJoinedIn(.posts, .id, ids[0..]).order(.id, .asc).toSlice(a);
+        defer f.users.free(a, rows);
+        try expectIds(&.{ 1, 3 }, rows);
+    }
+    {
+        // A pointer to an array works too. Every post but 10, 11 and 12.
+        const skip = [_]u32{ 10, 11, 12 };
+        const rows = try f.users.join(.posts).whereJoinedNotIn(.posts, .id, &skip).toSlice(a);
+        defer f.users.free(a, rows);
+        try expectIds(&.{3}, rows);
+    }
+    {
+        // An empty list matches no joined row.
+        const none: []const u32 = &.{};
+        const rows = try f.users.join(.posts).whereJoinedIn(.posts, .id, none).toSlice(a);
+        defer f.users.free(a, rows);
+        try expectIds(&.{}, rows);
+    }
+    // The slice is borrowed: changing it changes what the relation reads.
+    const rel = f.users.join(.posts).whereJoinedIn(.posts, .id, ids[0..]);
+    try testing.expectEqual(2, try rel.count());
+    ids = .{ 12, 12 };
+    try testing.expectEqual(1, try rel.count());
+}
+
+test "whereJoinedAny: one joined row satisfies some condition" {
+    var f: Fixture = .{ .gw = undefined };
+    try f.init();
+    defer f.deinit();
+    const a = testing.allocator;
+
+    {
+        // The issue's example: a post that is published OR has 10+ likes.
+        const rows = try f.users.join(.posts)
+            .whereJoinedAny(.posts, .{ .{ .published, .eq, true }, .{ .likes, .gte, 10 } })
+            .order(.id, .asc).toSlice(a);
+        defer f.users.free(a, rows);
+        try expectIds(&.{ 1, 2 }, rows);
+    }
+    {
+        // AND-ed with a top-level joined filter, for the same row: a draft
+        // with 10+ likes or titled "Draft". Achieng (#11) and Wanjiru (#13).
+        const rows = try f.users.join(.posts)
+            .whereJoined(.posts, .published, .eq, false)
+            .whereJoinedAny(.posts, .{ .{ .likes, .gte, 10 }, .{ .title, .eq, "Draft" } })
+            .order(.id, .asc).toSlice(a);
+        defer f.users.free(a, rows);
+        try expectIds(&.{ 1, 3 }, rows);
+    }
+    {
+        // Nested groups and a runtime slice inside one.
+        const few = [_]u32{13};
+        const rows = try f.users.join(.posts)
+            .whereJoinedAny(.posts, .{
+                zom.all(.{ .{ .published, .eq, true }, .{ .likes, .lt, 6 } }),
+                .{ .id, .in, few[0..] },
+            })
+            .order(.id, .asc).toSlice(a);
+        defer f.users.free(a, rows);
+        try expectIds(&.{ 1, 3 }, rows);
+    }
+}
+
+test "whereJoinedNot: a joined row for which the condition is false" {
+    var f: Fixture = .{ .gw = undefined };
+    try f.init();
+    defer f.deinit();
+    const a = testing.allocator;
+
+    {
+        // A post that is not published: not the users without a published post.
+        const rows = try f.users.join(.posts).whereJoinedNot(.posts, .{ .published, .eq, true }).order(.id, .asc).toSlice(a);
+        defer f.users.free(a, rows);
+        try expectIds(&.{ 1, 3 }, rows);
+    }
+    {
+        const rows = try f.users.join(.posts)
+            .whereJoinedNot(.posts, zom.any(.{ .{ .published, .eq, false }, .{ .likes, .gte, 6 } }))
+            .toSlice(a);
+        defer f.users.free(a, rows);
+        try expectIds(&.{1}, rows);
+    }
+    // belongsTo: posts whose author is not an admin. The orphan has no author.
+    {
+        const rows = try f.posts.join(.author).whereJoinedNot(.author, .{ .role, .eq, .admin }).order(.id, .asc).toSlice(a);
+        defer f.posts.free(a, rows);
+        try expectIds(&.{ 12, 13 }, rows);
+    }
+}
+
+test "Join holds a group as a flat tree, and targetQuery rebuilds it" {
+    var j: zom.Join = .{ .assoc = "posts", .table = "posts", .source_key = "id", .target_key = "user_id" };
+    j = j.where(Post, .published, .eq, true)
+        .whereAny(Post, .{ .{ .likes, .gte, 10 }, zom.not(.{ .title, .eq, "x" }) })
+        .whereNot(Post, .{ .user_id, .is_null, {} });
+    try testing.expect(!j.isConjunction());
+    try testing.expectEqual(4, j.filter_count);
+    // Three top-level nodes; the any has two children, one a not.
+    try testing.expectEqual(7, j.node_count);
+    try testing.expectEqual(3, j.top.count());
+
+    // The tree is copied by value with the join.
+    const copy = j;
+    const tq = copy.targetQuery(Post);
+    try testing.expectEqual(4, tq.filter_count);
+    try testing.expectEqual(7, tq.node_count);
+    const row: Post = .{ .id = 1, .user_id = 2, .title = "y", .published = true };
+    try testing.expect(tq.matches(row));
+    try testing.expect(!tq.matches(.{ .id = 1, .user_id = null, .title = "y", .published = true }));
+    try testing.expect(!tq.matches(.{ .id = 1, .user_id = 2, .title = "x", .published = true, .likes = 3 }));
+    try testing.expect(tq.matches(.{ .id = 1, .user_id = 2, .title = "x", .published = true, .likes = 30 }));
+}
