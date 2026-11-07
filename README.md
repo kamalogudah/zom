@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="Zom%20Iguana%20Data%20Mapping%20Logo.png" alt="Zom Iguana Data Mapping" width="240">
+</p>
+
 # zom
 
 A [rom-rb](https://github.com/hanakai-rb/rom) style data mapping toolkit for Zig 0.17.
