@@ -25,7 +25,7 @@ paired with [rom-sql](https://github.com/hanakai-rb/rom-sql),
 | Packaging | One package, `zom`, with all adapters inside it. |
 
 Every issue from the last review is fixed in 0.2.0, and the public API is
-frozen there (see [CHANGELOG.md](CHANGELOG.md) and the README's API section).
+frozen there (see [CHANGELOG.md](CHANGELOG.md) and [docs/api.md](docs/api.md)).
 
 ## 2. What rom has, and how each part maps to zom
 

@@ -792,7 +792,7 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 Phase 0 of [plan.md](plan.md): the core is tidied and its public API is
 frozen. Adapters written from Phase 1 on build against this release. The
-API is listed in the README under [API (v0.2)](README.md#api-v02).
+API is listed in the README under [API (v0.2)](docs/api.md#api-v02).
 
 ### Changed (breaking)
 

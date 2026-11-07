@@ -70,7 +70,7 @@ jobs:
             exit 1
           fi
 
-      # The README's Postgres example, in a database of its own: builds it,
+      # examples/pg_repo, in a database of its own: builds it,
       # runs it, and checks its output (examples/pg_repo/build.zig).
       - name: examples/pg_repo (against Postgres)
         working-directory: examples/pg_repo

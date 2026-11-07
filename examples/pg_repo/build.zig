@@ -29,7 +29,7 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run.step);
 
     // zom's pg CI workflow runs this against its Postgres service, so the
-    // example can't drift from the API, or its output from the README.
+    // example can't drift from the API, or its output from examples/README.md.
     const check = b.addRunArtifact(exe);
     // The database is input the cache can't see.
     check.has_side_effects = true;

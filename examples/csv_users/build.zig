@@ -34,7 +34,7 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run.step);
 
     // The root build's `test` step runs this, so the example can't drift
-    // from the API, or its output from what the README shows.
+    // from the API, or its output from what examples/README.md shows.
     const check = b.addRunArtifact(exe);
     check.setCwd(b.path("."));
     check.expectStdOutEqual(expected_output);

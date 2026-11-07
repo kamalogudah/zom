@@ -41,7 +41,7 @@ pub fn build(b: *std.Build) void {
     const tests = b.addTest(.{ .root_module = mod });
     test_step.dependOn(&b.addRunArtifact(tests).step);
 
-    // README code blocks, compiled against the public module like a user would.
+    // The code blocks of README.md and docs/, compiled against the public module like a user would.
     const readme = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("examples/readme.zig"),
         .target = target,

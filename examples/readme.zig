@@ -1,6 +1,15 @@
-//! Every code block in README.md, pasted verbatim into a test so that
-//! `zig build test` fails when the README drifts from the API. Each test
-//! names the README section it comes from; keep them in sync.
+//! The code blocks of README.md and docs/*.md, pasted verbatim into tests
+//! so that `zig build test` fails when the docs drift from the API. Each
+//! test names the section it comes from ("README: Join" is the "Join"
+//! section, now in docs/associations.md); keep them in sync. The sections
+//! live in: README.md (Quick start, A longer tour), docs/api.md
+//! (Projections, Pagination, Query support, Value), docs/containers.md
+//! (Container, Repository, Plugins, Writing a plugin, Instrumentation),
+//! docs/associations.md (Associations, Combine, Join, Associated creates,
+//! Nesting) and docs/adapters.md (The adapter contract, Checking an
+//! adapter with zom.lint). The Postgres walkthrough's blocks come from
+//! examples/pg_repo, and zom-sql's from adapters/sql/README.md (tested in
+//! adapters/sql/src/compile_test.zig).
 
 const std = @import("std");
 const testing = std.testing;
