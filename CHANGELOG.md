@@ -7,6 +7,13 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ## [Unreleased]
 
+### Fixed
+
+- Depending on zom (`b.dependency("zom", ...)`) no longer panics with
+  `unable to open tests/compile_errors: FileNotFound`. The compile-error
+  cases are not part of the fetched package, so zom's `build.zig` now
+  registers them only when zom is the root project.
+
 ## [0.17.1] - 2026-11-07
 
 zom now builds with **Zig 0.17.1** (`minimum_zig_version = "0.17.1"`), and
