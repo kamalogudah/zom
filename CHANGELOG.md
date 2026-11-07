@@ -54,6 +54,11 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
   naming the type, not an error from inside `std.hash`. `u128` keys
   (TigerBeetle ids) are tested in both directions. The supported key types are listed in
   the README's "Combine" section. (#79)
+- `combine` into a relation that already has `Query.max_filters` filters
+  (or `max_nodes` nodes) returns `error.CombineTargetFull`, at every level
+  of a nested combine, instead of panicking in `Query.reserve` over the
+  `whereIn` it adds. A target dataset with `loadAssociation` adds no
+  filter and is not limited. (#85)
 - Per-parent paging in `combine`: a `limit` or `offset` on the target
   relation now pages each parent's rows, so
   `users.combine(.posts, posts.order(.id, .desc).limit(3))` gives every

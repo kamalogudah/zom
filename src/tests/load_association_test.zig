@@ -237,6 +237,21 @@ test "a hasMany into a dataset with loadAssociation goes through it too" {
     try testing.expectEqual(0, f.gw.messages.paged_loads);
 }
 
+test "a target with loadAssociation takes a query already at max_filters" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+
+    // combine adds no `whereIn` here, so a full query is not CombineTargetFull.
+    var full = f.messages;
+    for (0..Messages.Q.max_filters) |_| full = full.where(.id, .neq, 99);
+    const Author = struct { id: u32, sent: []const Message };
+    var result = try f.people.order(.id, .asc).combine(.sent, full).mapTo(Author, testing.allocator);
+    defer result.deinit();
+    try testing.expectEqual(1, f.gw.messages.loads);
+    try expectIds(&.{ 10, 12 }, result.items[0].sent);
+}
+
 test "nested combine: the inner level fills rows loaded by the dataset, and loads through it" {
     var f: Fixture = undefined;
     try f.init();

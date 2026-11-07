@@ -234,6 +234,49 @@ test "combine: the parent's limit applies to parents, and no keys means no child
     try testing.expectEqual(0, post_reads.*);
 }
 
+test "combine: a target already at max_filters or max_nodes is error.CombineTargetFull" {
+    var f: Fixture(CountingGateway) = undefined;
+    try f.init();
+    defer f.deinit();
+    const post_reads = &(try f.gw.dataset(PostSchema)).reads;
+    const Q = @TypeOf(f.posts).Q;
+
+    // One filter short: combine's `whereIn` is the last one, and it reads.
+    var room = f.posts;
+    for (0..Q.max_filters - 1) |_| room = room.where(.id, .neq, 99);
+    var ok = try f.users.order(.id, .asc).combine(.posts, room).mapTo(Writer, testing.allocator);
+    defer ok.deinit();
+    try testing.expectEqual(2, ok.items[0].posts.len);
+
+    // Every filter taken, by the user: a named error, not a panic in
+    // Query.reserve, and no target read, even with no keys.
+    const full = room.where(.id, .neq, 98);
+    try testing.expectEqual(@as(usize, Q.max_filters), full.query.filter_count);
+    post_reads.* = 0;
+    try testing.expectError(error.CombineTargetFull, f.users.combine(.posts, full).mapTo(Writer, testing.allocator));
+    try testing.expectError(error.CombineTargetFull, f.users.where(.id, .gt, 100).combine(.posts, full).mapTo(Writer, testing.allocator));
+    try testing.expectEqual(0, post_reads.*);
+
+    // Every node taken with filters to spare: not(not(x)) is three nodes
+    // for one filter.
+    var nodes = f.posts;
+    for (0..(Q.max_nodes - 2) / 3) |_| nodes = nodes.whereNot(zom.not(.{ .id, .neq, 99 }));
+    nodes = nodes.whereNot(.{ .id, .eq, 99 });
+    try testing.expectEqual(@as(u8, Q.max_nodes), nodes.query.node_count);
+    try testing.expect(nodes.query.filter_count < Q.max_filters);
+    try testing.expectError(error.CombineTargetFull, f.users.combine(.posts, nodes).mapTo(Writer, testing.allocator));
+
+    // The inner level of a nested combine is checked the same way.
+    const Inner = struct { id: u32, title: []const u8, comments: []const CommentTuple };
+    const Outer = struct { id: u32, posts: []const Inner };
+    var comments = try zom.Relation(CommentSchema, CountingGateway).init(&f.gw);
+    for (0..Q.max_filters) |_| comments = comments.where(.id, .neq, 99);
+    try testing.expectError(
+        error.CombineTargetFull,
+        f.users.combine(.posts, f.posts.combine(.comments, comments)).mapTo(Outer, testing.allocator),
+    );
+}
+
 const PostWithAuthor = struct {
     id: u32,
     title: []const u8,

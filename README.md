@@ -1095,6 +1095,11 @@ association filled the same way. One `result.deinit()` frees the whole
 tree. The inner levels map by attribute name; `mapWith` applies to the
 outermost rows only.
 
+The `whereIn` takes one of the target query's `max_filters` filters (and
+`max_nodes` nodes), so a target relation that already uses them all is
+`error.CombineTargetFull`, at any level, even when there are no keys. A
+target dataset with `loadAssociation` adds no filter and has no such limit.
+
 ### Value
 
 ```zig

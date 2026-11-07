@@ -28,7 +28,12 @@
 //! 3. The associated relation is read with `whereIn(key, keys)`, one query
 //!    per `Query.max_in` keys, so ⌈keys / max_in⌉ queries (none when there
 //!    are no keys). Each key is in exactly one query, so every group keeps
-//!    the associated relation's order.
+//!    the associated relation's order. The `whereIn` takes one of the
+//!    query's `Query.max_filters` filters (and `max_nodes` nodes), so an
+//!    associated relation that already has them all is
+//!    `error.CombineTargetFull`, even when there are no keys to read. A
+//!    target dataset with `loadAssociation` adds no filter and has no such
+//!    limit.
 //! 4. The rows are grouped by key with a hash map from the key to its
 //!    position in the key list, then a counting pass, so a `hasMany`'s
 //!    children all go into one slice and each parent gets a sub-slice of it.
@@ -298,6 +303,13 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
 
             if (comptime hooked)
                 return self.fillLoaded(M, X, target, page, sources, items, keys.items, &index, arena, scratch);
+
+            // `whereIn` below adds one filter (one node) to the target's
+            // query. A target already at the limit would panic in
+            // `Query.reserve`, blaming a filter the user never wrote; say
+            // so here instead, whether or not there are keys this time.
+            if (target.query.filter_count >= Rel.Q.max_filters or target.query.node_count >= Rel.Q.max_nodes)
+                return error.CombineTargetFull;
 
             // One target query per `max_in` keys, all rows in one slice.
             var batches: std.ArrayList([]const Rel.Output) = .empty;
