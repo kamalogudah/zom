@@ -329,10 +329,10 @@ breaking change needs a minor version bump and an entry in
 | `zom.Repository(App, .{ .root, .relations })` | Groups some of a container's relations around a root relation: `init(&app)`, `relations` (one field per relation, or its wrapper struct), `root()`, and the root shortcuts `byPk`, `where`, `all`, `create`, `createMany`, `update`, `delete`. See [Repository](#repository). |
 | `zom.plugins` | Schema plugins: `timestamps(.{ .created, .updated, .unit })`, the `Context` and `Clock` hooks read, `ChangeList(T)` (what `beforeUpdate` hooks edit) and `max_changes`. See [Plugins](#plugins). |
 | `zom.changeset` | `Create(Rel)`, `CreateMany(Rel)`, `Update(Rel)` and `Scoped(Rel, keys)`, the types returned by `relation.create`, `relation.createMany`, `relation.update` and `relation.associate`. You don't name them yourself; `Scoped`'s `Input` is the struct its `create` takes. |
-| `zom.Mapper(Src, Dst, .{ .renames, .skip })` | A comptime mapper: `call(src) Dst` and `many(allocator, srcs) ![]Dst`. A `Dst` field takes the `Src` field of the same name (or its rename), else its default; neither is a compile error. Fields named in `skip` are left undefined for the caller to fill. `sources` lists the `Src` fields it copies, and `options` the options it was made with. |
+| `zom.Mapper(Src, Dst, .{ .renames })` | A comptime mapper: `call(src) Dst` and `many(allocator, srcs) ![]Dst`. A `Dst` field takes the `Src` field of the same name (or its rename), else its default; neither is a compile error. Every field is set. `sources` lists the `Src` fields it copies, and `options` the options it was made with. |
 | `zom.Combined(Source, association, Target)`, `zom.CombineResult(E)` | What `relation.combine(.assoc, target)` returns, and what its `mapTo` / `mapWith` return: `items: []E` and the arena owning them, freed with `deinit()`. See [Associations](#associations). |
 | `zom.combineMany(.{ .into, .parent_key, .child_key }, allocator, parents, children)` | **Deprecated:** use `relation.combine`. Sets `parent.into` to the children whose `child_key` equals the parent's `parent_key`, on slices already loaded, in O(n·m). Build with `-Dno-deprecated` to make each call a compile error. |
-| `zom.mapper` | The module behind `Mapper` and `combineMany`, with their option types `Options`, `Rename` and `CombineOptions`. |
+| `zom.mapper` | The module behind `Mapper` and `combineMany`, with their option types `Options`, `Rename` and `CombineOptions`, and `isMapper(M)`, true when `M` was made by `zom.Mapper`. |
 | `zom.codec` | Text cells to field values, for adapters whose rows arrive as strings. `decodeField(F, text, opts) !F` decodes one cell, and `decodeRow(T, cells, opts, ?*Diagnostic) !T` decodes a row, in field order or through `Options.columns`. `Options.null_text` (default `""`) means null. Strings borrow the cells. On error the `Diagnostic` has `row`, `column`, `field`, `text` and `err`, and formats with `{f}` as `14:3 (age): "abc" is not an integer from 0 to 255`. The other way, `encodeField(writer, value, opts)` and `encodeRow(writer, T, row, opts, sep)` write values back so they decode to the same thing: ints `{d}`, floats in their shortest round-trip form (decimal, or scientific outside `1e-6`..`1e21`), `true`/`false`, tag names, strings as they are, `null` as `null_text`. Nothing is quoted; that is the format writer's job. The accepted spellings are listed in `src/codec.zig`. |
 | `zom.memory` | The in-memory adapter: `Gateway` (`adapter_name = "memory"`, `Config = struct {}`, `init(allocator, Config)`, `deinit()`), whose dataset is `Store(S)`. Every capability; its `transaction` saves each store's rows and puts them back on error, for tests without a database. |
 | `zom.memory.Store(S)` | The in-memory row engine, usable without a gateway: `init(allocator)`, `deinit()`, `read`, `count`, `insert`, `insertMany`, `update`, `delete`, plus `rows() []const Tuple` (every row, in insertion order), `load(row)` and `loadMany(rows)` (insert without the primary-key check, for trusted bulk loads) and `clear()`. Strings are copied into the store's arena; rows it returns point into it until `clear` or `deinit`. |
@@ -854,6 +854,14 @@ The entity needs a field named after the association: `[]const X` for
 struct `zom.Mapper` can map it to. It needs no default. A missing field, a
 field of the wrong shape, a target relation over the wrong schema and a key
 dropped by `select` are compile errors.
+
+`mapWith(M, allocator)` takes a `zom.Mapper`, which combine rebuilds to
+leave the association field alone, so it needs no default there either. It
+also takes a mapper written by hand: a struct with `Input` (the source
+relation's `Output`), `Output` and `pub fn call(Input) Output`. Combine
+can't rebuild that one, so it is used as is: its `call` must set the
+association field to something, such as `&.{}` or `null`, and combine then
+overwrites it. A struct without that `call` is a compile error.
 
 A `limit` or `offset` on the target relation pages each user's posts, not
 the post query: `users.combine(.posts, posts.order(.id, .desc).limit(3))`

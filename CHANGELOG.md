@@ -249,8 +249,15 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
   sees whole rows); zom-pg sets `supports.join`; the memory gateway runs a
   hash semi-join. `zom.lint` has a join check, run when `supports.join` is
   set, which also uses a second schema, `zom.lint.Posts` (`lint_posts`).
-- `zom.Mapper` options take `.skip`, fields the mapper leaves for the caller
-  to fill, and a mapper exposes the `options` it was made with.
+- A `zom.Mapper` exposes the `options` it was made with, and
+  `zom.mapper.isMapper(M)` tells one from a hand-written mapper.
+  `Combined.mapWith` uses both to rebuild a `zom.Mapper` so the association
+  field needs no default. The field-skipping this needs is internal: a
+  public mapper always sets every field (#78).
+- `Combined.mapWith` takes a hand-written mapper (a struct with `Input`,
+  `Output` and `call(Input) Output`), used as is: its `call` sets the
+  association field and combine overwrites it. Anything else is a compile
+  error naming what is missing (#78).
 
 ### Changed (breaking)
 

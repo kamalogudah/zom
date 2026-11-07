@@ -34,3 +34,18 @@ test "deprecated combineMany still combines has-many" {
     try testing.expectEqualStrings("Relations are values", authors[0].posts[0].title);
     try testing.expectEqualStrings("Comptime schemas", authors[1].posts[0].title);
 }
+
+test "isMapper tells a zom.Mapper from a hand-written one" {
+    const Hand = struct {
+        pub const Input = fixtures.UserTuple;
+        pub const Output = Post;
+        pub const options: zom.mapper.Options = .{};
+        pub fn call(_: fixtures.UserTuple) Post {
+            return undefined;
+        }
+    };
+    try testing.expect(zom.mapper.isMapper(AuthorMapper));
+    try testing.expect(zom.mapper.isMapper(zom.Mapper(fixtures.PostTuple, Post, .{})));
+    try testing.expect(!zom.mapper.isMapper(Hand));
+    try testing.expect(!zom.mapper.isMapper(u32));
+}

@@ -8,73 +8,27 @@
 const std = @import("std");
 const q = @import("query.zig");
 const build_options = @import("build_options");
+const field_mapper = @import("field_mapper.zig");
 
 pub const Rename = struct { from: []const u8, to: []const u8 };
 pub const Options = struct {
     renames: []const Rename = &.{},
-    /// `Dst` fields the mapper leaves undefined for the caller to fill.
-    /// `combine` uses it for the association field, which has no source
-    /// attribute and needs no default.
-    skip: []const []const u8 = &.{},
 };
 
+/// A comptime mapper from `Src` to `Dst`: each `Dst` field takes the `Src`
+/// field of the same name (or the one renamed to it), else its default.
+/// `options` is the `opts` it was made with; `Combined.mapWith` reads it
+/// to rebuild the mapper with the association field left for itself.
 pub fn Mapper(comptime Src: type, comptime Dst: type, comptime opts: Options) type {
-    return struct {
-        pub const Input = Src;
-        pub const Output = Dst;
-        pub const options = opts;
+    return field_mapper.FieldMapper(Src, Dst, opts, &.{});
+}
 
-        /// The `Src` fields copied into `Dst`, e.g. to know which strings
-        /// the output now shares with the input.
-        pub const sources: []const []const u8 = blk: {
-            var names: []const []const u8 = &.{};
-            for (@typeInfo(Dst).@"struct".fields) |f| {
-                if (skipped(f.name)) continue;
-                const src_name = sourceName(f.name);
-                if (@hasField(Src, src_name)) names = names ++ .{src_name};
-            }
-            break :blk names;
-        };
-
-        fn skipped(comptime name: []const u8) bool {
-            for (opts.skip) |s| {
-                if (std.mem.eql(u8, s, name)) return true;
-            }
-            return false;
-        }
-
-        fn sourceName(comptime name: []const u8) []const u8 {
-            for (opts.renames) |r| {
-                if (std.mem.eql(u8, r.to, name)) return r.from;
-            }
-            return name;
-        }
-
-        pub fn call(src: Src) Dst {
-            var dst: Dst = undefined;
-            inline for (@typeInfo(Dst).@"struct".fields) |f| {
-                const src_name = comptime sourceName(f.name);
-                if (comptime skipped(f.name)) {
-                    // Left for the caller.
-                } else if (comptime @hasField(Src, src_name)) {
-                    @field(dst, f.name) = @field(src, src_name);
-                } else if (comptime f.defaultValue() != null) {
-                    @field(dst, f.name) = comptime f.defaultValue().?;
-                } else {
-                    @compileError("zom.Mapper: " ++ @typeName(Dst) ++ "." ++ f.name ++
-                        " has no source attribute `" ++ src_name ++ "` and no default");
-                }
-            }
-            return dst;
-        }
-
-        /// Caller owns the returned slice.
-        pub fn many(allocator: std.mem.Allocator, srcs: []const Src) ![]Dst {
-            const out = try allocator.alloc(Dst, srcs.len);
-            for (srcs, out) |s, *d| d.* = call(s);
-            return out;
-        }
-    };
+/// True when `M` is a `zom.Mapper`, not a hand-written mapper type.
+pub fn isMapper(comptime M: type) bool {
+    if (@typeInfo(M) != .@"struct") return false;
+    if (!@hasDecl(M, "Input") or !@hasDecl(M, "Output") or !@hasDecl(M, "options")) return false;
+    if (@TypeOf(M.options) != Options) return false;
+    return M == Mapper(M.Input, M.Output, M.options);
 }
 
 pub const CombineOptions = struct {

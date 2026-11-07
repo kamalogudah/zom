@@ -134,6 +134,7 @@
 const std = @import("std");
 const schema = @import("schema.zig");
 const mapper = @import("mapper.zig");
+const FieldMapper = @import("field_mapper.zig").FieldMapper;
 
 /// Returned by `Combined.mapTo` and `Combined.mapWith`: the entities and
 /// the arena that owns them and everything they point at.
@@ -210,29 +211,39 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
         /// too and has a field for the inner association, filled the same
         /// way, at every level. Free the result with `result.deinit()`.
         pub fn mapTo(self: Self, comptime E: type, allocator: std.mem.Allocator) !Result(E) {
-            return self.run(mapper.Mapper(Source.Output, E, .{ .skip = &.{a.name} }), allocator);
+            return self.run(FieldMapper(Source.Output, E, .{}, &.{a.name}), allocator);
         }
 
-        /// `mapTo` through a `zom.Mapper` for the source rows, e.g. one with
-        /// renames. `M.Input` is the source relation's `Output`. The
-        /// association field is filled here, so `M` need not give it a
-        /// default. Nested levels map by attribute name.
+        /// `mapTo` through a mapper for the source rows, e.g. a
+        /// `zom.Mapper` with renames. `M.Input` is the source relation's
+        /// `Output`. The association field is filled here: a `zom.Mapper`
+        /// is rebuilt to leave it alone, so it needs no default. A
+        /// hand-written mapper (a struct with `Input`, `Output` and
+        /// `call(Input) Output`) is used as is, so its `call` must set the
+        /// field to something, e.g. `&.{}` or `null`, which is then
+        /// overwritten. Nested levels map by attribute name.
         pub fn mapWith(self: Self, comptime M: type, allocator: std.mem.Allocator) !Result(M.Output) {
+            if (comptime !mapper.isMapper(M)) requireCall(M);
             if (M.Input != Source.Output)
                 @compileError(label ++ ": mapWith needs a mapper from `" ++ @typeName(Source.Output) ++
                     "`, found one from `" ++ @typeName(M.Input) ++ "`");
             return self.run(withSkip(M), allocator);
         }
 
-        /// `M` with the association field added to its `skip`.
+        /// `M` leaving the association field to `fill`, when it is a
+        /// `zom.Mapper`; a hand-written mapper as is.
         fn withSkip(comptime M: type) type {
-            if (comptime !@hasDecl(M, "options")) return M;
-            const opts = comptime blk: {
-                var o = M.options;
-                o.skip = o.skip ++ &[_][]const u8{a.name};
-                break :blk o;
-            };
-            return mapper.Mapper(M.Input, M.Output, opts);
+            if (comptime !mapper.isMapper(M)) return M;
+            return FieldMapper(M.Input, M.Output, M.options, &.{a.name});
+        }
+
+        /// A hand-written mapper needs `call(Input) Output`.
+        fn requireCall(comptime M: type) void {
+            const what = label ++ ": mapWith needs a `zom.Mapper` or a struct with `Input`, `Output` and " ++
+                "`pub fn call(Input) Output`, found `" ++ @typeName(M) ++ "`";
+            if (@typeInfo(M) != .@"struct" or !@hasDecl(M, "Input") or !@hasDecl(M, "Output") or !@hasDecl(M, "call"))
+                @compileError(what);
+            if (@TypeOf(M.call) != fn (M.Input) M.Output) @compileError(what);
         }
 
         fn run(self: Self, comptime M: type, allocator: std.mem.Allocator) !Result(M.Output) {
@@ -484,7 +495,7 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
         /// or tuple) map to `X`: by attribute name, leaving the inner
         /// association for the inner `fill`.
         fn innerMapper(comptime Row: type, comptime X: type) type {
-            return mapper.Mapper(Row, X, .{ .skip = &.{Target.association.name} });
+            return FieldMapper(Row, X, .{}, &.{Target.association.name});
         }
 
         /// A whole tuple from `loadAssociation` as the association field's

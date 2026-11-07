@@ -134,6 +134,55 @@ test "combine(.posts) gives what combineMany gave, with one child query" {
 
 const Writer = struct { id: u32, name: []const u8, posts: []const Post };
 
+/// `posts` has no default: combine rebuilds this `zom.Mapper` to leave it.
+const Renamed = struct { id: u32, full_name: []const u8, posts: []const Post };
+const RenamedMapper = zom.Mapper(UserTuple, Renamed, .{ .renames = &.{.{ .from = "name", .to = "full_name" }} });
+
+test "combine: mapWith a zom.Mapper whose entity gives the association field no default" {
+    var f: Fixture(zom.memory.Gateway) = undefined;
+    try f.init();
+    defer f.deinit();
+
+    var result = try f.users.where(.deleted_at, .eq, null).order(.id, .asc)
+        .combine(.posts, f.posts.order(.id, .asc))
+        .mapWith(RenamedMapper, testing.allocator);
+    defer result.deinit();
+
+    try testing.expectEqualStrings("Achieng", result.items[0].full_name);
+    try expectPostIds(&.{ 10, 11 }, result.items[0].posts);
+    try expectPostIds(&.{12}, result.items[1].posts);
+}
+
+/// A mapper written by hand, not with `zom.Mapper`: combine uses it as is,
+/// so `call` sets `posts` (`Writer.posts` has no default), and combine
+/// overwrites it.
+const ShoutingMapper = struct {
+    pub const Input = UserTuple;
+    pub const Output = Writer;
+
+    pub fn call(u: UserTuple) Writer {
+        return .{ .id = u.id, .name = if (u.role == .admin) "ADMIN" else u.name, .posts = &.{} };
+    }
+};
+
+test "combine: mapWith takes a hand-written mapper, and fills its association field" {
+    var f: Fixture(zom.memory.Gateway) = undefined;
+    try f.init();
+    defer f.deinit();
+
+    var result = try f.users.where(.deleted_at, .eq, null).order(.id, .asc)
+        .combine(.posts, f.posts.order(.id, .asc))
+        .mapWith(ShoutingMapper, testing.allocator);
+    defer result.deinit();
+
+    try testing.expectEqual(2, result.items.len);
+    try testing.expectEqualStrings("ADMIN", result.items[0].name);
+    try testing.expectEqual(2, result.items[0].posts.len);
+    try testing.expectEqualStrings("Mappers, not models", result.items[0].posts[1].title);
+    try testing.expectEqualStrings("Otieno", result.items[1].name);
+    try testing.expectEqual(1, result.items[1].posts.len);
+}
+
 test "combine: a parent with no children gets an empty slice; orphans are dropped" {
     var f: Fixture(zom.memory.Gateway) = undefined;
     try f.init();
