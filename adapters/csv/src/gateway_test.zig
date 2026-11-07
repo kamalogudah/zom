@@ -532,6 +532,40 @@ test "combine: has-many and belongs-to over two CSV files" {
     try testing.expect(bylines.items[3].author == null);
 }
 
+test "combine: the articles relation's limit and offset page each author's articles" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "authors.csv", .data = "id,name\n1,Achieng\n2,Otieno\n3,Wanjiru\n" });
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "articles.csv",
+        .data = "id,author_id,title\n10,1,a\n11,1,b\n12,2,c\n13,1,d\n14,2,e\n",
+    });
+    var gw = Gateway.init(testing.allocator, .{ .io = testing.io, .dir = tmp.dir, .path = "." });
+    defer gw.deinit();
+    const authors = try zom.Relation(AuthorSchema, Gateway).init(&gw);
+    const articles = try zom.Relation(ArticleSchema, Gateway).init(&gw);
+
+    const Writer = struct { id: u32, articles: []const struct { id: u32 } };
+    // The two latest articles of each author.
+    var latest = try authors.order(.id, .asc).combine(.articles, articles.order(.id, .desc).limit(2)).mapTo(Writer, testing.allocator);
+    defer latest.deinit();
+    try testing.expectEqual(3, latest.items.len);
+    try testing.expectEqual(2, latest.items[0].articles.len);
+    try testing.expectEqual(13, latest.items[0].articles[0].id);
+    try testing.expectEqual(11, latest.items[0].articles[1].id);
+    try testing.expectEqual(2, latest.items[1].articles.len);
+    try testing.expectEqual(14, latest.items[1].articles[0].id);
+    try testing.expectEqual(12, latest.items[1].articles[1].id);
+    try testing.expectEqual(0, latest.items[2].articles.len);
+
+    // Each author's second article.
+    var second = try authors.order(.id, .asc).combine(.articles, articles.order(.id, .asc).offset(1).limit(1)).mapTo(Writer, testing.allocator);
+    defer second.deinit();
+    try testing.expectEqual(11, second.items[0].articles[0].id);
+    try testing.expectEqual(14, second.items[1].articles[0].id);
+    try testing.expectEqual(0, second.items[2].articles.len);
+}
+
 // -- nested combine ----------------------------------------------------------
 
 /// Counts the reads of each dataset, through the instrumentation hook.

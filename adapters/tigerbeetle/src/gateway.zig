@@ -1539,8 +1539,12 @@ test "combine(.transfers) and combine(.balances): an account's history" {
     try testing.expectEqual(2, both.items.len);
     for (both.items) |item| try expectTransfers(&t, item.transfers);
 
-    // A paged target is refused, as for any combine.
-    try testing.expectError(error.PagedCombineTarget, accounts.byPk(a).combine(.transfers, transfers.limit(1)).mapTo(WithTransfers, alloc));
+    // A limit pages each account's transfers, as for any combine: the
+    // latest one of each account.
+    var latest = try accounts.whereIn(.id, &[_]u128{ a, b }).combine(.transfers, transfers.order(.timestamp, .desc).limit(1)).mapTo(WithTransfers, alloc);
+    defer latest.deinit();
+    try testing.expectEqual(2, latest.items.len);
+    for (latest.items) |item| try expectTransfers(t[2..3], item.transfers);
 }
 
 test "belongsTo into accounts is a lookup; hasMany by debit or credit account picks one side" {

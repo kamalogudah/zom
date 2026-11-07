@@ -9,11 +9,18 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- Per-parent paging in `combine`: a `limit` or `offset` on the target
+  relation now pages each parent's rows, so
+  `users.combine(.posts, posts.order(.id, .desc).limit(3))` gives every
+  user their latest three posts. It used to be `error.PagedCombineTarget`,
+  which is gone. Every matching row is still read (the page is applied in
+  memory, on every adapter), a nested level fills only the rows kept, and
+  a `loadAssociation` gets the query without them. (#77)
 - Nested combines: the relation passed to `combine` can be a combine,
   `users.combine(.posts, posts.combine(.comments, comments))`, to any
   depth. The element type of the association field (e.g.
   `PostWithComments`) is mapped by attribute name and gets its own
-  association filled; the field-shape and paging checks apply at every
+  association filled; the field-shape checks and paging apply at every
   level. Each level runs once over all the rows of the level above, so a
   combine makes one source read plus Σ ⌈keys / `max_in`⌉ queries across
   its levels, and one `deinit()` frees the whole tree. Inner levels into a

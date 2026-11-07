@@ -416,16 +416,47 @@ test "pg combine: more keys than max_in are read in ceil(keys / max_in) queries"
     try expectMany(result.items, n_users);
 }
 
-test "pg combine: a paged target relation is refused" {
+test "pg combine: the target's limit and offset page each parent's posts" {
     var db: Db = undefined;
     try db.open();
     defer db.close();
     var gw: Full = .{ .inner = &db.gw };
     const r = try Rels(Full).init(&gw);
-    try testing.expectError(
-        error.PagedCombineTarget,
-        r.users.combine(.posts, r.posts.limit(1)).mapTo(Writer, testing.allocator),
-    );
+    try seed(Full, r);
+
+    var latest = try r.users.order(.id, .asc).combine(.posts, r.posts.order(.id, .desc).limit(1)).mapTo(Writer, testing.allocator);
+    defer latest.deinit();
+    try testing.expectEqual(3, latest.items.len);
+    for (latest.items, [_]u32{ 11, 12, 13 }) |w, id| {
+        try testing.expectEqual(1, w.posts.len);
+        try testing.expectEqual(id, w.posts[0].id);
+    }
+
+    var skipped = try r.users.order(.id, .asc).combine(.posts, r.posts.order(.id, .desc).offset(1)).mapTo(Writer, testing.allocator);
+    defer skipped.deinit();
+    try testing.expectEqual(1, skipped.items[0].posts.len);
+    try testing.expectEqualStrings("Relations are values", skipped.items[0].posts[0].title);
+    try testing.expectEqual(0, skipped.items[1].posts.len);
+}
+
+test "pg combine: per-parent paging holds across ceil(keys / max_in) queries" {
+    var db: Db = undefined;
+    try db.open();
+    defer db.close();
+    var gw: Full = .{ .inner = &db.gw };
+    const r = try Rels(Full).init(&gw);
+    const n_users = 2 * max_in + 5;
+    try seedMany(Full, r, n_users);
+    Rels(Full).reset();
+
+    var result = try r.users.order(.id, .asc).combine(.posts, r.posts.order(.id, .desc).limit(1)).mapTo(Writer, testing.allocator);
+    defer result.deinit();
+    try testing.expectEqual(divCeil(n_users, max_in), Full.Dataset(Posts).reads);
+    try testing.expectEqual(n_users, result.items.len);
+    for (result.items, 0..) |w, i| {
+        try testing.expectEqual(@as(usize, if (i % 2 == 0) 1 else 0), w.posts.len);
+        if (w.posts.len == 1) try testing.expectEqualStrings("b", w.posts[0].title);
+    }
 }
 
 // -- bind parameters -------------------------------------------------------------

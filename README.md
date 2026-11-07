@@ -853,9 +853,15 @@ The entity needs a field named after the association: `[]const X` for
 `hasMany`, `?X` for `belongsTo`, where `X` is the target's tuple or any
 struct `zom.Mapper` can map it to. It needs no default. A missing field, a
 field of the wrong shape, a target relation over the wrong schema and a key
-dropped by `select` are compile errors. A target relation with a `limit` or
-`offset` is `error.PagedCombineTarget`, since paging would apply to each
-batched query rather than to each user.
+dropped by `select` are compile errors.
+
+A `limit` or `offset` on the target relation pages each user's posts, not
+the post query: `users.combine(.posts, posts.order(.id, .desc).limit(3))`
+gives every user their latest three posts. zom reads every matching post,
+as it would without the limit, and keeps each user's first three in the
+relation's order. A limit on the query itself would apply to each batch of
+`max_in` keys and mean nothing. For a `belongsTo`, the parent is the first
+row of its page, so `offset(1)` leaves it null.
 
 The result is a tree of allocations, so `mapTo` returns a
 `zom.CombineResult(Author)`: `items`, plus an arena owning every slice and
@@ -1010,7 +1016,7 @@ The element type of `Author.posts`, here `PostWithComments`, drives the
 inner level: each post row is mapped to it by attribute name, and its
 `comments` field is filled the way `Author.posts` is. The field-shape
 checks (`[]const X` for `hasMany`, `?X` for `belongsTo`) and the
-`error.PagedCombineTarget` check apply at every level, and levels can be
+per-parent paging apply at every level, and levels can be
 nested deeper the same way. `hasMany` and `belongsTo` mix freely:
 `posts.combine(.author, users)` inside a combine fills each post's `?User`.
 

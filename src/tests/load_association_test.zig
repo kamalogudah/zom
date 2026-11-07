@@ -62,6 +62,9 @@ const HookGateway = struct {
         store: *zom.memory.Store(MessageSchema) = undefined,
         loads: usize = 0,
         reads: usize = 0,
+        /// Loads whose query had a limit or offset, which combine takes
+        /// off to page each key's rows itself.
+        paged_loads: usize = 0,
 
         pub fn read(self: *MessageStore, query: Q, allocator: std.mem.Allocator) ![]T {
             self.reads += 1;
@@ -84,6 +87,7 @@ const HookGateway = struct {
             allocator: std.mem.Allocator,
         ) ![]const []const T {
             self.loads += 1;
+            if (query.limit != null or query.offset != 0) self.paged_loads += 1;
             const rows = try self.store.read(query, allocator);
             const groups = try allocator.alloc([]const T, keys.len);
             for (keys, groups) |key, *g| {
@@ -217,9 +221,20 @@ test "a hasMany into a dataset with loadAssociation goes through it too" {
     try expectIds(&.{11}, result.items[1].sent);
     try expectIds(&.{}, result.items[2].sent);
 
-    // And a paged target is still refused before anything is read.
-    try testing.expectError(error.PagedCombineTarget, f.people.combine(.sent, f.messages.limit(1)).mapTo(Author, testing.allocator));
-    try testing.expectEqual(1, f.gw.messages.loads);
+    // A paged target: the dataset loads every row, and each key's group is paged.
+    var paged = try f.people.order(.id, .asc).combine(.sent, f.messages.order(.id, .desc).limit(1)).mapTo(Author, testing.allocator);
+    defer paged.deinit();
+    try testing.expectEqual(2, f.gw.messages.loads);
+    try testing.expectEqual(0, f.gw.messages.paged_loads);
+    try expectIds(&.{12}, paged.items[0].sent);
+    try expectIds(&.{11}, paged.items[1].sent);
+    try expectIds(&.{}, paged.items[2].sent);
+
+    var skipped = try f.people.order(.id, .asc).combine(.sent, f.messages.order(.id, .asc).offset(1)).mapTo(Author, testing.allocator);
+    defer skipped.deinit();
+    try expectIds(&.{12}, skipped.items[0].sent);
+    try expectIds(&.{}, skipped.items[1].sent);
+    try testing.expectEqual(0, f.gw.messages.paged_loads);
 }
 
 test "nested combine: the inner level fills rows loaded by the dataset, and loads through it" {
@@ -243,6 +258,16 @@ test "nested combine: the inner level fills rows loaded by the dataset, and load
     try testing.expectEqualStrings("Otieno", talkers.items[0].conversation[1].sender.?.name);
     try testing.expectEqualStrings("Otieno", talkers.items[1].conversation[1].sender.?.name);
     try expectIds(&.{}, talkers.items[2].conversation);
+
+    // Paged through loadAssociation: the inner level fills only the kept rows.
+    var second = try f.people.order(.id, .asc)
+        .combine(.conversation, f.messages.order(.id, .asc).offset(1).limit(1).combine(.sender, f.people))
+        .mapTo(Talker, testing.allocator);
+    defer second.deinit();
+    try expectIds(&.{11}, second.items[0].conversation);
+    try expectIds(&.{11}, second.items[1].conversation);
+    try testing.expectEqualStrings("Otieno", second.items[1].conversation[0].sender.?.name);
+    try expectIds(&.{}, second.items[2].conversation);
 
     // A .one level through loadAssociation, then generic.
     const First = struct { id: u32, first_sent: ?Line };

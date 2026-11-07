@@ -354,8 +354,11 @@ them with the request that fits, chosen at compile time:
 | `hasMany` on `user_data_128/64/32`, `ledger` or `code` | one `query_*` per key |
 | anything else, e.g. `hasMany` on `pending_id` | a compile error |
 
-As with any combine, a `limit` or `offset` on the combined relation is
-`error.PagedCombineTarget`.
+As with any combine, a `limit` on the combined relation pages each
+account's rows: `accounts.combine(.transfers, transfers.order(.timestamp, .desc).limit(10))`
+gives every account its latest ten transfers. Every matching transfer is
+read, then each account keeps its first ten (`offset` is not supported by
+this adapter's datasets).
 
 ### zom.lint
 

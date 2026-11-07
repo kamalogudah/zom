@@ -396,3 +396,24 @@ The four open questions were decided in #29:
 2. `.fallback` exists, opt-in per relation, with a scan hook (3.1).
 3. The core `Value` grows: `uint128`, `timestamp`, `bytes` (3.3).
 4. `zom-sqlite` is post-v1 and uses a translate-c binding (3.2).
+
+Later decisions:
+
+5. **A combine target's `limit` / `offset` page each parent** (#77,
+   2026-11-07). `users.combine(.posts, posts.order(.id, .desc).limit(3))` is
+   each user's latest three posts. `error.PagedCombineTarget` is gone.
+   - *Why this meaning:* children are read in ⌈keys / `max_in`⌉ batches,
+     so a limit on the query would page each batch, which depends on
+     `max_in` and means nothing. Per parent is the only useful meaning, so
+     `limit` gets it, with no separate `perParent(n)` API.
+   - *How:* in `combine.zig`, on every adapter. The limit and offset are
+     taken off the target query, every matching row is read, and each group
+     keeps its window in the relation's order. A nested level fills only
+     the kept rows. A `loadAssociation` gets the query without them and its
+     groups are windowed the same way, so its contract doesn't change.
+   - *Cost:* the whole association is read. Pushing the window into the
+     query (`ROW_NUMBER() OVER (PARTITION BY fk ORDER BY ...)` on SQL, a
+     per-account limit for TigerBeetle's `get_account_transfers`) is an
+     optimisation behind a new adapter capability, left for later (#87).
+   - *Not a compile error:* `limit` is a runtime value, and with this
+     meaning nothing needs refusing.

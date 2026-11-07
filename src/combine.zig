@@ -43,9 +43,22 @@
 //!    null or its row was filtered out). Associated rows whose key matches
 //!    no source row are dropped.
 //!
-//! The associated relation's `limit` and `offset` would apply to each
-//! batched query, not to each group, so a paged associated relation is
-//! `error.PagedCombineTarget`.
+//! ## Per-parent paging
+//!
+//! The associated relation's `limit` and `offset` page each parent's rows:
+//! `users.combine(.posts, posts.order(.id, .desc).limit(3))` gives every
+//! user their latest three posts. Applied to the query they would page each
+//! batch of ⌈keys / max_in⌉, which means nothing, so they are taken off it:
+//! every matching row is read, as without them, and each group keeps the
+//! rows after its first `offset`, at most `limit` of them, in the
+//! relation's order. A `belongsTo` parent is the first row of its page
+//! (so `offset(1)` leaves it null). A nested level fills only the rows
+//! kept. A `loadAssociation` gets the query without them too, and its
+//! groups are paged the same way.
+//!
+//! The cost is reading the whole association. Pushing the page into the
+//! query (SQL's `ROW_NUMBER() OVER (PARTITION BY ...)`) is left to a later
+//! adapter capability (#87).
 //!
 //! ## A dataset that loads associations itself: `loadAssociation`
 //!
@@ -64,8 +77,9 @@
 //! `@hasDecl(Dataset, "loadAssociation")` decides, at compile time: when it
 //! is declared, every combine *into* that dataset calls it once, with the
 //! distinct source keys from step 2 (any number of them) and the
-//! associated relation's whole query, and the generic steps 3 and 4 don't
-//! run. It returns one slice per key, in the order of `keys`: that key's
+//! associated relation's whole query (less its limit and offset, which
+//! combine applies to each key's slice afterwards), and the generic steps 3
+//! and 4 don't run. It returns one slice per key, in the order of `keys`: that key's
 //! rows, ordered as the query says. It must honour every filter and order
 //! of `query`, including those a `.fallback` relation would have evaluated
 //! in memory (`Query.matches` and `Query.lessThan` do both). A row may be
@@ -249,9 +263,10 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
             scratch: std.mem.Allocator,
         ) !void {
             const X = AssocElem(M.Output);
-            const target = self.relation();
-            if (target.query.limit != null or target.query.offset != 0)
-                return error.PagedCombineTarget;
+            // The target's limit and offset page each parent's rows, so
+            // they are taken off the query and applied per group below.
+            const page: Page = .of(self.relation().query);
+            const target = page.strip(self.relation());
 
             // Distinct source keys, in first-seen order, and where each is.
             var keys: std.ArrayList(Key) = .empty;
@@ -269,7 +284,7 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
             }
 
             if (comptime hooked)
-                return self.fillLoaded(M, X, sources, items, keys.items, &index, arena, scratch);
+                return self.fillLoaded(M, X, target, page, sources, items, keys.items, &index, arena, scratch);
 
             // One target query per `max_in` keys, all rows in one slice.
             var batches: std.ArrayList([]const Rel.Output) = .empty;
@@ -282,12 +297,16 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
                 try batches.append(scratch, try target.whereIn(field, chunk).toSlice(arena));
             }
             const joined = batches.items.len > 1;
-            const rows: []const Rel.Output = switch (batches.items.len) {
+            const read: []const Rel.Output = switch (batches.items.len) {
                 0 => &.{},
                 1 => batches.items[0],
                 else => try std.mem.concat(scratch, Rel.Output, batches.items),
             };
-            defer if (joined) scratch.free(rows);
+            defer if (joined) scratch.free(read);
+            // Each parent's page of its rows, before a nested level fills
+            // them, so the next level reads only the rows kept here.
+            const rows = if (page.active()) try pageRows(read, &index, keys.items.len, page, scratch) else read;
+            defer if (page.active()) scratch.free(rows);
 
             // The element of each target row. A nested target fills them
             // all at once, so the next level makes ⌈keys / max_in⌉ queries
@@ -350,6 +369,8 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
             self: Self,
             comptime M: type,
             comptime X: type,
+            target: Rel,
+            page: Page,
             sources: []const M.Input,
             items: []M.Output,
             keys: []const Key,
@@ -357,14 +378,20 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
             arena: std.mem.Allocator,
             scratch: std.mem.Allocator,
         ) !void {
-            const target = self.relation();
             const query = target.query;
             const span = target.instrument(.read, &query);
-            const loaded = try span.end(target.dataset.loadAssociation(a, keys, query, arena));
-            if (loaded.len != keys.len)
+            const all = try span.end(target.dataset.loadAssociation(a, keys, query, arena));
+            if (all.len != keys.len)
                 std.debug.panic("zom: adapter '{s}': loadAssociation(.{s}) returned {d} groups for {d} keys", .{
-                    Rel.Adapter.name, a.name, loaded.len, keys.len,
+                    Rel.Adapter.name, a.name, all.len, keys.len,
                 });
+            // Each key's page of its rows; the slices point into `all`.
+            const loaded: []const []const Rel.Tuple = if (page.active()) blk: {
+                const out = try scratch.alloc([]const Rel.Tuple, all.len);
+                for (all, out) |rows, *o| o.* = page.window(Rel.Tuple, rows);
+                break :blk out;
+            } else all;
+            defer if (page.active()) scratch.free(loaded);
 
             // Every row this level keeps, mapped to `X`, in one slice:
             // each key's rows for `.many`, its first row for `.one`. A
@@ -422,6 +449,30 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
                     }
                 },
             }
+        }
+
+        /// `rows` with only each group's page kept, in order: per group,
+        /// the rows after the first `page.offset`, at most `page.limit` of
+        /// them. Rows matching no group are dropped. Owned by `scratch`.
+        fn pageRows(
+            rows: []const Rel.Output,
+            index: *const KeyMap(u32),
+            n_keys: usize,
+            page: Page,
+            scratch: std.mem.Allocator,
+        ) ![]const Rel.Output {
+            const seen = try scratch.alloc(usize, n_keys);
+            defer scratch.free(seen);
+            @memset(seen, 0);
+            var kept: std.ArrayList(Rel.Output) = .empty;
+            errdefer kept.deinit(scratch);
+            for (rows) |row| {
+                const g = group(index, @field(row, target_key)) orelse continue;
+                const n = seen[g];
+                seen[g] += 1;
+                if (page.keeps(n)) try kept.append(scratch, row);
+            }
+            return kept.toOwnedSlice(scratch);
         }
 
         /// The relation the associated rows are read from.
@@ -487,6 +538,42 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
         }
     };
 }
+
+/// A combine target's `limit` and `offset`, which page each parent's
+/// associated rows rather than the target query.
+const Page = struct {
+    offset: usize = 0,
+    limit: ?usize = null,
+
+    fn of(query: anytype) Page {
+        return .{ .offset = query.offset, .limit = query.limit };
+    }
+
+    fn active(p: Page) bool {
+        return p.limit != null or p.offset != 0;
+    }
+
+    /// `rel` with no limit or offset: the query that reads every row.
+    fn strip(_: Page, rel: anytype) @TypeOf(rel) {
+        var r = rel;
+        r.query.limit = null;
+        r.query.offset = 0;
+        return r;
+    }
+
+    /// Whether a group's `n`th row (from 0) is on the page.
+    fn keeps(p: Page, n: usize) bool {
+        if (n < p.offset) return false;
+        return if (p.limit) |l| n - p.offset < l else true;
+    }
+
+    /// The page of one group's rows.
+    fn window(p: Page, comptime R: type, rows: []const R) []const R {
+        const start = @min(p.offset, rows.len);
+        const end = if (p.limit) |l| @min(rows.len, start +| l) else rows.len;
+        return rows[start..end];
+    }
+};
 
 fn requireField(comptime T: type, comptime name: []const u8, comptime label: []const u8, comptime which: []const u8) void {
     if (!@hasField(T, name))
