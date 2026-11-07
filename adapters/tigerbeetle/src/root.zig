@@ -10,7 +10,8 @@
 //!
 //! The schemas are fixed: `Account` and `Transfer`, over the client's own
 //! `tb.Account` and `tb.Transfer` structs, keyed by `id`, and the read-only
-//! `AccountBalance` view. `accounts.combine(.transfers, transfers)` and
+//! `AccountBalance` view (no primary key: a row is unique per account and
+//! timestamp). `accounts.combine(.transfers, transfers)` and
 //! `.combine(.balances, balances)` load an account's history. Records are
 //! immutable, so there is no update or delete: `create` and `createMany`
 //! are the writes, and fail with the result code's error

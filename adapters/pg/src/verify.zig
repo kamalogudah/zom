@@ -144,6 +144,8 @@ fn check(self: *Gateway, comptime S: type, diag: *Diagnostics, scratch: Allocato
         }
     }
 
+    // A view (no primary key) has nothing to compare.
+    if (!S.has_primary_key) return;
     const expected = @tagName(S.primary_key);
     const pk = try catalog.queryStrings(conn, scratch, catalog.primary_key_sql, &.{ .{ .string = namespace }, .{ .string = table } });
     if (pk.len == 0) {

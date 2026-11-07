@@ -201,6 +201,9 @@ pub fn Store(comptime S: type) type {
         const Self = @This();
         const T = S.Tuple;
         const Q = q.Query(T);
+        /// False for a view (a schema without a primary key): then no
+        /// write checks keys.
+        const keyed = S.has_primary_key;
         const pk = S.primary_key;
 
         /// Every query is evaluated here, in memory.
@@ -239,7 +242,7 @@ pub fn Store(comptime S: type) type {
         /// Stores `row`, copying its strings, and returns the stored copy.
         /// `error.DuplicatePrimaryKey` if its key is taken.
         pub fn insert(self: *Self, row: T) !T {
-            if (self.hasKey(Q.fieldValue(row, pk))) return error.DuplicatePrimaryKey;
+            if (keyed and self.hasKey(Q.fieldValue(row, pk))) return error.DuplicatePrimaryKey;
             return self.load(row);
         }
 
@@ -270,13 +273,13 @@ pub fn Store(comptime S: type) type {
         /// already copied stay in the arena until `clear` or `deinit`, as
         /// with `update`, so there is nothing else to undo.
         pub fn insertMany(self: *Self, batch: []const T) !usize {
-            for (batch, 0..) |row, i| {
+            if (keyed) for (batch, 0..) |row, i| {
                 const key = Q.fieldValue(row, pk);
                 if (self.hasKey(key)) return error.DuplicatePrimaryKey;
                 for (batch[0..i]) |earlier| {
                     if (Q.fieldValue(earlier, pk).eql(key)) return error.DuplicatePrimaryKey;
                 }
-            }
+            };
             return self.loadMany(batch);
         }
 
@@ -434,9 +437,9 @@ pub fn Store(comptime S: type) type {
             defer if (selected) |flags| self.allocator.free(flags);
             var patch: T = undefined;
             for (changes) |c| try self.prepare(&patch, c);
-            for (changes) |c| {
+            if (keyed) for (changes) |c| {
                 if (c.field == pk) try self.checkKeyChange(query, selected, c.value);
-            }
+            };
             var n: usize = 0;
             for (self.list.items, 0..) |*row, i| {
                 if (if (selected) |flags| !flags[i] else !query.matches(row.*)) continue;

@@ -189,3 +189,24 @@ test "reorder replaces every sort key; order appends up to max_orders" {
     const full = q.order(.a, .asc).order(.b, .asc).order(.id, .asc).order(.a, .desc);
     try testing.expectEqual(@as(usize, PairQ.max_orders), full.orderSlice().len);
 }
+
+// A view (no primary key): rows are unique only per (account_id, timestamp).
+const Balance = struct { account_id: u32, timestamp: u64, amount: i64 };
+const BalanceSchema = zom.Schema(Balance, "balances", null, .{});
+const BalanceStore = zom.memory.Store(BalanceSchema);
+const BalanceQ = zom.Query(Balance);
+
+test "a store over a view checks no keys" {
+    try testing.expect(!BalanceSchema.has_primary_key);
+    var store = BalanceStore.init(testing.allocator);
+    defer store.deinit();
+    // One transfer at timestamp 7 moved both accounts' balances.
+    _ = try store.insert(.{ .account_id = 1, .timestamp = 7, .amount = -5 });
+    _ = try store.insert(.{ .account_id = 2, .timestamp = 7, .amount = 5 });
+    try testing.expectEqual(2, try store.insertMany(&.{
+        .{ .account_id = 1, .timestamp = 9, .amount = -6 },
+        .{ .account_id = 2, .timestamp = 9, .amount = 6 },
+    }));
+    try testing.expectEqual(2, try store.update((BalanceQ{}).where(.account_id, .eq, 1), &.{.{ .field = .timestamp, .value = .{ .int = 3 } }}));
+    try testing.expectEqual(4, try store.count(.{}));
+}

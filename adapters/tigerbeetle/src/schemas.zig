@@ -34,10 +34,12 @@ pub const Transfer = zom.Schema(tb.Transfer, "transfers", .id, .{
 
 /// Read only, and only for given accounts: a read needs an `account_id`
 /// filter (`eq` or `in`), since `get_account_balances` takes one account.
-/// Keyed by `timestamp`, the transfer each row follows, which is unique
-/// within an account but not across them (a transfer moves the balances of
-/// both its accounts): `byPk` alone is `error.AccountIdRequired`.
-pub const AccountBalance = zom.Schema(tb.AccountBalance, "account_balances", .timestamp, .{
+/// A view without a primary key: a row is unique per `account_id` and
+/// `timestamp` (the transfer it follows), but `timestamp` alone is not
+/// unique, since a transfer moves the balances of both its accounts. So
+/// `byPk` is a compile error; one row is
+/// `where(.account_id, .eq, a).where(.timestamp, .eq, ts)`.
+pub const AccountBalance = zom.Schema(tb.AccountBalance, "account_balances", null, .{
     .associations = struct {
         pub const account = zom.belongsTo(Account, .account_id);
     },

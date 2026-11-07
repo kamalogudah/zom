@@ -655,3 +655,45 @@ test "nested combine: one deinit frees the tree, also when allocation fails part
     }.run;
     try testing.checkAllAllocationFailures(testing.allocator, run, .{ f.users, f.posts, comments });
 }
+
+// A view (no primary key) on either side of a combine: `hasMany` into it
+// is keyed by the parent's key, and its `belongsTo` by the target's.
+const LedgerAccount = struct { id: u32, name: []const u8 };
+const LedgerBalance = struct { account_id: u32, timestamp: u64, amount: i64 };
+const LedgerAccountSchema = zom.Schema(LedgerAccount, "ledger_accounts", .id, .{
+    .associations = struct {
+        pub const balances = zom.hasMany(LedgerBalanceSchema, .account_id);
+    },
+});
+const LedgerBalanceSchema = zom.Schema(LedgerBalance, "ledger_balances", null, .{
+    .associations = struct {
+        pub const account = zom.belongsTo(LedgerAccountSchema, .account_id);
+    },
+});
+
+test "combine into and out of a view without a primary key" {
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
+    defer gw.deinit();
+    const accounts = try zom.Relation(LedgerAccountSchema, zom.memory.Gateway).init(&gw);
+    const balances = try zom.Relation(LedgerBalanceSchema, zom.memory.Gateway).init(&gw);
+    _ = try accounts.createMany(&.{ .{ .id = 1, .name = "cash" }, .{ .id = 2, .name = "sales" } }).commit();
+    // Timestamp 7 is on both accounts' rows, as one transfer's would be.
+    _ = try balances.createMany(&.{
+        .{ .account_id = 1, .timestamp = 7, .amount = 5 },
+        .{ .account_id = 2, .timestamp = 7, .amount = -5 },
+        .{ .account_id = 1, .timestamp = 9, .amount = 8 },
+    }).commit();
+
+    var with_balances = try accounts.order(.id, .asc).combine(.balances, balances.order(.timestamp, .asc))
+        .mapTo(struct { id: u32, balances: []const LedgerBalance }, testing.allocator);
+    defer with_balances.deinit();
+    try testing.expectEqual(2, with_balances.items[0].balances.len);
+    try testing.expectEqual(1, with_balances.items[1].balances.len);
+    try testing.expectEqual(-5, with_balances.items[1].balances[0].amount);
+
+    var with_account = try balances.where(.timestamp, .eq, 7).order(.account_id, .asc).combine(.account, accounts)
+        .mapTo(struct { account_id: u32, account: ?LedgerAccount }, testing.allocator);
+    defer with_account.deinit();
+    try testing.expectEqual(2, with_account.items.len);
+    try testing.expectEqualStrings("sales", with_account.items[1].account.?.name);
+}

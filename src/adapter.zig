@@ -221,8 +221,12 @@ pub fn Adapter(comptime G: type) type {
 
         /// Null when the dataset for `S` can order by `field`, else why not.
         pub fn orderGap(comptime S: type, comptime field: []const u8) ?[]const u8 {
-            if (!supports(S).order_on and !std.mem.eql(u8, field, @tagName(S.primary_key)))
-                return "`supports.order_on` is false, so it only orders by the primary key '" ++ @tagName(S.primary_key) ++ "'";
+            if (!supports(S).order_on) {
+                if (!S.has_primary_key)
+                    return "`supports.order_on` is false, and the schema has no primary key to order by";
+                if (!std.mem.eql(u8, field, @tagName(S.primary_key)))
+                    return "`supports.order_on` is false, so it only orders by the primary key '" ++ @tagName(S.primary_key) ++ "'";
+            }
             const D = Dataset(S);
             if (@hasDecl(D, "orderable") and !D.orderable(field))
                 return "its dataset's `orderable` rejects ordering by '" ++ field ++ "'";

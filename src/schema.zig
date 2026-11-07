@@ -31,6 +31,24 @@
 //! and the associations are evaluated afterwards, when both types exist.
 //! Use the anonymous-struct form only when no association points back
 //! (directly or through other schemas) at the schema declaring it.
+//!
+//! ## Views: no primary key
+//!
+//! `pk` may be `null` for a dataset whose rows have no single unique field,
+//! such as a read-only view (TigerBeetle's balance history, where a row is
+//! unique per account and timestamp but neither field is unique alone):
+//!
+//!     const BalanceSchema = zom.Schema(Balance, "account_balances", null, .{
+//!         .associations = struct {
+//!             pub const account = zom.belongsTo(AccountSchema, .account_id);
+//!         },
+//!     });
+//!
+//! `has_primary_key` is then false, and whatever needs the key is a compile
+//! error: `byPk`, `S.primary_key` itself, a `belongsTo` pointing at the view
+//! and a `hasMany` or custom association declared on it. A `belongsTo` from
+//! the view and a `hasMany` into it (keyed by the other schema's key) work.
+//! The memory store skips its primary-key checks for it.
 
 const std = @import("std");
 const plugins_mod = @import("plugins.zig");
@@ -150,6 +168,8 @@ pub fn customAssociation(comptime Target: type, comptime tag: EnumLiteral, compt
 }
 
 /// `zom.Schema(T, name, pk, .{})`, or with associations:
+/// `pk` is a field of `T` (`.id`), or `null` for a view without one (see
+/// the file comment).
 /// `zom.Schema(T, name, pk, .{ .associations = struct { pub const posts = zom.hasMany(PostSchema, .user_id); } })`.
 /// See the file comment for the two forms `associations` takes. The other
 /// option, `.plugins = .{ zom.plugins.timestamps(.{}) }`, is described in
@@ -157,7 +177,7 @@ pub fn customAssociation(comptime Target: type, comptime tag: EnumLiteral, compt
 pub fn Schema(
     comptime T: type,
     comptime dataset_name: []const u8,
-    comptime pk: std.meta.FieldEnum(T),
+    comptime pk: ?std.meta.FieldEnum(T),
     comptime options: anytype,
 ) type {
     if (@typeInfo(T) != .@"struct")
@@ -178,7 +198,13 @@ pub fn Schema(
 
         pub const Tuple = T;
         pub const name = dataset_name;
-        pub const primary_key = pk;
+        /// False for a view (`pk` given as `null`).
+        pub const has_primary_key = pk != null;
+
+        /// The primary key; a compile error to use on a view.
+        pub const primary_key: std.meta.FieldEnum(T) = pk orelse
+            @compileError(label ++ " has no primary key (it was declared with `null`, as a view), " ++
+                "so nothing that needs one (such as `byPk`) can be used on it; filter with `where` instead");
 
         /// Lets `zom.hasMany` / `zom.belongsTo` (and anything else) tell a
         /// schema type from any other type.
@@ -223,20 +249,30 @@ pub fn Schema(
         fn resolve(comptime assoc: []const u8) Association {
             const def = @field(defs, assoc);
             const Target = def.target;
+            const kind_name = switch (def.kind) {
+                .has_many => "zom.hasMany",
+                .belongs_to => "zom.belongsTo",
+                .custom => "zom.customAssociation",
+            };
+            const where = kind_name ++ ": association '" ++ assoc ++ "' of schema \"" ++ dataset_name ++ "\"";
+            if (def.kind == .belongs_to and !Target.has_primary_key)
+                @compileError(where ++ ": the target, schema \"" ++ Target.name ++
+                    "\", has no primary key (it is a view), so nothing can belong to it");
+            if (def.kind != .belongs_to and pk == null)
+                @compileError(where ++ ": this schema has no primary key (it is a view), so it has no key " ++
+                    "for the target's rows to point at; declare the association on the other side instead");
             if (def.kind == .custom) return .{
                 .name = assoc,
                 .kind = .custom,
                 .source = Self,
                 .target = Target,
                 .foreign_key = "",
-                .primary_key = @tagName(pk),
+                .primary_key = @tagName(pk.?),
                 .cardinality = def.cardinality,
                 .tag = def.tag,
             };
-            const where = (if (def.kind == .has_many) "zom.hasMany" else "zom.belongsTo") ++
-                ": association '" ++ assoc ++ "' of schema \"" ++ dataset_name ++ "\"";
             const Child, const Parent, const parent_pk = switch (def.kind) {
-                .has_many => .{ Target.Tuple, T, @tagName(pk) },
+                .has_many => .{ Target.Tuple, T, @tagName(pk.?) },
                 .belongs_to => .{ T, Target.Tuple, @tagName(Target.primary_key) },
                 .custom => unreachable,
             };

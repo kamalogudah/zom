@@ -367,9 +367,15 @@ fn checkSchema(comptime S: type) void {
         @compileError("zom-tigerbeetle: TigerBeetle's schemas are fixed; schema \"" ++ S.name ++ "\" must be a zom.Schema of " ++
             "zom_tigerbeetle.tb.Account, .Transfer or .AccountBalance (or use zom_tigerbeetle.Account / .Transfer / .AccountBalance), found `" ++
             @typeName(S.Tuple) ++ "`");
-    const pk = if (S.Tuple == tb.AccountBalance) "timestamp" else "id";
-    if (!std.mem.eql(u8, @tagName(S.primary_key), pk))
-        @compileError("zom-tigerbeetle: schema \"" ++ S.name ++ "\" must have `." ++ pk ++ "` as its primary key, found `." ++ @tagName(S.primary_key) ++ "`");
+    if (S.Tuple == tb.AccountBalance) {
+        // A row is unique per (account_id, timestamp), not by either alone.
+        if (S.has_primary_key)
+            @compileError("zom-tigerbeetle: schema \"" ++ S.name ++ "\" is a view of balances and must be declared " ++
+                "without a primary key (`null`), found `." ++ @tagName(S.primary_key) ++ "`: a transfer moves both its accounts' " ++
+                "balances, so `timestamp` is unique only within one account");
+    } else if (!S.has_primary_key or S.primary_key != .id)
+        @compileError("zom-tigerbeetle: schema \"" ++ S.name ++ "\" must have `.id` as its primary key, found " ++
+            (if (S.has_primary_key) "`." ++ @tagName(S.primary_key) ++ "`" else "none"));
 }
 
 fn TbDataset(comptime S: type) type {
@@ -1592,7 +1598,7 @@ test "belongsTo into accounts is a lookup; hasMany by debit or credit account pi
     try testing.expectEqual(0, tagged.items[0].tagged.len + tagged.items[1].tagged.len);
 }
 
-test "AccountBalance: read by account_id, ordered and limited; without one, AccountIdRequired" {
+test "AccountBalance: read by account_id, ordered and limited; one row by account_id and timestamp; without account_id, AccountIdRequired" {
     var gateway = try testGateway(.{});
     defer gateway.deinit();
     const accounts = try Accounts.init(&gateway);
@@ -1615,5 +1621,12 @@ test "AccountBalance: read by account_id, ordered and limited; without one, Acco
     try testing.expectEqual(t[2].timestamp, newest[0].timestamp);
     try testing.expectEqual(t[2].timestamp, newest[1].timestamp);
 
-    try testing.expectError(error.AccountIdRequired, balances.byPk(t[0].timestamp).toSlice(alloc));
+    // One row is (account_id, timestamp): the transfer's timestamp alone
+    // is on both its accounts' rows. (`byPk` is a compile error.)
+    const one = try balances.where(.account_id, .eq, b).where(.timestamp, .eq, t[2].timestamp).toSlice(alloc);
+    defer alloc.free(one);
+    try testing.expectEqual(1, one.len);
+    try testing.expectEqual(b, one[0].account_id);
+
+    try testing.expectError(error.AccountIdRequired, balances.where(.timestamp, .eq, t[0].timestamp).toSlice(alloc));
 }

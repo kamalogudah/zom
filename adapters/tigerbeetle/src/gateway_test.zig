@@ -70,10 +70,11 @@ test "init rejects an address that doesn't parse" {
     }));
 }
 
-test "AccountBalance is a read-only view keyed by timestamp" {
+test "AccountBalance is a read-only view without a primary key" {
     const caps = A.capabilities(zom_tigerbeetle.AccountBalance);
     try testing.expect(!caps.writable and !caps.batch_insert and !caps.updatable and !caps.deletable);
-    try testing.expectEqual(.timestamp, zom_tigerbeetle.AccountBalance.primary_key);
+    // Unique per (account_id, timestamp): a transfer moves both accounts.
+    try testing.expect(!zom_tigerbeetle.AccountBalance.has_primary_key);
     const Balances = Gateway.Dataset(zom_tigerbeetle.AccountBalance);
     comptime {
         std.debug.assert(Balances.filterable("account_id", .eq) and Balances.filterable("account_id", .in));

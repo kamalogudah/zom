@@ -9,6 +9,14 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Changed
 
+- **Breaking (zom-tigerbeetle):** `zom_tigerbeetle.AccountBalance` has no
+  primary key (it was keyed by `timestamp`, which is unique per account,
+  not overall: a transfer moves both its accounts' balances).
+  `balances.byPk(ts)` is now a compile error instead of
+  `error.AccountIdRequired`; use
+  `where(.account_id, .eq, a).where(.timestamp, .eq, ts)`. A schema of your
+  own over `tb.AccountBalance` must be declared with `null` too. (#84)
+
 - zom-sql renders a joined select (`users.join(.posts)`) as a correlated
   `WHERE EXISTS (SELECT 1 FROM "posts" WHERE "posts"."user_id" = "users"."id" AND ...)`
   instead of `SELECT DISTINCT ... INNER JOIN ... ON ...`. The rows are the
@@ -19,6 +27,13 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
   `WHERE` writer. (#82)
 
 ### Added
+
+- Views: `zom.Schema(T, name, null, options)` declares a schema without a
+  primary key, with `has_primary_key == false`. `byPk`, `S.primary_key`,
+  a `belongsTo` pointing at it and a `hasMany` / custom association on it
+  are compile errors. A `belongsTo` from it and a `hasMany` into it work.
+  The memory store skips its duplicate-key checks, and zom-pg's `verify`
+  its primary-key check. (#84)
 
 - Joined `update` and `delete` use the same semi-join selection as reads.
   zom-sql renders a correlated `EXISTS` predicate, and memory selects

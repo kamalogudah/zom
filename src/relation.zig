@@ -206,7 +206,12 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
             return next;
         }
 
+        /// `where(primary_key, .eq, value)`. A compile error on a schema
+        /// without a primary key (a view, declared with `null`).
         pub fn byPk(self: Self, value: anytype) Self {
+            if (comptime !S.has_primary_key)
+                @compileError("zom: byPk on relation '" ++ S.name ++ "', whose schema has no primary key (it is a view); " ++
+                    "filter with `where` instead");
             return self.where(S.primary_key, .eq, value);
         }
 

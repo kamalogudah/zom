@@ -303,7 +303,7 @@ breaking change needs a minor version bump and an entry in
 
 | Declaration | What it is |
 |---|---|
-| `zom.Schema(T, name, pk, options)` | Returns a schema type with `Tuple = T`, `name` (the dataset name), `primary_key` (a field of `T`, as an enum literal) and its associations. `options` is `.{}`, or has `.associations` (see [Associations](#associations)) and `.plugins` (see [Plugins](#plugins)). |
+| `zom.Schema(T, name, pk, options)` | Returns a schema type with `Tuple = T`, `name` (the dataset name), `primary_key` (a field of `T`, as an enum literal) and its associations. `pk` may be `null` for a view with no single unique field (see [Views](#views-schemas-without-a-primary-key)): `has_primary_key` is then false. `options` is `.{}`, or has `.associations` (see [Associations](#associations)) and `.plugins` (see [Plugins](#plugins)). |
 | `zom.hasMany(Target, .fk)`, `zom.belongsTo(Target, .fk)` | Declare an association on a schema. `S.association(.name)` and `S.associations.name` return a `zom.Association`: `name`, `kind` (`zom.AssociationKind`: `has_many`, `belongs_to` or `custom`), `source`, `target`, `foreign_key` and `primary_key` (field names as strings), `cardinality` (`zom.Cardinality`: `.many` or `.one`) and `tag`, plus `Child()`, `Parent()` and `Key()` (the key type a combine groups by). |
 | `zom.customAssociation(Target, .tag, .many)` | Declare an association with no foreign key zom can use, whose rows `Target`'s dataset finds itself through `loadAssociation`. `.one` instead of `.many` for an optional. See [Custom associations](#custom-associations-and-loadassociation). |
 | `zom.Relation(S, Gateway)` | Returns an immutable relation type over schema `S` and an adapter's `Gateway`. Checks the [adapter contract](#the-adapter-contract) at compile time through `zom.Adapter(Gateway)`, which it exposes as `Relation.Adapter`. |
@@ -352,7 +352,7 @@ relation and never touch the dataset. `field` is always an enum literal, and
 | `whereIn(field, slice)`, `whereNotIn(field, slice)` | `Relation` | `in` / `not_in` over a runtime slice (or pointer to an array) of the attribute's type, at most `max_in` long. Borrowed, not copied. |
 | `whereAny(.{ cond, ... })` | `Relation` | AND-s the conditions OR-ed together: `whereAny(.{ .{ .age, .gt, 30 }, .{ .role, .eq, .admin } })`. A condition is `.{ field, op, value }`, checked like `where` (a runtime slice works for `in`), or a nested `zom.any`, `zom.all` or `zom.not`. A condition too big for `max_filters` / `max_nodes` is a compile error; running out of room at runtime panics. |
 | `whereNot(cond)` | `Relation` | AND-s NOT `cond`. SQL's three-valued logic: where `cond` is unknown (`NULL > 30`), so is its negation, and the row matches neither. |
-| `byPk(value)` | `Relation` | `where(primary_key, .eq, value)`. |
+| `byPk(value)` | `Relation` | `where(primary_key, .eq, value)`. A compile error on a view (no primary key). |
 | `order(field, direction)` | `Relation` | Adds a sort key after those already set: `.order(.role, .asc).order(.age, .desc)` is `ORDER BY role ASC, age DESC`. At most `Query.max_orders = 4` keys; a fifth panics. |
 | `reorder(.{ .{ field, direction }, ... })` | `Relation` | Replaces every sort key; `reorder(.{})` removes the order. More than `max_orders` keys is a compile error. |
 | `limit(n)`, `offset(n)` | `Relation` | `n: usize`. |
@@ -807,6 +807,28 @@ is compiled, whether or not anything uses the association yet: the foreign key
 must be a field of the right tuple, and its type must be the key's type or
 that type made optional (`?u32` for a `u32` id). `S.association(.postz)` is a
 compile error that lists the schema's associations.
+
+#### Views: schemas without a primary key
+
+Some datasets have no single unique field: a row of TigerBeetle's balance
+history is unique per account and timestamp, but one transfer's timestamp is
+on both its accounts' rows. Declare such a schema with `null` as its key:
+
+```zig
+const BalanceSchema = zom.Schema(Balance, "balances", null, .{
+    .associations = struct {
+        pub const account = zom.belongsTo(AccountSchema, .account_id);
+    },
+});
+```
+
+`BalanceSchema.has_primary_key` is false, and whatever needs the key is a
+compile error: `byPk`, `BalanceSchema.primary_key`, a `belongsTo` pointing at
+the view, and a `hasMany` or custom association declared on it. A
+`belongsTo` from the view and a `hasMany` into it work, since they use the
+other schema's key. The memory store checks no keys for it (no
+`error.DuplicatePrimaryKey`), and zom-pg's `verify` skips the primary-key
+comparison.
 
 **Why `struct { pub const ... }`.** Zig evaluates a function's arguments
 before calling it, so with `.associations = .{ .posts = zom.hasMany(PostSchema, .user_id) }`

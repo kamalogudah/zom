@@ -59,7 +59,7 @@ pub const Transfer = zom.Schema(tb.Transfer, "transfers", .id, .{
     },
 });
 // Read only: see "Account history".
-pub const AccountBalance = zom.Schema(tb.AccountBalance, "account_balances", .timestamp, .{ ... });
+pub const AccountBalance = zom.Schema(tb.AccountBalance, "account_balances", null, .{ ... });
 ```
 
 `tb.Account` and `tb.Transfer` are `tb_account_t` and `tb_transfer_t` from
@@ -336,9 +336,20 @@ const latest = try balances.where(.account_id, .eq, id).order(.timestamp, .desc)
 
 A read needs an `account_id` filter (`eq` or `in`). Without one,
 TigerBeetle has nothing to ask for, so it fails with
-`error.AccountIdRequired`, and so does `byPk(timestamp)` alone. The view is
-keyed by `timestamp`, which is unique within one account but not across
-them, because a transfer moves both its accounts' balances. `timestamp`
+`error.AccountIdRequired`.
+
+The view has no primary key (it is declared with `null`). A row is unique
+per `account_id` and `timestamp`, but `timestamp` alone is not unique,
+because a transfer moves both its accounts' balances, so two rows share it.
+So `balances.byPk(...)` is a compile error, as is a `belongsTo` pointing at
+the view. One row is:
+
+```zig
+const after = try balances.where(.account_id, .eq, id).where(.timestamp, .eq, transfer.timestamp).first(allocator);
+```
+
+A schema of your own over `tb.AccountBalance` must be declared without a
+primary key too: keying it by `.timestamp` is a compile error. `timestamp`
 ranges and order are the filter's. Several accounts with an order, or
 filters on the balances themselves (with `allowFallback()`), are done in
 memory.
