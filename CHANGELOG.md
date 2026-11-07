@@ -7,6 +7,8 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-11-07
+
 ### Added
 
 - **zom-sqlite** (`adapters/sqlite`, module `zom_sqlite`, `.sqlite = true`):
@@ -859,7 +861,8 @@ API is listed in the README under [API (v0.2)](docs/api.md#api-v02).
 First version: schemas, immutable relations, create and update changesets,
 mappers with `combineMany`, the memory adapter and the SQL `SELECT` compiler.
 
-[Unreleased]: https://github.com/kamalogudah/zom/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/kamalogudah/zom/compare/v0.16.1...HEAD
+[0.16.1]: https://github.com/kamalogudah/zom/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/kamalogudah/zom/releases/tag/v0.16.0
 [0.2.0]: https://github.com/kamalogudah/zom/releases/tag/v0.2.0
 [0.1.0]: https://github.com/kamalogudah/zom/commits/04a755a
