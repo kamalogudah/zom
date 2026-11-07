@@ -149,6 +149,7 @@ const checks = .{
     .{ Check{ .name = "one: null, one tuple, or error.MoreThanOneTuple", .orders = &.{"id"} }, checkOne },
     .{ Check{ .name = "select: readProjected keeps filters, order and limit", .features = &.{ "projection", "order_on" }, .orders = &.{ "age", "id", "name" } }, checkProjection },
     .{ Check{ .name = "join: rows with a matching row in another dataset, each once", .features = &.{"join"}, .orders = &.{"id"} }, checkJoin },
+    .{ Check{ .name = "per_group_limit: limit and offset page each group, as Query.pageGroups does", .features = &.{"per_group_limit"}, .orders = &.{ "id", "name" } }, checkPerGroup },
     .{ Check{ .name = "insert: returns the stored tuple, error.DuplicatePrimaryKey", .needs = &.{.writable} }, checkInsert },
     .{ Check{ .name = "insert: strings are copied", .needs = &.{.writable} }, checkInsertCopies },
     .{ Check{ .name = "insertMany: count, error.DuplicatePrimaryKey", .needs_any = &.{ .batch_insert, .writable } }, checkInsertMany },
@@ -747,6 +748,88 @@ fn checkJoin(comptime G: type, comptime F: type) !void {
     try expectIds(rel.where(.age, .gt, 30).join(.posts), "age gt 30 (bob, dee), join posts", .any, &.{4});
     try expectIds(rel.join(.posts).order(.id, .asc).limit(2), "join posts, order id asc, limit 2", .as_read, &.{ 2, 4 });
     try expectIds(post_rel.join(.author).whereJoined(.author, .role, .eq, .a), "posts join author, role eq .a", .any, &.{ 20, 21 });
+}
+
+/// Reads `rel` (whose query has `per_group` set) and checks it against
+/// the in-memory page: every tuple of the same query without its limit
+/// and offset, read through `tuples` (a relation over the same dataset),
+/// cut by `Query.pageGroups`. Ids are compared in the order read, so the
+/// query must end its order with a unique key.
+fn expectPerGroup(rel: anytype, tuples: anytype, label: []const u8) !void {
+    errdefer std.debug.print("zom.lint:   case: {s}\n", .{label});
+    const got = try rel.toSlice(testing.allocator);
+    defer rel.free(testing.allocator, got);
+
+    var whole = tuples;
+    whole.query = rel.query;
+    whole.query.limit = null;
+    whole.query.offset = 0;
+    whole.query.per_group = null;
+    const all = try whole.toSlice(testing.allocator);
+    defer whole.free(testing.allocator, all);
+    // `pageGroups` moves the rows it keeps to the front of a copy; the
+    // strings stay `all`'s.
+    const copy = try testing.allocator.dupe(User, all);
+    defer testing.allocator.free(copy);
+    const want = try rel.query.pageGroups(copy, testing.allocator);
+
+    var want_ids: [users.len]u32 = undefined;
+    var got_ids: [users.len]u32 = undefined;
+    if (got.len > users.len) {
+        std.debug.print("zom.lint:   read returned {d} rows, only {d} are seeded\n", .{ got.len, users.len });
+        return error.TestUnexpectedResult;
+    }
+    for (want, want_ids[0..want.len]) |row, *id| id.* = row.id;
+    for (got, got_ids[0..got.len]) |row, *id| id.* = row.id;
+    try testing.expectEqualSlices(u32, want_ids[0..want.len], got_ids[0..got.len]);
+}
+
+fn checkPerGroup(comptime G: type, comptime F: type) !void {
+    var fx: Fixture(G, F) = undefined;
+    const rel = try fx.init();
+    defer fx.deinit();
+
+    const Case = struct { label: []const u8, field: Fixture(G, F).Relation.Field, limit: ?usize, offset: usize };
+    // By role: a = {4, 1}, b = {2, 5}, c = {6, 3}. By age: ada and eve
+    // (null) are one group, everyone else is alone.
+    const cases = [_]Case{
+        .{ .label = "role, limit 1", .field = .role, .limit = 1, .offset = 0 },
+        .{ .label = "role, offset 1", .field = .role, .limit = null, .offset = 1 },
+        .{ .label = "role, offset 1, limit 1", .field = .role, .limit = 1, .offset = 1 },
+        .{ .label = "role, offset past every group", .field = .role, .limit = 3, .offset = 2 },
+        .{ .label = "role, limit 0", .field = .role, .limit = 0, .offset = 0 },
+        .{ .label = "role, limit past every group", .field = .role, .limit = 10, .offset = 0 },
+        .{ .label = "age (nulls are one group), limit 1", .field = .age, .limit = 1, .offset = 0 },
+        .{ .label = "name (every row alone), offset 1", .field = .name, .limit = null, .offset = 1 },
+    };
+    inline for (.{ .asc, .desc }) |dir| {
+        for (cases) |c| {
+            var r = rel.order(.id, dir);
+            r.query.limit = c.limit;
+            r.query.offset = c.offset;
+            r.query.per_group = c.field;
+            try expectPerGroup(r, rel, c.label);
+        }
+    }
+
+    // After a filter: rows it drops don't count toward a group's page.
+    var filtered = rel.where(.age, .lt, 50).order(.name, .asc).order(.id, .asc).limit(1);
+    filtered.query.per_group = .role;
+    try expectPerGroup(filtered, rel, "age lt 50 (not bob), role, order name, limit 1");
+
+    // `in`, as combine's batched `whereIn` sends it.
+    if (comptime adapter.Adapter(G).supports(Users).in) {
+        var batch = rel.where(.role, .in, .{ .a, .c }).order(.id, .desc).limit(1);
+        batch.query.per_group = .role;
+        try expectPerGroup(batch, rel, "role in (a, c), order id desc, limit 1");
+    }
+
+    // A projection reads the same page.
+    if (comptime adapter.Adapter(G).supports(Users).projection) {
+        var projected = rel.select(.{ .id, .name }).order(.id, .desc).limit(1);
+        projected.query.per_group = .role;
+        try expectPerGroup(projected, rel, "select id, name; role, limit 1");
+    }
 }
 
 fn checkInsert(comptime G: type, comptime F: type) !void {

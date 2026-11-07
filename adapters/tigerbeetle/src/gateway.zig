@@ -411,7 +411,10 @@ fn TbDataset(comptime S: type) type {
         /// `id`). No `or` groups, `like`, projection or join, and no
         /// `offset`: `query_*` can only start from a timestamp, so skipping
         /// rows means reading them, which `.fallback` does in the open.
-        pub const supports: zom.Supports = .{ .in = true, .offset = false };
+        /// `per_group_limit`: a read pages each group of `query.per_group`
+        /// itself, and `loadAssociation` each key's slice, so `combine`
+        /// hands it a target's per-parent page (see `loadAssociation`).
+        pub const supports: zom.Supports = .{ .in = true, .offset = false, .per_group_limit = true };
         /// `id` by `eq` / `in`, `user_data_128/64/32`, `ledger` and `code`
         /// by `eq`, `timestamp` by `eq`, `lt`, `lte`, `gt`, `gte` and
         /// `between`. See read.zig.
@@ -578,7 +581,13 @@ fn TbDataset(comptime S: type) type {
         /// Anything else is a compile error. Each read is bounded by
         /// `Config.scan_max` on its own. The query's filters and order apply
         /// to each slice, whatever TigerBeetle evaluated (`Query.matches`
-        /// checks every row, an order other than `timestamp` sorts it).
+        /// checks every row, an order other than `timestamp` sorts it), and
+        /// so do its limit and offset (`supports.per_group_limit`): each
+        /// account's `get_account_transfers`, and each key's `query_*`, asks
+        /// the cluster for no more than `offset + limit` matches when the
+        /// order is by `timestamp` (or none) and no row was dropped by a
+        /// filter evaluated here, so "the latest 3 transfers of each
+        /// account" reads three per account, not all of them.
         pub fn loadAssociation(
             self: *Self,
             comptime a: zom.Association,
@@ -594,10 +603,17 @@ fn TbDataset(comptime S: type) type {
                 },
                 .lookup => {
                     @memset(groups, &.{});
+                    // At most one row per key: it is on the key's page when
+                    // the page starts at it and holds a row. The limit and
+                    // offset would page each lookup, so they are taken off.
+                    if (query.offset > 0 or query.limit == 0) return groups;
+                    var each = query;
+                    each.limit = null;
+                    each.offset = 0;
                     var start: usize = 0;
                     while (start < keys.len) : (start += reads.lookup_max) {
                         const chunk = keys[start..@min(start + reads.lookup_max, keys.len)];
-                        const rows = try self.read(query.whereIn(.id, chunk), allocator);
+                        const rows = try self.read(each.whereIn(.id, chunk), allocator);
                         // At most one row per id, so a key's group is that row.
                         for (rows, 0..) |row, r| for (chunk, start..) |id, k| {
                             if (row.id == id) groups[k] = rows[r..][0..1];
@@ -643,9 +659,9 @@ fn TbDataset(comptime S: type) type {
             }
         }
 
-        /// `get_account_transfers` of one account, filtered and ordered by
-        /// `query` (and windowed by its offset and limit, though `combine`
-        /// passes none).
+        /// `get_account_transfers` of one account, filtered, ordered and
+        /// paged by `query`: without a sort in memory, the cluster is asked
+        /// for the first `offset + limit` matches only.
         fn accountTransfers(self: *Self, query: *const Q, account_id: u128, sides: u32, allocator: Allocator) Gateway.Error![]const T {
             const filter = reads.accountFilter(T, query, account_id, sides) orelse return &.{};
             const sort = reads.sorts(T, query);
@@ -769,7 +785,10 @@ fn BalanceDataset(comptime S: type) type {
             AccountIdRequired,
         };
 
-        pub const supports: zom.Supports = .{ .in = true, .offset = false };
+        /// `per_group_limit`: a read pages each group of `query.per_group`
+        /// itself. On `account_id`, as `combine` from accounts sends it,
+        /// each account's scan stops at `offset + limit` matches.
+        pub const supports: zom.Supports = .{ .in = true, .offset = false, .per_group_limit = true };
 
         /// `account_id` by `eq` / `in`; `timestamp` by `eq`, `lt`, `lte`,
         /// `gt`, `gte` and `between`.
@@ -810,13 +829,18 @@ fn BalanceDataset(comptime S: type) type {
             const sort = ordered and query.orderSlice().len > 0 and (ids.len > 1 or reads.sorts(T, query));
             // Without a sort, the first offset + limit matches are enough.
             const want = if (sort) null else wanted(Q, query);
+            // Paged per account: each account's scan comes in the query's
+            // order unless that order sorts in memory, so it needs only
+            // its own first offset + limit matches, whatever the sort
+            // across accounts does after.
+            const each: ?usize = if (query.per_group == .account_id and !reads.sorts(T, query)) wantedEach(Q, query) else null;
             var kept: usize = 0;
             for (ids.slice()) |id| {
-                const remaining = if (want) |w| w - kept else null;
-                if (remaining == 0) break;
+                const remaining = if (each) |e| e else if (want) |w| w - kept else null;
+                if (each == null and remaining == 0) break;
                 const filter = reads.accountFilter(T, query, id, c.TB_ACCOUNT_FILTER_DEBITS | c.TB_ACCOUNT_FILTER_CREDITS) orelse continue;
-                const each: BalanceSink(@TypeOf(sink)) = .{ .account_id = id, .query = query, .inner = sink, .kept = &kept };
-                try self.shared.scanPages(c.tb_account_balance_t, c.TB_OPERATION_GET_ACCOUNT_BALANCES, filter, remaining, each);
+                const balances: BalanceSink(@TypeOf(sink)) = .{ .account_id = id, .query = query, .inner = sink, .kept = &kept };
+                try self.shared.scanPages(c.tb_account_balance_t, c.TB_OPERATION_GET_ACCOUNT_BALANCES, filter, remaining, balances);
             }
             return sort;
         }
@@ -840,21 +864,28 @@ fn BalanceDataset(comptime S: type) type {
     };
 }
 
-/// The matches a read needs, null for all: `offset + limit`.
+/// The matches a read needs, null for all: `offset + limit`. A query
+/// paged per group (`per_group`) needs every match, since any of them may
+/// start a group.
 fn wanted(comptime Q: type, query: *const Q) ?usize {
+    if (query.per_group != null) return null;
+    return wantedEach(Q, query);
+}
+
+/// `offset + limit`, null for all: what one group needs.
+fn wantedEach(comptime Q: type, query: *const Q) ?usize {
     const l = query.limit orelse return null;
     if (l == 0) return 0;
     return std.math.add(usize, l, query.offset) catch null;
 }
 
 /// The rows a read collected, sorted by `query` when `sort`, then cut to its
-/// offset and limit, as an owned slice.
+/// offset and limit (each group's, with `per_group`), as an owned slice.
 fn finish(comptime T: type, rows: *Collect(T), query: *const zom.Query(T), sort: bool) Allocator.Error![]T {
     const items = rows.items.items;
     if (sort) std.mem.sort(T, items, query.orderSlice(), zom.Query(T).lessThan);
-    const start, const end = reads.window(items.len, query.offset, query.limit);
-    std.mem.copyForwards(T, items[0 .. end - start], items[start..end]);
-    rows.items.shrinkRetainingCapacity(end - start);
+    const kept = try query.pageGroups(items, rows.allocator);
+    rows.items.shrinkRetainingCapacity(kept.len);
     return rows.items.toOwnedSlice(rows.allocator);
 }
 
@@ -1551,6 +1582,104 @@ test "combine(.transfers) and combine(.balances): an account's history" {
     defer latest.deinit();
     try testing.expectEqual(2, latest.items.len);
     for (latest.items) |item| try expectTransfers(t[2..3], item.transfers);
+}
+
+test "a combine's per-account limit goes to the cluster: one row fetched per account" {
+    // scan_max = 1 refuses any scan that would fetch a second row, so these
+    // only pass when each account's scan asks for its own page alone.
+    var gateway = try testGateway(.{ .scan_max = 1 });
+    defer gateway.deinit();
+    const accounts = try Accounts.init(&gateway);
+    const transfers = try Transfers.init(&gateway);
+    const balances = try Balances.init(&gateway);
+    const a, const b, const t = try seedHistory(accounts, transfers);
+    const alloc = testing.allocator;
+    const both = accounts.whereIn(.id, &[_]u128{ a, b });
+
+    // get_account_transfers per account, through loadAssociation.
+    const WithTransfers = struct { id: u128, transfers: []const tb.Transfer };
+    var before = gateway.requestCount();
+    var latest = try both.combine(.transfers, transfers.order(.timestamp, .desc).limit(1)).mapTo(WithTransfers, alloc);
+    defer latest.deinit();
+    try testing.expectEqual(3, gateway.requestCount() - before);
+    for (latest.items) |item| try expectTransfers(t[2..3], item.transfers);
+    var first = try both.combine(.transfers, transfers.order(.timestamp, .asc).limit(1)).mapTo(WithTransfers, alloc);
+    defer first.deinit();
+    for (first.items) |item| try expectTransfers(t[0..1], item.transfers);
+
+    // get_account_balances per account, through the batched whereIn,
+    // paged on account_id.
+    const WithBalances = struct { id: u128, balances: []const tb.AccountBalance };
+    before = gateway.requestCount();
+    var last = try both.combine(.balances, balances.order(.timestamp, .desc).limit(1)).mapTo(WithBalances, alloc);
+    defer last.deinit();
+    try testing.expectEqual(3, gateway.requestCount() - before);
+    for (last.items) |item| {
+        try testing.expectEqual(1, item.balances.len);
+        try testing.expectEqual(item.id, item.balances[0].account_id);
+        try testing.expectEqual(t[2].timestamp, item.balances[0].timestamp);
+    }
+
+    // Without the per-account limit the same scan needs every row.
+    try testing.expectError(error.ScanLimitExceeded, both.combine(.transfers, transfers).mapTo(WithTransfers, alloc));
+}
+
+test "a paged combine through loadAssociation matches paging every row in memory" {
+    var gateway = try testGateway(.{});
+    defer gateway.deinit();
+    const accounts = try Accounts.init(&gateway);
+    const transfers = try Transfers.init(&gateway);
+    const balances = try Balances.init(&gateway);
+    const a, const b, const t = try seedHistory(accounts, transfers);
+    const alloc = testing.allocator;
+    const both = accounts.whereIn(.id, &[_]u128{ a, b }).order(.timestamp, .asc);
+    const WithTransfers = struct { id: u128, transfers: []const tb.Transfer };
+
+    // A filter the cluster can't evaluate (amount) drops rows here: they
+    // don't count toward the page. The latest transfer of 5 or more is t[2],
+    // then t[0]; t[1] (3) never is.
+    var big = try both.combine(.transfers, transfers.allowFallback().where(.amount, .gte, 5).order(.timestamp, .desc).offset(1).limit(1))
+        .mapTo(WithTransfers, alloc);
+    defer big.deinit();
+    for (big.items) |item| try expectTransfers(t[0..1], item.transfers);
+
+    // An order sorted in memory (amount desc), paged after the sort.
+    var largest = try both.combine(.transfers, transfers.allowFallback().order(.amount, .desc).limit(2)).mapTo(WithTransfers, alloc);
+    defer largest.deinit();
+    for (largest.items) |item| try expectTransfers(&.{ t[0], t[2] }, item.transfers);
+
+    // limit(0) and an offset past every account's rows.
+    var none = try both.combine(.transfers, transfers.limit(0)).mapTo(WithTransfers, alloc);
+    defer none.deinit();
+    for (none.items) |item| try expectTransfers(&.{}, item.transfers);
+    var past = try both.combine(.transfers, transfers.allowFallback().offset(3)).mapTo(WithTransfers, alloc);
+    defer past.deinit();
+    for (past.items) |item| try expectTransfers(&.{}, item.transfers);
+
+    // A belongsTo lookup: each key has at most one row, so a page that
+    // starts past it, or holds none, is null.
+    const WithDebit = struct { id: u128, debit_account: ?tb.Account };
+    const paid = transfers.whereIn(.id, &[_]u128{ t[0].id, t[1].id });
+    var kept = try paid.combine(.debit_account, accounts.limit(1)).mapTo(WithDebit, alloc);
+    defer kept.deinit();
+    try testing.expectEqual(a, kept.items[0].debit_account.?.id);
+    try testing.expectEqual(b, kept.items[1].debit_account.?.id);
+    var skipped = try paid.combine(.debit_account, accounts.allowFallback().offset(1)).mapTo(WithDebit, alloc);
+    defer skipped.deinit();
+    for (skipped.items) |item| try testing.expectEqual(null, item.debit_account);
+    var zero = try paid.combine(.debit_account, accounts.limit(0)).mapTo(WithDebit, alloc);
+    defer zero.deinit();
+    for (zero.items) |item| try testing.expectEqual(null, item.debit_account);
+
+    // Balances, paged on account_id with an offset, as their full read
+    // paged per account: a's and b's second-latest balance.
+    const WithBalances = struct { id: u128, balances: []const tb.AccountBalance };
+    var second = try both.combine(.balances, balances.allowFallback().order(.timestamp, .desc).offset(1).limit(1)).mapTo(WithBalances, alloc);
+    defer second.deinit();
+    for (second.items) |item| {
+        try testing.expectEqual(1, item.balances.len);
+        try testing.expectEqual(t[1].timestamp, item.balances[0].timestamp);
+    }
 }
 
 test "belongsTo into accounts is a lookup; hasMany by debit or credit account picks one side" {

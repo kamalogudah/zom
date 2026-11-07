@@ -24,116 +24,134 @@ const MessageSchema = zom.Schema(Message, "messages", .id, .{
 });
 
 /// The memory gateway, but the messages dataset loads associations itself
-/// and counts its calls; the people dataset is memory's own.
-const HookGateway = struct {
-    pub const adapter_name = "hooked";
-    pub const Config = struct {};
+/// and counts its calls; the people dataset is memory's own. Its
+/// `loadAssociation` pages each key's slice itself, and declares
+/// `supports.per_group_limit` to get the page, when `pages`.
+const HookGateway = HookGatewayOf(false);
+const PagingGateway = HookGatewayOf(true);
 
-    inner: zom.memory.Gateway,
-    messages: MessageStore = .{},
+fn HookGatewayOf(comptime pages: bool) type {
+    return struct {
+        const Gw = @This();
+        pub const adapter_name = "hooked";
+        pub const Config = struct {};
 
-    pub fn init(allocator: std.mem.Allocator, _: Config) HookGateway {
-        return .{ .inner = .init(allocator, .{}) };
-    }
+        inner: zom.memory.Gateway,
+        messages: MessageStore = .{},
 
-    pub fn deinit(self: *HookGateway) void {
-        self.inner.deinit();
-    }
-
-    pub fn Dataset(comptime S: type) type {
-        return if (S == MessageSchema) MessageStore else zom.memory.Store(S);
-    }
-
-    pub fn dataset(self: *HookGateway, comptime S: type) !*Dataset(S) {
-        if (S != MessageSchema) return self.inner.dataset(S);
-        self.messages.store = try self.inner.dataset(S);
-        return &self.messages;
-    }
-
-    const MessageStore = struct {
-        const T = Message;
-        const Q = zom.Query(T);
-        pub const supports: zom.Supports = blk: {
-            var all: zom.Supports = .all;
-            all.projection = false;
-            break :blk all;
-        };
-
-        store: *zom.memory.Store(MessageSchema) = undefined,
-        loads: usize = 0,
-        reads: usize = 0,
-        /// Loads whose query had a limit or offset, which combine takes
-        /// off to page each key's rows itself.
-        paged_loads: usize = 0,
-
-        pub fn read(self: *MessageStore, query: Q, allocator: std.mem.Allocator) ![]T {
-            self.reads += 1;
-            return self.store.read(query, allocator);
-        }
-        pub fn count(self: *MessageStore, query: Q) !usize {
-            return self.store.count(query);
-        }
-        pub fn insert(self: *MessageStore, row: T) !T {
-            return self.store.insert(row);
+        pub fn init(allocator: std.mem.Allocator, _: Config) Gw {
+            return .{ .inner = .init(allocator, .{}) };
         }
 
-        /// One read of everything `query` matches, then each key's rows
-        /// picked out, in the query's order.
-        pub fn loadAssociation(
-            self: *MessageStore,
-            comptime a: zom.Association,
-            keys: []const a.Key(),
-            query: Q,
-            allocator: std.mem.Allocator,
-        ) ![]const []const T {
-            self.loads += 1;
-            if (query.limit != null or query.offset != 0) self.paged_loads += 1;
-            const rows = try self.store.read(query, allocator);
-            const groups = try allocator.alloc([]const T, keys.len);
-            for (keys, groups) |key, *g| {
-                var list: std.ArrayList(T) = .empty;
-                for (rows) |row| if (belongs(a, row, key)) try list.append(allocator, row);
-                g.* = try list.toOwnedSlice(allocator);
+        pub fn deinit(self: *Gw) void {
+            self.inner.deinit();
+        }
+
+        pub fn Dataset(comptime S: type) type {
+            return if (S == MessageSchema) MessageStore else zom.memory.Store(S);
+        }
+
+        pub fn dataset(self: *Gw, comptime S: type) !*Dataset(S) {
+            if (S != MessageSchema) return self.inner.dataset(S);
+            self.messages.store = try self.inner.dataset(S);
+            return &self.messages;
+        }
+
+        const MessageStore = struct {
+            const T = Message;
+            const Q = zom.Query(T);
+            pub const supports: zom.Supports = blk: {
+                var all: zom.Supports = .all;
+                all.projection = false;
+                all.per_group_limit = pages;
+                break :blk all;
+            };
+
+            store: *zom.memory.Store(MessageSchema) = undefined,
+            loads: usize = 0,
+            reads: usize = 0,
+            /// Loads whose query had a limit or offset: none without `pages`,
+            /// since combine takes them off to page each key's rows itself.
+            paged_loads: usize = 0,
+
+            pub fn read(self: *MessageStore, query: Q, allocator: std.mem.Allocator) ![]T {
+                self.reads += 1;
+                return self.store.read(query, allocator);
             }
-            return groups;
-        }
+            pub fn count(self: *MessageStore, query: Q) !usize {
+                return self.store.count(query);
+            }
+            pub fn insert(self: *MessageStore, row: T) !T {
+                return self.store.insert(row);
+            }
 
-        fn belongs(comptime a: zom.Association, row: T, key: u32) bool {
-            if (a.kind == .has_many) return @field(row, a.foreign_key) == key;
-            if (comptime std.mem.eql(u8, a.tag, "both_sides")) return row.sender_id == key or row.recipient_id == key;
-            if (comptime std.mem.eql(u8, a.tag, "sender")) return row.sender_id == key;
-            @compileError("unknown association " ++ a.name);
-        }
+            /// One read of everything `query` matches, then each key's rows
+            /// picked out, in the query's order, and paged by its limit and
+            /// offset (which only come with `pages`).
+            pub fn loadAssociation(
+                self: *MessageStore,
+                comptime a: zom.Association,
+                keys: []const a.Key(),
+                query: Q,
+                allocator: std.mem.Allocator,
+            ) ![]const []const T {
+                self.loads += 1;
+                if (query.limit != null or query.offset != 0) self.paged_loads += 1;
+                var all = query;
+                all.limit = null;
+                all.offset = 0;
+                const rows = try self.store.read(all, allocator);
+                const groups = try allocator.alloc([]const T, keys.len);
+                for (keys, groups) |key, *g| {
+                    var list: std.ArrayList(T) = .empty;
+                    for (rows) |row| if (belongs(a, row, key)) try list.append(allocator, row);
+                    g.* = try query.pageGroups(list.items, allocator);
+                }
+                return groups;
+            }
+
+            fn belongs(comptime a: zom.Association, row: T, key: u32) bool {
+                if (a.kind == .has_many) return @field(row, a.foreign_key) == key;
+                if (comptime std.mem.eql(u8, a.tag, "both_sides")) return row.sender_id == key or row.recipient_id == key;
+                if (comptime std.mem.eql(u8, a.tag, "sender")) return row.sender_id == key;
+                @compileError("unknown association " ++ a.name);
+            }
+        };
     };
-};
+}
 
 const People = zom.Relation(PersonSchema, HookGateway);
 const Messages = zom.Relation(MessageSchema, HookGateway);
 
-const Fixture = struct {
-    gw: HookGateway,
-    people: People,
-    messages: Messages,
+const Fixture = FixtureOf(HookGateway);
 
-    fn init(self: *Fixture) !void {
-        self.gw = .init(testing.allocator, .{});
-        errdefer self.gw.deinit();
-        self.people = try .init(&self.gw);
-        self.messages = try .init(&self.gw);
-        _ = try self.people.create(.{ .id = 1, .name = "Achieng" }).commit();
-        _ = try self.people.create(.{ .id = 2, .name = "Otieno" }).commit();
-        _ = try self.people.create(.{ .id = 3, .name = "Wanjiru" }).commit();
-        _ = try self.messages.create(.{ .id = 10, .sender_id = 1, .recipient_id = 2, .body = "habari" }).commit();
-        _ = try self.messages.create(.{ .id = 11, .sender_id = 2, .recipient_id = 1, .body = "nzuri" }).commit();
-        _ = try self.messages.create(.{ .id = 12, .sender_id = 1, .recipient_id = 9, .body = "hello?" }).commit();
-        self.gw.messages.loads = 0;
-        self.gw.messages.reads = 0;
-    }
+fn FixtureOf(comptime G: type) type {
+    return struct {
+        const Fx = @This();
+        gw: G,
+        people: zom.Relation(PersonSchema, G),
+        messages: zom.Relation(MessageSchema, G),
 
-    fn deinit(self: *Fixture) void {
-        self.gw.deinit();
-    }
-};
+        fn init(self: *Fx) !void {
+            self.gw = .init(testing.allocator, .{});
+            errdefer self.gw.deinit();
+            self.people = try .init(&self.gw);
+            self.messages = try .init(&self.gw);
+            _ = try self.people.create(.{ .id = 1, .name = "Achieng" }).commit();
+            _ = try self.people.create(.{ .id = 2, .name = "Otieno" }).commit();
+            _ = try self.people.create(.{ .id = 3, .name = "Wanjiru" }).commit();
+            _ = try self.messages.create(.{ .id = 10, .sender_id = 1, .recipient_id = 2, .body = "habari" }).commit();
+            _ = try self.messages.create(.{ .id = 11, .sender_id = 2, .recipient_id = 1, .body = "nzuri" }).commit();
+            _ = try self.messages.create(.{ .id = 12, .sender_id = 1, .recipient_id = 9, .body = "hello?" }).commit();
+            self.gw.messages.loads = 0;
+            self.gw.messages.reads = 0;
+        }
+
+        fn deinit(self: *Fx) void {
+            self.gw.deinit();
+        }
+    };
+}
 
 fn ids(rows: anytype) [8]u32 {
     var out: [8]u32 = @splat(0);
@@ -235,6 +253,42 @@ test "a hasMany into a dataset with loadAssociation goes through it too" {
     try expectIds(&.{12}, skipped.items[0].sent);
     try expectIds(&.{}, skipped.items[1].sent);
     try testing.expectEqual(0, f.gw.messages.paged_loads);
+}
+
+test "a dataset with supports.per_group_limit gets the page, and pages each key's slice itself" {
+    var f: FixtureOf(PagingGateway) = undefined;
+    try f.init();
+    defer f.deinit();
+
+    const Author = struct { id: u32, sent: []const Message };
+    var paged = try f.people.order(.id, .asc).combine(.sent, f.messages.order(.id, .desc).limit(1)).mapTo(Author, testing.allocator);
+    defer paged.deinit();
+    try testing.expectEqual(1, f.gw.messages.loads);
+    try testing.expectEqual(1, f.gw.messages.paged_loads);
+    try expectIds(&.{12}, paged.items[0].sent);
+    try expectIds(&.{11}, paged.items[1].sent);
+    try expectIds(&.{}, paged.items[2].sent);
+
+    // A custom association, a .one one, and a nested level that fills only
+    // the rows kept: the same as when combine pages the slices.
+    const Line = struct { id: u32, sender: ?struct { name: []const u8 } };
+    const Talker = struct { id: u32, conversation: []const Line };
+    var second = try f.people.order(.id, .asc)
+        .combine(.conversation, f.messages.order(.id, .asc).offset(1).limit(1).combine(.sender, f.people))
+        .mapTo(Talker, testing.allocator);
+    defer second.deinit();
+    try testing.expectEqual(2, f.gw.messages.paged_loads);
+    try expectIds(&.{11}, second.items[0].conversation);
+    try expectIds(&.{11}, second.items[1].conversation);
+    try testing.expectEqualStrings("Otieno", second.items[1].conversation[0].sender.?.name);
+    try expectIds(&.{}, second.items[2].conversation);
+
+    const First = struct { id: u32, first_sent: ?Message };
+    var skipped = try f.people.order(.id, .asc).combine(.first_sent, f.messages.order(.id, .asc).offset(1)).mapTo(First, testing.allocator);
+    defer skipped.deinit();
+    try testing.expectEqual(12, skipped.items[0].first_sent.?.id);
+    try testing.expectEqual(null, skipped.items[1].first_sent);
+    try testing.expectEqual(null, skipped.items[2].first_sent);
 }
 
 test "a target with loadAssociation takes a query already at max_filters" {

@@ -61,9 +61,24 @@
 //! kept. A `loadAssociation` gets the query without them too, and its
 //! groups are paged the same way.
 //!
-//! The cost is reading the whole association. Pushing the page into the
-//! query (SQL's `ROW_NUMBER() OVER (PARTITION BY ...)`) is left to a later
-//! adapter capability (#87).
+//! That costs reading the whole association: "the latest 3 of 10,000
+//! posts per user" reads all 10,000. A target dataset with
+//! `supports.per_group_limit` pages each group itself instead, so only the
+//! rows kept come back:
+//!
+//! - Through `whereIn`, each batch's query keeps its limit and offset, with
+//!   `query.per_group` set to the target's key field, so they apply to each
+//!   parent's rows. zom-sql renders that as `ROW_NUMBER() OVER (PARTITION
+//!   BY <key> ORDER BY <order>)` in a derived table, filtered on the row
+//!   number. Each key is in exactly one batch, so a parent's page is the
+//!   same whatever `max_in` is. This only happens when the dataset runs the
+//!   whole target query, page included: a `.fallback` target whose read
+//!   filters, sorts or skips in memory (`runsInMemory()`) is paged here,
+//!   since the rows its in-memory filter drops must not count toward the
+//!   page.
+//! - Through `loadAssociation`, the query keeps its limit and offset, and
+//!   the dataset applies them to each key's slice. zom-tigerbeetle passes
+//!   them on to `get_account_transfers`, one account at a time.
 //!
 //! ## A dataset that loads associations itself: `loadAssociation`
 //!
@@ -83,8 +98,9 @@
 //! is declared, every combine *into* that dataset calls it once, with the
 //! distinct source keys from step 2 (any number of them) and the
 //! associated relation's whole query (less its limit and offset, which
-//! combine applies to each key's slice afterwards), and the generic steps 3
-//! and 4 don't run. It returns one slice per key, in the order of `keys`: that key's
+//! combine applies to each key's slice afterwards, unless the dataset has
+//! `supports.per_group_limit`, see "Per-parent paging"), and the generic
+//! steps 3 and 4 don't run. It returns one slice per key, in the order of `keys`: that key's
 //! rows, ordered as the query says. It must honour every filter and order
 //! of `query`, including those a `.fallback` relation would have evaluated
 //! in memory (`Query.matches` and `Query.lessThan` do both). A row may be
@@ -196,6 +212,8 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
     if (!hooked) requireField(Rel.Output, target_key, label, "the relation passed to it");
     const Key = a.Key();
     const KeyMap = KeyMapOf(Key, label);
+    // The target's dataset pages each parent's rows itself.
+    const per_group = Rel.Adapter.supports(Rel.schema).per_group_limit;
 
     return struct {
         const Self = @This();
@@ -282,7 +300,8 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
         ) !void {
             const X = AssocElem(M.Output);
             // The target's limit and offset page each parent's rows, so
-            // they are taken off the query and applied per group below.
+            // they are taken off the query and applied per group below,
+            // unless the dataset pages each group itself.
             const page: Page = .of(self.relation().query);
             const target = page.strip(self.relation());
 
@@ -301,8 +320,11 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
                 }
             }
 
-            if (comptime hooked)
+            if (comptime hooked) {
+                // A dataset that pages each key's slice gets the page.
+                if (comptime per_group) return self.fillLoaded(M, X, self.relation(), .{}, sources, items, keys.items, &index, arena, scratch);
                 return self.fillLoaded(M, X, target, page, sources, items, keys.items, &index, arena, scratch);
+            }
 
             // `whereIn` below adds one filter (one node) to the target's
             // query. A target already at the limit would panic in
@@ -311,15 +333,31 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
             if (target.query.filter_count >= Rel.Q.max_filters or target.query.node_count >= Rel.Q.max_nodes)
                 return error.CombineTargetFull;
 
+            const field = comptime std.meta.stringToEnum(Rel.Field, target_key).?;
+            // The page goes to the dataset when it pages each group, and
+            // runs the whole query, page included (an offset it can't skip
+            // would run in memory): then each batch is read with its limit
+            // and offset, per value of the key. Whether the dataset runs it
+            // all depends on the query's shape, not the keys, so an empty
+            // `whereIn` tells.
+            const paged = blk: {
+                var r = self.relation();
+                r.query.per_group = field;
+                break :blk r;
+            };
+            const pushed = per_group and page.active() and !paged.whereIn(field, keys.items[0..0]).runsInMemory();
+            const batch_target = if (pushed) paged else target;
+            // What is left to page here.
+            const rest: Page = if (pushed) .{} else page;
+
             // One target query per `max_in` keys, all rows in one slice.
             var batches: std.ArrayList([]const Rel.Output) = .empty;
             defer batches.deinit(scratch);
-            const field = comptime std.meta.stringToEnum(Rel.Field, target_key).?;
             const max_in = Rel.Q.max_in;
             var start: usize = 0;
             while (start < keys.items.len) : (start += max_in) {
                 const chunk = keys.items[start..@min(start + max_in, keys.items.len)];
-                try batches.append(scratch, try target.whereIn(field, chunk).toSlice(arena));
+                try batches.append(scratch, try batch_target.whereIn(field, chunk).toSlice(arena));
             }
             const joined = batches.items.len > 1;
             const read: []const Rel.Output = switch (batches.items.len) {
@@ -330,8 +368,8 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
             defer if (joined) scratch.free(read);
             // Each parent's page of its rows, before a nested level fills
             // them, so the next level reads only the rows kept here.
-            const rows = if (page.active()) try pageRows(read, &index, keys.items.len, page, scratch) else read;
-            defer if (page.active()) scratch.free(rows);
+            const rows = if (rest.active()) try pageRows(read, &index, keys.items.len, rest, scratch) else read;
+            defer if (rest.active()) scratch.free(rows);
 
             // The element of each target row. A nested target fills them
             // all at once, so the next level makes ⌈keys / max_in⌉ queries

@@ -171,6 +171,10 @@ pub fn writeSelect(
     table: []const u8,
     query: *const zom.Query(T),
 ) RenderError!void {
+    if (query.per_group) |field| {
+        if (query.limit != null or query.offset > 0)
+            return writePerGroup(dialect, T, Out, w, params, table, query, @tagName(field));
+    }
     // A joined query qualifies its columns, since the EXISTS subquery
     // sees both tables and both may have an `id`.
     const qual: ?[]const u8 = if (query.join == null) null else table;
@@ -181,6 +185,69 @@ pub fn writeSelect(
     try writeFilters(dialect, T, w, params, table, query);
     try writeOrders(dialect, T, w, qual, query);
     try writePaging(dialect, w, query);
+}
+
+/// The derived table of `writePerGroup`, and its row number column.
+const per_group_table = "zom_paged";
+const row_number = "zom_rn";
+
+/// A query with `per_group` (see `zom.Query.per_group`): `limit` and
+/// `offset` page each group of rows sharing `group`'s value, numbered in
+/// the query's order after every filter, and only the rows kept are sent:
+///
+///     SELECT "id", ... FROM (SELECT "id", ..., ROW_NUMBER() OVER
+///         (PARTITION BY "user_id" ORDER BY "id" DESC) AS "zom_rn"
+///         FROM "posts" WHERE ...) AS "zom_paged"
+///     WHERE "zom_rn" > 1 AND "zom_rn" <= 4 ORDER BY "id" DESC
+///
+/// The inner select reads every field of `T`, so the outer `ORDER BY` can
+/// use any of them whatever `Out` keeps. Without an order the rows are
+/// numbered in whatever order the database reads them, as a plain `LIMIT`
+/// would take them. The bounds are literals, like `writePaging`'s, clamped
+/// to bigint.
+fn writePerGroup(
+    comptime dialect: Dialect,
+    comptime T: type,
+    comptime Out: type,
+    w: *Writer,
+    params: *Params,
+    table: []const u8,
+    query: *const zom.Query(T),
+    group: []const u8,
+) RenderError!void {
+    const qual: ?[]const u8 = if (query.join == null) null else table;
+    try w.writeAll("SELECT ");
+    try writeColumns(dialect, w, null, comptime columnsOf(T, Out));
+    try w.writeAll(" FROM (SELECT ");
+    try writeColumns(dialect, w, qual, comptime columnsOf(T, T));
+    try w.writeAll(", ROW_NUMBER() OVER (PARTITION BY ");
+    try writeColumn(dialect, w, qual, group);
+    for (query.orderSlice(), 0..) |o, i| {
+        try w.writeAll(if (i == 0) " ORDER BY " else ", ");
+        try writeOrder(dialect, T, w, qual, o);
+    }
+    try w.writeAll(") AS ");
+    try writeIdent(dialect, w, row_number);
+    try w.writeAll(" FROM ");
+    try writeIdent(dialect, w, table);
+    try writeFilters(dialect, T, w, params, table, query);
+    try w.writeAll(") AS ");
+    try writeIdent(dialect, w, per_group_table);
+
+    const max = std.math.maxInt(i64);
+    var first = true;
+    if (query.offset > 0) {
+        try w.writeAll(" WHERE ");
+        try writeIdent(dialect, w, row_number);
+        try w.print(" > {d}", .{@min(query.offset, max)});
+        first = false;
+    }
+    if (query.limit) |l| {
+        try w.writeAll(if (first) " WHERE " else " AND ");
+        try writeIdent(dialect, w, row_number);
+        try w.print(" <= {d}", .{@min(query.offset +| l, max)});
+    }
+    try writeOrders(dialect, T, w, null, query);
 }
 
 /// What the joined table is called in the `EXISTS` subquery: its own name,

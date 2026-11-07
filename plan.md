@@ -412,10 +412,35 @@ Later decisions:
      keeps its window in the relation's order. A nested level fills only
      the kept rows. A `loadAssociation` gets the query without them and its
      groups are windowed the same way, so its contract doesn't change.
-   - *Cost:* the whole association is read. Pushing the window into the
-     query (`ROW_NUMBER() OVER (PARTITION BY fk ORDER BY ...)` on SQL, a
-     per-account limit for TigerBeetle's `get_account_transfers`) is an
-     optimisation behind a new adapter capability, left for later (#87).
+   - *Cost:* on a dataset without the capability below, the whole
+     association is read.
+   - *Pushed down* (#87, 2026-11-07): a dataset with
+     `supports.per_group_limit` pages each group itself. Through
+     `whereIn`, combine keeps the limit and offset on each batch's query
+     and sets `Query.per_group` to the target's key, and zom-sql renders
+     `SELECT ... FROM (SELECT ..., ROW_NUMBER() OVER (PARTITION BY fk
+     ORDER BY <order>) AS zom_rn FROM t WHERE ...) AS zom_paged WHERE
+     zom_rn > offset AND zom_rn <= offset + limit ORDER BY <order>`. Each
+     key is in exactly one batch, so a parent's page doesn't depend on
+     `max_in`. Through `loadAssociation`, the dataset gets the limit and
+     offset and pages each key's slice: zom-tigerbeetle asks
+     `get_account_transfers` for `offset + limit` matches per account when
+     it can (an order by `timestamp`, no row dropped by a filter checked in
+     memory), and reads them all otherwise.
+     - *A capability, not a new hook:* the batched read is still `read` /
+       `readProjected`, with one more query field, so a dataset that pages
+       in memory (memory, CSV, YAML) gets it for free through
+       `Query.pageGroups`, and `.all` includes it. `count` never gets
+       `per_group`.
+     - *Only when the dataset runs the whole query:* rows a `.fallback`
+       relation's in-memory filter drops must not count toward the page,
+       and an offset the dataset can't skip would be applied to the whole
+       result. Combine asks `runsInMemory()` of the batch query, page
+       included, and pages in memory when it is true.
+     - *Checked by `zom.lint`:* a dataset that declares it must read the
+       same rows, in the same order, as `Query.pageGroups` over its full
+       read, for groups with nulls, every row alone, past-the-end offsets,
+       `limit(0)`, a filter, an `in` and a projection.
    - *Not a compile error:* `limit` is a runtime value, and with this
      meaning nothing needs refusing.
 

@@ -473,6 +473,16 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
             return out;
         }
 
+        /// True when a read of this relation evaluates part of its query in
+        /// memory, after the dataset's read: only ever on a `.fallback`
+        /// relation, whose dataset can't run every filter, sort key or
+        /// offset. `combine` asks before handing a per-parent page to the
+        /// dataset (`supports.per_group_limit`), since rows an in-memory
+        /// filter drops must not count toward the page.
+        pub fn runsInMemory(self: Self) bool {
+            return self.plan().in_memory;
+        }
+
         /// The query `update` and `delete` hand to the dataset. Writes never
         /// run in memory: on a `.fallback` relation whose filters the
         /// dataset can't all evaluate, this is `error.UnsupportedFilter`.

@@ -679,6 +679,17 @@ pub fn Query(comptime T: type) type {
         order_count: u8 = 0,
         limit: ?usize = null,
         offset: usize = 0,
+        /// When set, `limit` and `offset` page each group of rows with the
+        /// same value of this attribute, rather than the whole result:
+        /// each group keeps its rows after its first `offset`, at most
+        /// `limit` of them, in the query's order. All null values are one
+        /// group, as in SQL's `PARTITION BY`. The rows kept stay in the
+        /// query's order. `combine` sets it to page each parent's rows (see
+        /// combine.zig), and only on a dataset with
+        /// `supports.per_group_limit`, which must honour it in `read` and
+        /// `readProjected` (`count` never gets it). `matches` and `truth`
+        /// do not look at it; `pageGroups` applies it to rows in memory.
+        per_group: ?Field = null,
         /// Set to say an update or delete with no filters is meant to touch
         /// every row. It changes nothing about which rows match; it only
         /// lifts the safety check of compilers such as zom-sql, which
@@ -1280,6 +1291,61 @@ pub fn Query(comptime T: type) type {
                 .asc => ord,
                 .desc => ord.invert(),
             };
+        }
+
+        /// `rows`, already filtered and in the query's order, cut to the
+        /// query's `offset` and `limit`: the whole slice's, or each group's
+        /// when `per_group` is set (see there). The rows kept are moved to
+        /// the front of `rows`, in order, and returned as a prefix of it;
+        /// the others are dropped without being freed. `scratch` is only
+        /// needed with `per_group`, and freed before returning.
+        pub fn pageGroups(self: *const Self, rows: []T, scratch: std.mem.Allocator) std.mem.Allocator.Error![]T {
+            const field = self.per_group orelse {
+                const start = @min(self.offset, rows.len);
+                // `start + l` could overflow for a huge limit.
+                const end = if (self.limit) |l| start + @min(l, rows.len - start) else rows.len;
+                std.mem.copyForwards(T, rows[0 .. end - start], rows[start..end]);
+                return rows[0 .. end - start];
+            };
+            if (rows.len == 0) return rows;
+            // The row indexes, stably sorted by group: each group is then a
+            // run, in which its rows keep their order.
+            const by_group = try scratch.alloc(usize, rows.len);
+            defer scratch.free(by_group);
+            for (by_group, 0..) |*x, i| x.* = i;
+            const Ctx = struct {
+                rows: []const T,
+                field: Field,
+                fn less(ctx: @This(), a: usize, b: usize) bool {
+                    return groupOrder(fieldValue(ctx.rows[a], ctx.field), fieldValue(ctx.rows[b], ctx.field)) == .lt;
+                }
+            };
+            std.mem.sort(usize, by_group, Ctx{ .rows = rows, .field = field }, Ctx.less);
+
+            const keep = try scratch.alloc(bool, rows.len);
+            defer scratch.free(keep);
+            var run_start: usize = 0;
+            for (by_group, 0..) |row, k| {
+                if (k > 0 and groupOrder(fieldValue(rows[by_group[k - 1]], field), fieldValue(rows[row], field)) != .eq)
+                    run_start = k;
+                const n = k - run_start;
+                keep[row] = n >= self.offset and (if (self.limit) |l| n - self.offset < l else true);
+            }
+            var kept: usize = 0;
+            for (rows, keep) |row, k| {
+                if (!k) continue;
+                rows[kept] = row;
+                kept += 1;
+            }
+            return rows[0..kept];
+        }
+
+        /// How `pageGroups` sorts groups apart: null before every value,
+        /// values by `Value.order` (which the values of one attribute
+        /// always have, NaN aside).
+        fn groupOrder(a: Value, b: Value) std.math.Order {
+            if (a == .null or b == .null) return std.math.order(@intFromBool(a != .null), @intFromBool(b != .null));
+            return a.order(b) orelse .eq;
         }
 
         /// The comparator for `std.mem.sort(T, rows, query.orderSlice(),

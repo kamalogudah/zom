@@ -320,14 +320,14 @@ pub fn Store(comptime S: type) type {
         pub fn read(self: *Self, query: Q, allocator: Allocator) ![]T {
             var hits = try self.matching(query, allocator);
             defer hits.deinit(allocator);
-            return allocator.dupe(T, page(query, hits.items));
+            return allocator.dupe(T, try query.pageGroups(hits.items, allocator));
         }
 
         /// `read`, keeping only the fields of `P` (a `zom.Project(T, ...)`).
         pub fn readProjected(self: *Self, query: Q, comptime P: type, allocator: Allocator) ![]P {
             var hits = try self.matching(query, allocator);
             defer hits.deinit(allocator);
-            return Mapper(T, P, .{}).many(allocator, page(query, hits.items));
+            return Mapper(T, P, .{}).many(allocator, try query.pageGroups(hits.items, allocator));
         }
 
         /// The matching rows, sorted.
@@ -404,22 +404,15 @@ pub fn Store(comptime S: type) type {
             return value;
         }
 
-        /// `sorted` with the query's offset and limit applied.
-        fn page(query: Q, sorted: []const T) []const T {
-            const start = @min(query.offset, sorted.len);
-            // `start + l` could overflow for a huge limit.
-            const end = if (query.limit) |l| start + @min(l, sorted.len - start) else sorted.len;
-            return sorted[start..end];
-        }
-
         /// The number of rows `read` would return: `limit` and `offset`
         /// apply, as with SQL's `count(*)` over a limited subquery.
         pub fn count(self: *Self, query: Q) !usize {
-            if (query.join != null) {
-                // The semi-join needs scratch space for its key set.
+            if (query.join != null or query.per_group != null) {
+                // The semi-join needs scratch space for its key set, and
+                // per-group paging the rows themselves.
                 var hits = try self.matching(query, self.allocator);
                 defer hits.deinit(self.allocator);
-                return page(query, hits.items).len;
+                return (try query.pageGroups(hits.items, self.allocator)).len;
             }
             var n: usize = 0;
             for (self.list.items) |row| {

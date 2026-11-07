@@ -108,6 +108,10 @@ fn Probe(comptime s: zom.Supports) type {
                 pub var projected_reads: usize = 0;
                 /// The most bind parameters one read's statement had.
                 pub var max_params: usize = 0;
+                /// The rows Postgres sent back, over every read, and how
+                /// many reads were paged per group (`query.per_group`).
+                pub var rows_sent: usize = 0;
+                pub var per_group_reads: usize = 0;
 
                 inner: *zom_pg.Gateway.Dataset(S),
 
@@ -115,16 +119,22 @@ fn Probe(comptime s: zom.Supports) type {
                     reads = 0;
                     projected_reads = 0;
                     max_params = 0;
+                    rows_sent = 0;
+                    per_group_reads = 0;
                 }
 
                 pub fn read(self: *Self, query: Q, allocator: Allocator) ![]T {
                     try note(query);
-                    return self.inner.read(query, allocator);
+                    const out = try self.inner.read(query, allocator);
+                    rows_sent += out.len;
+                    return out;
                 }
                 pub fn readProjected(self: *Self, query: Q, comptime P: type, allocator: Allocator) ![]P {
                     try note(query);
                     projected_reads += 1;
-                    return self.inner.readProjected(query, P, allocator);
+                    const out = try self.inner.readProjected(query, P, allocator);
+                    rows_sent += out.len;
+                    return out;
                 }
                 pub fn count(self: *Self, query: Q) !usize {
                     return self.inner.count(query);
@@ -138,6 +148,7 @@ fn Probe(comptime s: zom.Supports) type {
 
                 fn note(query: Q) !void {
                     reads += 1;
+                    if (query.per_group != null) per_group_reads += 1;
                     // The statement zom-pg prepares for this query. The
                     // probe's own scratch, so it never fails the allocator
                     // under test.
@@ -161,8 +172,16 @@ fn Probe(comptime s: zom.Supports) type {
     };
 }
 
-/// Everything zom-pg evaluates.
+/// Everything zom-pg evaluates, a combine target's per-parent page
+/// included (`supports.per_group_limit`).
 const Full = Probe(.all);
+/// Everything but `per_group_limit`: combine reads every matching row and
+/// pages each parent's in memory, which is what `Full` must match.
+const InMemoryPage = Probe(blk: {
+    var x: zom.Supports = .all;
+    x.per_group_limit = false;
+    break :blk x;
+});
 /// No pattern matching: `like` filters run in memory.
 const NoLike = Probe(blk: {
     var x: zom.Supports = .all;
@@ -457,6 +476,165 @@ test "pg combine: per-parent paging holds across ceil(keys / max_in) queries" {
         try testing.expectEqual(@as(usize, if (i % 2 == 0) 1 else 0), w.posts.len);
         if (w.posts.len == 1) try testing.expectEqualStrings("b", w.posts[0].title);
     }
+}
+
+// -- per-parent paging pushed down -------------------------------------------------
+
+/// `n` users; user `i` (from 1) has `i % 6` posts, with ids `10 * i + j`,
+/// titles that sort against their ids, and every other one published. Each
+/// post has `j` comments.
+fn seedPaged(comptime G: type, r: Rels(G), n: usize) !usize {
+    const titles = [_][]const u8{ "e", "d", "c", "b", "a" };
+    var users: std.ArrayList(User) = .empty;
+    defer users.deinit(testing.allocator);
+    var posts: std.ArrayList(Post) = .empty;
+    defer posts.deinit(testing.allocator);
+    var comments: std.ArrayList(Comment) = .empty;
+    defer comments.deinit(testing.allocator);
+    for (1..n + 1) |i| {
+        const id: u32 = @intCast(i);
+        try users.append(testing.allocator, .{ .id = id, .name = "u", .email = "u@example.com", .age = 20, .deleted_at = null });
+        for (0..i % 6) |j| {
+            const post_id: u32 = 10 * id + @as(u32, @intCast(j));
+            try posts.append(testing.allocator, .{ .id = post_id, .user_id = id, .title = titles[j], .published = j % 2 == 0 });
+            for (0..j) |k| try comments.append(testing.allocator, .{ .id = 10 * post_id + @as(u32, @intCast(k)), .post_id = post_id, .body = "c" });
+        }
+    }
+    _ = try r.users.createMany(users.items).commit();
+    _ = try r.posts.createMany(posts.items).commit();
+    _ = try r.comments.createMany(comments.items).commit();
+    return posts.items.len;
+}
+
+const PostId = struct { id: u32 };
+const Paged = struct { id: u32, posts: []const PostId };
+
+/// Case `case` of the paged targets compared below, on `G`.
+fn pagedCase(comptime G: type, r: Rels(G), comptime case: usize) !zom.CombineResult(Paged) {
+    const users = r.users.order(.id, .asc);
+    const posts = r.posts;
+    const target = switch (case) {
+        0 => posts.order(.id, .desc).limit(3),
+        1 => posts.where(.published, .eq, true).order(.id, .asc).offset(1).limit(2),
+        // Offset only, ordered by a column that sorts against the ids.
+        2 => posts.order(.title, .asc).order(.id, .asc).offset(2),
+        3 => posts.limit(0),
+        // Projected: readProjected renders the same derived table.
+        4 => posts.select(.{ .id, .user_id }).order(.id, .desc).offset(1).limit(1),
+        // A limit past every group keeps everything.
+        5 => posts.order(.id, .asc).limit(100),
+        else => unreachable,
+    };
+    return users.combine(.posts, target).mapTo(Paged, testing.allocator);
+}
+const paged_cases = 6;
+
+test "pg combine: a paged target is pushed down, sends only the kept rows, and matches the in-memory page" {
+    var db: Db = undefined;
+    try db.open();
+    defer db.close();
+    var full: Full = .{ .inner = &db.gw };
+    var mem: InMemoryPage = .{ .inner = &db.gw };
+    const r = try Rels(Full).init(&full);
+    const m = try Rels(InMemoryPage).init(&mem);
+    // Three batches of keys: each user's page must not depend on max_in.
+    const n_users = 2 * max_in + 5;
+    const n_posts = try seedPaged(Full, r, n_users);
+
+    inline for (0..paged_cases) |case| {
+        errdefer std.debug.print("case {d}\n", .{case});
+        Rels(Full).reset();
+        Rels(InMemoryPage).reset();
+        var pushed = try pagedCase(Full, r, case);
+        defer pushed.deinit();
+        var paged = try pagedCase(InMemoryPage, m, case);
+        defer paged.deinit();
+
+        try testing.expectEqual(divCeil(n_users, max_in), Full.Dataset(Posts).reads);
+        try testing.expectEqual(divCeil(n_users, max_in), InMemoryPage.Dataset(Posts).reads);
+        try testing.expectEqual(divCeil(n_users, max_in), Full.Dataset(Posts).per_group_reads);
+        try testing.expectEqual(0, InMemoryPage.Dataset(Posts).per_group_reads);
+
+        // The same groups, in the same order.
+        try testing.expectEqual(n_users, pushed.items.len);
+        var kept: usize = 0;
+        for (pushed.items, paged.items) |p, q| {
+            try testing.expectEqual(q.id, p.id);
+            try testing.expectEqualDeep(q.posts, p.posts);
+            kept += p.posts.len;
+        }
+        // Postgres sent back the kept rows only; paged in memory, every
+        // post matching the target's filter came back.
+        try testing.expectEqual(kept, Full.Dataset(Posts).rows_sent);
+        const matching = if (case == 1) blk: {
+            var n: usize = 0;
+            for (1..n_users + 1) |i| n += (i % 6 + 1) / 2;
+            break :blk n;
+        } else n_posts;
+        try testing.expectEqual(matching, InMemoryPage.Dataset(Posts).rows_sent);
+    }
+
+    // Spot checks against the seed: user 5 has posts 50..54.
+    var latest = try pagedCase(Full, r, 0);
+    defer latest.deinit();
+    try testing.expectEqualDeep(@as([]const PostId, &.{ .{ .id = 54 }, .{ .id = 53 }, .{ .id = 52 } }), latest.items[4].posts);
+    try testing.expectEqual(0, latest.items[5].posts.len);
+    var published = try pagedCase(Full, r, 1);
+    defer published.deinit();
+    try testing.expectEqualDeep(@as([]const PostId, &.{ .{ .id = 52 }, .{ .id = 54 } }), published.items[4].posts);
+}
+
+test "pg combine: a pushed-down page per post, under a pushed-down page per user" {
+    var db: Db = undefined;
+    try db.open();
+    defer db.close();
+    var gw: Full = .{ .inner = &db.gw };
+    const r = try Rels(Full).init(&gw);
+    _ = try seedPaged(Full, r, 12);
+    Rels(Full).reset();
+
+    // Each user's latest two posts, each with its first comment: the
+    // comments level reads only the kept posts' keys, and gets one row each.
+    var result = try r.users.order(.id, .asc)
+        .combine(.posts, r.posts.order(.id, .desc).limit(2).combine(.comments, r.comments.order(.id, .asc).limit(1)))
+        .mapTo(AuthorWithComments, testing.allocator);
+    defer result.deinit();
+    var posts: usize = 0;
+    var with_comments: usize = 0;
+    for (result.items, 1..) |a, i| {
+        try testing.expectEqual(@min(i % 6, 2), a.posts.len);
+        for (a.posts) |p| {
+            const j = p.id % 10;
+            try testing.expectEqual(@min(j, 1), p.comments.len);
+            if (p.comments.len == 1) try testing.expectEqual(10 * p.id, p.comments[0].id);
+            posts += 1;
+            with_comments += p.comments.len;
+        }
+    }
+    try testing.expectEqual(posts, Full.Dataset(Posts).rows_sent);
+    try testing.expectEqual(with_comments, Full.Dataset(Comments).rows_sent);
+    try testing.expectEqual(1, Full.Dataset(Comments).per_group_reads);
+}
+
+test "pg combine: a .fallback target filtered in memory is not pushed down" {
+    var db: Db = undefined;
+    try db.open();
+    defer db.close();
+    var gw: NoLike = .{ .inner = &db.gw };
+    const r = try Rels(NoLike).init(&gw);
+    try seed(NoLike, r);
+    NoLike.Dataset(Posts).reset();
+
+    // Achieng's latest post (11) has no "values" in its title: the like
+    // runs in memory, so ROW_NUMBER() in Postgres would have counted it.
+    var result = try r.users.order(.id, .asc)
+        .combine(.posts, r.posts.allowFallback().where(.title, .like, "%values%").order(.id, .desc).limit(1))
+        .mapTo(Writer, testing.allocator);
+    defer result.deinit();
+    try testing.expectEqual(0, NoLike.Dataset(Posts).per_group_reads);
+    try testing.expectEqual(1, result.items[0].posts.len);
+    try testing.expectEqual(10, result.items[0].posts[0].id);
+    try testing.expectEqual(0, result.items[1].posts.len);
 }
 
 // -- bind parameters -------------------------------------------------------------

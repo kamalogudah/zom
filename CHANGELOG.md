@@ -28,6 +28,24 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- Per-parent paging pushed down to the dataset: a combine target's
+  `limit` / `offset` now go to a dataset with the new
+  `supports.per_group_limit` capability instead of being applied after
+  reading every matching row. `Query.per_group` names the attribute whose
+  groups they page (nulls as one group), and `Query.pageGroups` applies it
+  in memory. zom-sql renders it as `ROW_NUMBER() OVER (PARTITION BY ...)`
+  in a derived table filtered on the row number, so zom-pg sends back only
+  the rows kept, across every ⌈keys / `max_in`⌉ batch. zom-tigerbeetle's
+  datasets page each account's `get_account_transfers` /
+  `get_account_balances` scan, and its `loadAssociation` each key's slice.
+  The memory and file adapters (`Supports.all`) honour it too. A
+  `.fallback` target that filters, sorts or skips in memory is still paged
+  by combine, since the rows it drops must not count. `zom.lint` checks a
+  dataset that declares it against `Query.pageGroups`, and
+  `relation.runsInMemory()` says whether a read would evaluate part of its
+  query in memory. A hand-written dataset that copies `Supports.all` must
+  now honour `query.per_group`, or turn `per_group_limit` off. (#87)
+
 - Views: `zom.Schema(T, name, null, options)` declares a schema without a
   primary key, with `has_primary_key == false`. `byPk`, `S.primary_key`,
   a `belongsTo` pointing at it and a `hasMany` / custom association on it

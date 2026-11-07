@@ -49,6 +49,13 @@
 //! every source key, one slice of rows per key back (see combine.zig). A
 //! `zom.customAssociation` can only be combined through it.
 //!
+//! `supports.per_group_limit` says the dataset pages each group itself:
+//! `read` and `readProjected` apply `limit` and `offset` to each group of rows
+//! sharing the value of `query.per_group`, and `loadAssociation`, when there
+//! is one, to each key's slice. `combine` then pushes a target's per-parent
+//! page down to it rather than reading every associated row (see
+//! combine.zig).
+//!
 //! `strings` says who owns the strings in the tuples `read`, `readProjected`
 //! and `insert` return (see strings.zig). With `.dataset` they point into
 //! the dataset and the caller frees only the slice. With `.caller` they are
@@ -118,6 +125,19 @@ pub const Supports = struct {
     /// apply the same semi-join selection. A relation without it can't join
     /// even in `.fallback` mode.
     join: bool = false,
+    /// Paging each group of rows: `read` and `readProjected` honour
+    /// `query.per_group` (see `Query.per_group`), applying `limit` and
+    /// `offset` to each group of rows sharing that attribute's value, after
+    /// every filter, in the query's order. `combine` then hands a target's
+    /// per-parent page to the dataset (SQL's `ROW_NUMBER() OVER (PARTITION
+    /// BY ...)`) instead of reading every associated row and paging them in
+    /// memory, whenever the dataset evaluates the whole target query (a
+    /// `.fallback` read that filters or sorts in memory is paged by zom). A
+    /// dataset with `loadAssociation` that declares it gets the query with
+    /// its `limit` and `offset`, which it applies to each key's slice. Not
+    /// a query feature a relation can ask for, so `.strict` never refuses
+    /// anything over it. `zom.lint` checks it against `Query.pageGroups`.
+    per_group_limit: bool = false,
 
     /// Every feature, e.g. for an adapter that evaluates queries in memory.
     pub const all: Supports = .{
@@ -128,6 +148,7 @@ pub const Supports = struct {
         .offset = true,
         .projection = true,
         .join = true,
+        .per_group_limit = true,
     };
 };
 

@@ -347,3 +347,63 @@ test "README: zom-sql" {
     , compiled.sql);
     try testing.expectEqualDeep(@as([]const Value, &.{int(18)}), compiled.params);
 }
+
+/// `query` with `per_group` set, as `combine` sends it to a dataset with
+/// `supports.per_group_limit`.
+fn perGroup(query: Q, field: Q.Field, limit: ?usize, offset: usize) Q {
+    var next = paged(query, limit, offset);
+    next.per_group = field;
+    return next;
+}
+
+fn expectWhole(comptime dialect: Dialect, comptime Out: type, query: Q, expected: []const u8, params: []const Value) !void {
+    const compiled = try zom_sql.compileProjected(dialect, User, Out, testing.allocator, "users", query);
+    defer compiled.deinit(testing.allocator);
+    try testing.expectEqualStrings(expected, compiled.sql);
+    try testing.expectEqualDeep(params, compiled.params);
+}
+
+const inner_all =
+    \\SELECT "id", "name", "age", "role", "deleted_at" FROM (SELECT "id", "name", "age", "role", "deleted_at", ROW_NUMBER() OVER (PARTITION BY
+;
+
+test "per_group: ROW_NUMBER() per group in a derived table, filtered on the row number" {
+    try expectWhole(.postgres, User, perGroup(q.where(.age, .gte, 18).order(.id, .desc), .role, 3, 1), inner_all ++
+        \\ "role" ORDER BY "id" DESC) AS "zom_rn" FROM "users" WHERE "age" >= $1) AS "zom_paged" WHERE "zom_rn" > 1 AND "zom_rn" <= 4 ORDER BY "id" DESC
+    , &.{int(18)});
+    try expectWhole(.sqlite, User, perGroup(q.where(.age, .gte, 18).order(.id, .desc), .role, 3, 1), inner_all ++
+        \\ "role" ORDER BY "id" DESC) AS "zom_rn" FROM "users" WHERE "age" >= ?) AS "zom_paged" WHERE "zom_rn" > 1 AND "zom_rn" <= 4 ORDER BY "id" DESC
+    , &.{int(18)});
+    // A limit alone, an offset alone, and no order.
+    try expectWhole(.postgres, User, perGroup(q, .role, 2, 0), inner_all ++
+        \\ "role") AS "zom_rn" FROM "users") AS "zom_paged" WHERE "zom_rn" <= 2
+    , &.{});
+    try expectWhole(.sqlite, User, perGroup(q.order(.age, .asc), .role, null, 2), inner_all ++
+        \\ "role" ORDER BY "age" ASC) AS "zom_rn" FROM "users") AS "zom_paged" WHERE "zom_rn" > 2 ORDER BY "age" ASC
+    , &.{});
+}
+
+test "per_group: without a limit or offset it is a plain select" {
+    try expectSql(perGroup(q.order(.id, .asc), .role, null, 0),
+        \\ ORDER BY "id" ASC
+    ,
+        \\ ORDER BY "id" ASC
+    , &.{});
+}
+
+test "per_group: the bounds are clamped to bigint, and limit(0) keeps nothing" {
+    const max = std.math.maxInt(usize);
+    try expectWhole(.postgres, User, perGroup(q, .role, max, max), inner_all ++
+        \\ "role") AS "zom_rn" FROM "users") AS "zom_paged" WHERE "zom_rn" > 9223372036854775807 AND "zom_rn" <= 9223372036854775807
+    , &.{});
+    try expectWhole(.postgres, User, perGroup(q, .role, 0, 0), inner_all ++
+        \\ "role") AS "zom_rn" FROM "users") AS "zom_paged" WHERE "zom_rn" <= 0
+    , &.{});
+}
+
+test "per_group: a projection keeps the outer columns, the order may use the others" {
+    const P = zom.Project(User, .{.name});
+    try expectWhole(.postgres, P, perGroup(q.order(.deleted_at, .desc), .age, 1, 0),
+        \\SELECT "name" FROM (SELECT "id", "name", "age", "role", "deleted_at", ROW_NUMBER() OVER (PARTITION BY "age" ORDER BY "deleted_at" DESC NULLS FIRST) AS "zom_rn" FROM "users") AS "zom_paged" WHERE "zom_rn" <= 1 ORDER BY "deleted_at" DESC NULLS FIRST
+    , &.{});
+}

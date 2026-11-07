@@ -367,9 +367,14 @@ them with the request that fits, chosen at compile time:
 
 As with any combine, a `limit` on the combined relation pages each
 account's rows: `accounts.combine(.transfers, transfers.order(.timestamp, .desc).limit(10))`
-gives every account its latest ten transfers. Every matching transfer is
-read, then each account keeps its first ten (`offset` is not supported by
-this adapter's datasets).
+gives every account its latest ten transfers. The datasets declare
+`supports.per_group_limit`, so the page goes to the cluster: each
+account's `get_account_transfers` (or `get_account_balances`, for
+`combine(.balances, ...)`) asks for its first ten matches only, when the
+order is by `timestamp` (or none) and every filter is one TigerBeetle
+evaluates. With a filter checked here, or an order sorted in memory, each
+account's matches are all read and then paged. An `offset` needs
+`allowFallback()`, since the datasets don't support it.
 
 ### zom.lint
 

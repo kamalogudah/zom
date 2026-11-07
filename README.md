@@ -313,14 +313,14 @@ breaking change needs a minor version bump and an entry in
 | `zom.Scan`, `zom.ScanHook` | What a `.fallback` read that ran in memory reports (`adapter`, `relation`, `rows_fetched`, `rows_returned`), and the `*const fn (Scan) void` it reports to. |
 | `zom.Project(T, .{ fields })` | The struct `select` reads into: only `fields` of `T`, in the order given, with their types and defaults. An empty tuple, an unknown field or a repeated one is a compile error. Equal arguments return the same type. |
 | `zom.Adapter(G)` | Checks gateway `G` against the [adapter contract](#the-adapter-contract), reporting every problem in one compile error. Has `Gateway`, `name` (`G.adapter_name`), `Dataset(S)` (checks the dataset for schema `S`), `capabilities(S) Capabilities`, `has(S, cap) bool`, `readOnly(S) bool`, `require(S, cap, method)`, `supports(S) Supports`, and `filterGap(S, field, op)` / `orderGap(S, field)`, which return null when the dataset can evaluate that filter or sort key, else why not. |
-| `zom.Supports` | The query features a dataset evaluates itself: `or` (boolean groups), `in` (`in`, `not_in`), `like` (`like`, `ilike`), `order_on` (order by any attribute, not only the key), `offset`, `projection`, `join` (`relation.join`). `Supports.all` sets them all. |
+| `zom.Supports` | The query features a dataset evaluates itself: `or` (boolean groups), `in` (`in`, `not_in`), `like` (`like`, `ilike`), `order_on` (order by any attribute, not only the key), `offset`, `projection`, `join` (`relation.join`), `per_group_limit` (`read` and `readProjected` page each group of `query.per_group`, and `loadAssociation` each key's slice, so `combine` pushes a target's per-parent page down; checked by `zom.lint`). `Supports.all` sets them all. |
 | `zom.Join`, `zom.JoinFilter` | What `relation.join(.assoc)` stores in `query.join`: the association's name, the joined table, the key column on each side and its joined filters, each by column name: up to `Join.max_filters = 8` filters in `Join.max_nodes = 16` nodes, as the same flat tree a `Query` uses (`zom.query.FilterNode`; read it from `topNodes()`, or through `filterSlice()` when `isConjunction()`). Plain data, so a query is still copied by value without allocating; `join.targetQuery(C)` gives the filters back, groups and all, as a `zom.Query(C)`. Only an adapter with `supports.join` reads it. |
 | `zom.Capability` | `writable`, `batch_insert`, `updatable`, `deletable`, `transaction`. |
 | `zom.StringOwnership` | `dataset` or `caller`: who frees the strings in the tuples a dataset returns. See [Memory rules](#memory-rules). |
 | `zom.strings` | Helpers for caller-owned strings: `freeFields(T, allocator, item, keep)` frees an item's string attributes except those named in `keep`, `freeAll(T, allocator, items)` frees every item's strings and the slice, and `dupeFields(T, allocator, item)` copies them (freeing its copies on error). |
 | `zom.Capabilities` | A struct with one `bool` per `Capability`, all `false` by default. |
 | `zom.adapter` | The module behind `Adapter`, `Capability` and `Capabilities`. |
-| `zom.Query(T)` | The adapter-neutral query a relation builds: a filter tree, sort keys (`orders`, at most `max_orders = 4`, read through `orderSlice()`, most significant first), `limit: ?usize`, `offset: usize`, and `all: bool` (default false: set it to say an update or delete with no filters is meant to touch every row, which [zom-sql](#zom-sql) otherwise refuses; it changes nothing about which rows match). The tree is stored flat so a copy is a full copy: `filters` (at most `max_filters = 16`) and `nodes` (at most `max_nodes = 32`: filters plus `any` / `all` / `not` groups, which refer to children by index), AND-ed at the top level. An adapter without `or` support reads an AND-only query through `filterSlice()` (it asserts `isConjunction()`); one with it walks `nodeSlice()` from `topNodes()`. `matches(row)` and `truth(row) ?bool` evaluate the query in memory with SQL's three-valued logic, alongside `lessThan(orders, a, b)` (the comparator for `std.mem.sort(T, rows, query.orderSlice(), lessThan)`: key by key, the next key breaking ties), `orderBy(order, a, b)` (one key) and `fieldValue(row, field)`. Nested types: `Field` (enum of `T`'s fields), `Filter` (`field`, `op`, `operand`), `Node` (`filter`, `and_group`, `or_group`, `not`), `Children`, `Order`, `Change`. `max_in = 64` bounds one `in` list. The query also builds itself, with the same `where` / `whereIn` / `whereNotIn` / `whereAny` / `whereNot` / `order` / `reorder` as a relation (and `addOrder`), so adapters and tests can make one without a gateway. |
+| `zom.Query(T)` | The adapter-neutral query a relation builds: a filter tree, sort keys (`orders`, at most `max_orders = 4`, read through `orderSlice()`, most significant first), `limit: ?usize`, `offset: usize`, `per_group: ?Field` (set by `combine` on a dataset with `supports.per_group_limit`: the limit and offset then page each group of rows sharing that attribute's value, nulls as one group; `pageGroups(rows, scratch)` applies the page to rows in memory, per group or not), and `all: bool` (default false: set it to say an update or delete with no filters is meant to touch every row, which [zom-sql](#zom-sql) otherwise refuses; it changes nothing about which rows match). The tree is stored flat so a copy is a full copy: `filters` (at most `max_filters = 16`) and `nodes` (at most `max_nodes = 32`: filters plus `any` / `all` / `not` groups, which refer to children by index), AND-ed at the top level. An adapter without `or` support reads an AND-only query through `filterSlice()` (it asserts `isConjunction()`); one with it walks `nodeSlice()` from `topNodes()`. `matches(row)` and `truth(row) ?bool` evaluate the query in memory with SQL's three-valued logic, alongside `lessThan(orders, a, b)` (the comparator for `std.mem.sort(T, rows, query.orderSlice(), lessThan)`: key by key, the next key breaking ties), `orderBy(order, a, b)` (one key) and `fieldValue(row, field)`. Nested types: `Field` (enum of `T`'s fields), `Filter` (`field`, `op`, `operand`), `Node` (`filter`, `and_group`, `or_group`, `not`), `Children`, `Order`, `Change`. `max_in = 64` bounds one `in` list. The query also builds itself, with the same `where` / `whereIn` / `whereNotIn` / `whereAny` / `whereNot` / `order` / `reorder` as a relation (and `addOrder`), so adapters and tests can make one without a gateway. |
 | `zom.any(conds)`, `zom.all(conds)`, `zom.not(cond)` | Boolean groups to nest inside `whereAny` / `whereNot`. A condition is `.{ field, op, value }` or another group. |
 | `zom.Value` | The runtime value carried by filters and changes. See [Value](#value). |
 | `zom.Op` | Filter operators: `eq`, `neq`, `lt`, `lte`, `gt`, `gte`, `in`, `not_in`, `like`, `ilike`, `between`, `is_null`, `is_not_null`. `op.operand()` returns the `Operand` variant it takes. |
@@ -896,11 +896,20 @@ overwrites it. A struct without that `call` is a compile error.
 
 A `limit` or `offset` on the target relation pages each user's posts, not
 the post query: `users.combine(.posts, posts.order(.id, .desc).limit(3))`
-gives every user their latest three posts. zom reads every matching post,
-as it would without the limit, and keeps each user's first three in the
-relation's order. A limit on the query itself would apply to each batch of
-`max_in` keys and mean nothing. For a `belongsTo`, the parent is the first
-row of its page, so `offset(1)` leaves it null.
+gives every user their latest three posts. A limit on the query itself
+would apply to each batch of `max_in` keys and mean nothing. For a
+`belongsTo`, the parent is the first row of its page, so `offset(1)` leaves
+it null.
+
+Where the page is applied depends on the target's dataset. One with
+`supports.per_group_limit` pages each user's posts itself, so only the
+posts kept are read: zom-pg (through zom-sql) numbers them with
+`ROW_NUMBER() OVER (PARTITION BY "user_id" ORDER BY ...)` and sends back
+those on the page, and zom-tigerbeetle asks the cluster for each account's
+page alone. Any other dataset, or a `.fallback` target whose read filters,
+sorts or skips in memory, gets the query without the page: zom reads every
+matching post and keeps each user's first three in the relation's order.
+The result is the same either way.
 
 The result is a tree of allocations, so `mapTo` returns a
 `zom.CombineResult(Author)`: `items`, plus an arena owning every slice and
@@ -943,7 +952,10 @@ instead of steps 2 and 3, for `hasMany` and `belongsTo` too, so a backend
 can pick a better request than an `in` query (zom-tigerbeetle uses
 `get_account_transfers`). It must apply all of `query`, including filters a
 `.fallback` relation would have run in memory, and order each slice by it;
-a row may be in several slices. Everything it returns lives in the arena,
+a row may be in several slices. Its `limit` and `offset` are taken off and
+applied to each slice afterwards, unless the dataset declares
+`supports.per_group_limit`: then it gets them and pages each key's slice
+itself. Everything it returns lives in the arena,
 so it frees nothing. A custom association combined into a dataset without
 `loadAssociation` is a compile error, and so are `join` and `associate` on
 one, which need a foreign key.

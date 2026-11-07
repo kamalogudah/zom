@@ -156,3 +156,64 @@ test "an insert-only adapter passes zom.lint, with createMany's insert fallback"
     try testing.expect(!zom.Adapter(AppendOnlyGateway).has(zom.lint.Users, .batch_insert));
     try zom.lint.run(AppendOnlyGateway, AppendOnlyFactory);
 }
+
+/// Declares `supports.per_group_limit` but pages the whole result, as a
+/// dataset that forgot `query.per_group` would: lint must catch it.
+const IgnoresPerGroup = struct {
+    pub const adapter_name = "lint-ignores-per-group";
+    pub const Config = struct {};
+
+    inner: ReadOnlyGateway,
+    users: ?*Dataset(zom.lint.Users) = null,
+
+    pub fn init(allocator: Allocator, _: Config) IgnoresPerGroup {
+        return .{ .inner = .init(allocator, .{}) };
+    }
+
+    pub fn deinit(self: *IgnoresPerGroup) void {
+        if (self.users) |d| self.inner.allocator.destroy(d);
+        self.inner.deinit();
+    }
+
+    pub fn Dataset(comptime S: type) type {
+        return struct {
+            const Self = @This();
+            const Q = zom.Query(S.Tuple);
+            pub const supports: zom.Supports = .{ .per_group_limit = true };
+            inner: *ReadOnlyGateway.Dataset(S),
+
+            pub fn read(self: *Self, query: Q, allocator: Allocator) ![]S.Tuple {
+                var whole = query;
+                whole.per_group = null;
+                return self.inner.read(whole, allocator);
+            }
+            pub fn count(self: *Self, query: Q) !usize {
+                return self.inner.count(query);
+            }
+        };
+    }
+
+    pub fn dataset(self: *IgnoresPerGroup, comptime S: type) !*Dataset(S) {
+        if (self.users) |d| return d;
+        const d = try self.inner.allocator.create(Dataset(S));
+        d.* = .{ .inner = try self.inner.dataset(S) };
+        self.users = d;
+        return d;
+    }
+};
+
+const IgnoresPerGroupFactory = struct {
+    pub fn create(allocator: Allocator) !IgnoresPerGroup {
+        return IgnoresPerGroup.init(allocator, .{});
+    }
+    pub fn destroy(g: *IgnoresPerGroup) void {
+        g.deinit();
+    }
+    pub fn seed(g: *IgnoresPerGroup, comptime S: type, rows: []const S.Tuple) !void {
+        try ReadOnlyFactory.seed(&g.inner, S, rows);
+    }
+};
+
+test "zom.lint fails a dataset that declares per_group_limit and pages the whole result" {
+    try testing.expectError(error.TestExpectedEqual, zom.lint.run(IgnoresPerGroup, IgnoresPerGroupFactory));
+}

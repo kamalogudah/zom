@@ -28,56 +28,93 @@ const CommentSchema = zom.Schema(CommentTuple, "comments", .id, .{
 });
 
 /// A memory gateway whose datasets count their reads, so a test can assert
-/// how many queries a combine made.
-const CountingGateway = struct {
-    pub const adapter_name = "counting";
-    pub const Config = struct {};
+/// how many queries a combine made. It pages each group itself
+/// (`supports.per_group_limit`, from memory's store).
+const CountingGateway = CountingGatewayOf(blk: {
+    var all: zom.Supports = .all;
+    all.projection = false;
+    break :blk all;
+});
+/// The same without `per_group_limit`: combine pages each parent's rows.
+const PagingInCombine = CountingGatewayOf(blk: {
+    var s: zom.Supports = .all;
+    s.projection = false;
+    s.per_group_limit = false;
+    break :blk s;
+});
+/// With `per_group_limit`, but no `like`, which a `.fallback` relation
+/// then filters in memory.
+const NoLike = CountingGatewayOf(blk: {
+    var s: zom.Supports = .all;
+    s.projection = false;
+    s.like = false;
+    break :blk s;
+});
 
-    inner: zom.memory.Gateway,
+/// With `per_group_limit`, but no `offset`, which a `.fallback` relation
+/// then skips in memory.
+const NoOffset = CountingGatewayOf(blk: {
+    var s: zom.Supports = .all;
+    s.projection = false;
+    s.offset = false;
+    break :blk s;
+});
 
-    pub fn init(allocator: std.mem.Allocator, _: Config) CountingGateway {
-        return .{ .inner = .init(allocator, .{}) };
-    }
+fn CountingGatewayOf(comptime s: zom.Supports) type {
+    return struct {
+        const Gw = @This();
+        pub const adapter_name = "counting";
+        pub const Config = struct {};
 
-    pub fn deinit(self: *CountingGateway) void {
-        self.inner.deinit();
-    }
+        inner: zom.memory.Gateway,
 
-    pub fn Dataset(comptime S: type) type {
-        return struct {
-            const Self = @This();
-            const T = S.Tuple;
-            const Q = zom.Query(T);
-            pub const supports: zom.Supports = blk: {
-                var all: zom.Supports = .all;
-                all.projection = false;
-                break :blk all;
+        pub fn init(allocator: std.mem.Allocator, _: Config) Gw {
+            return .{ .inner = .init(allocator, .{}) };
+        }
+
+        pub fn deinit(self: *Gw) void {
+            self.inner.deinit();
+        }
+
+        pub fn Dataset(comptime S: type) type {
+            return struct {
+                const Self = @This();
+                const T = S.Tuple;
+                const Q = zom.Query(T);
+                pub const supports: zom.Supports = s;
+
+                store: *zom.memory.Store(S) = undefined,
+                reads: usize = 0,
+                /// The rows `read` returned, and how many of its queries were
+                /// paged per group.
+                rows_read: usize = 0,
+                per_group_reads: usize = 0,
+
+                pub fn read(self: *Self, query: Q, allocator: std.mem.Allocator) ![]T {
+                    self.reads += 1;
+                    if (query.per_group != null) self.per_group_reads += 1;
+                    const rows = try self.store.read(query, allocator);
+                    self.rows_read += rows.len;
+                    return rows;
+                }
+                pub fn count(self: *Self, query: Q) !usize {
+                    return self.store.count(query);
+                }
+                pub fn insert(self: *Self, row: T) !T {
+                    return self.store.insert(row);
+                }
             };
+        }
 
-            store: *zom.memory.Store(S) = undefined,
-            reads: usize = 0,
-
-            pub fn read(self: *Self, query: Q, allocator: std.mem.Allocator) ![]T {
-                self.reads += 1;
-                return self.store.read(query, allocator);
-            }
-            pub fn count(self: *Self, query: Q) !usize {
-                return self.store.count(query);
-            }
-            pub fn insert(self: *Self, row: T) !T {
-                return self.store.insert(row);
-            }
-        };
-    }
-
-    pub fn dataset(self: *CountingGateway, comptime S: type) !*Dataset(S) {
-        const static = struct {
-            var instance: Dataset(S) = .{};
-        };
-        static.instance = .{ .store = try self.inner.dataset(S) };
-        return &static.instance;
-    }
-};
+        pub fn dataset(self: *Gw, comptime S: type) !*Dataset(S) {
+            const static = struct {
+                var instance: Dataset(S) = .{};
+            };
+            static.instance = .{ .store = try self.inner.dataset(S) };
+            return &static.instance;
+        }
+    };
+}
 
 fn Fixture(comptime G: type) type {
     return struct {
@@ -398,18 +435,33 @@ fn expectPostIds(want: []const u32, got: []const Post) !void {
 }
 
 test "combine: the target's limit and offset page each parent's rows, in one query" {
-    var f: Fixture(CountingGateway) = undefined;
+    try expectPerParentPages(CountingGateway);
+    try expectPerParentPages(PagingInCombine);
+}
+
+/// The per-parent paging scenarios on `G`, whether its dataset pages each
+/// group (only the rows kept are read) or combine does (every row is).
+fn expectPerParentPages(comptime G: type) !void {
+    const pushed = comptime zom.Adapter(G).supports(PostSchema).per_group_limit;
+    var f: Fixture(G) = undefined;
     try f.init();
     defer f.deinit();
-    const post_reads = &(try f.gw.dataset(PostSchema)).reads;
+    const dataset = try f.gw.dataset(PostSchema);
+    const post_reads = &dataset.reads;
     const users = f.users.order(.id, .asc);
     const latest = f.posts.order(.id, .desc);
 
     // The latest post of each user: a limit on the query would give one post in all.
     post_reads.* = 0;
+    dataset.rows_read = 0;
+    dataset.per_group_reads = 0;
     var one = try users.combine(.posts, latest.limit(1)).mapTo(Writer, testing.allocator);
     defer one.deinit();
     try testing.expectEqual(1, post_reads.*);
+    // Pushed down, only the three posts kept come back; paged here, all
+    // four of their posts do, and the query has no page.
+    try testing.expectEqual(@as(usize, if (pushed) 3 else 4), dataset.rows_read);
+    try testing.expectEqual(@intFromBool(pushed), dataset.per_group_reads);
     try testing.expectEqual(3, one.items.len);
     try expectPostIds(&.{11}, one.items[0].posts);
     try expectPostIds(&.{12}, one.items[1].posts);
@@ -452,10 +504,16 @@ test "combine: a paged belongs-to target gives the first parent of each page, or
 }
 
 test "combine: per-parent paging holds across ceil(keys / max_in) batched queries" {
-    var gw: CountingGateway = .init(testing.allocator, .{});
+    try expectPagesAcrossBatches(CountingGateway);
+    try expectPagesAcrossBatches(PagingInCombine);
+}
+
+fn expectPagesAcrossBatches(comptime G: type) !void {
+    const pushed = comptime zom.Adapter(G).supports(PostSchema).per_group_limit;
+    var gw: G = .init(testing.allocator, .{});
     defer gw.deinit();
-    const users: zom.Relation(UserSchema, CountingGateway) = try .init(&gw);
-    const posts: zom.Relation(PostSchema, CountingGateway) = try .init(&gw);
+    const users: zom.Relation(UserSchema, G) = try .init(&gw);
+    const posts: zom.Relation(PostSchema, G) = try .init(&gw);
 
     const max_in = zom.Query(PostTuple).max_in;
     const n_users = 2 * max_in + 5;
@@ -467,15 +525,70 @@ test "combine: per-parent paging holds across ceil(keys / max_in) batched querie
             _ = try posts.create(.{ .id = post_id, .user_id = id, .title = "p", .published = true }).commit();
         }
     }
-    const post_reads = &(try gw.dataset(PostSchema)).reads;
-    post_reads.* = 0;
+    const dataset = try gw.dataset(PostSchema);
+    dataset.reads = 0;
+    dataset.rows_read = 0;
 
     var result = try users.order(.id, .asc).combine(.posts, posts.order(.id, .desc).offset(1).limit(1)).mapTo(Writer, testing.allocator);
     defer result.deinit();
 
-    try testing.expectEqual(std.math.divCeil(usize, n_users, max_in) catch unreachable, post_reads.*);
+    try testing.expectEqual(std.math.divCeil(usize, n_users, max_in) catch unreachable, dataset.reads);
+    // One post per user read, not three, when the dataset pages them.
+    try testing.expectEqual(@as(usize, if (pushed) n_users else 3 * n_users), dataset.rows_read);
     try testing.expectEqual(n_users, result.items.len);
     for (result.items) |w| try expectPostIds(&.{3 * w.id + 1}, w.posts);
+}
+
+test "combine: a .fallback target filtered in memory is paged by combine, not the dataset" {
+    var f: Fixture(NoLike) = undefined;
+    try f.init();
+    defer f.deinit();
+    const dataset = try f.gw.dataset(PostSchema);
+    const users = f.users.order(.id, .asc);
+
+    // The like runs in memory, on every post of the batch: a page the
+    // dataset applied first would count the posts it then drops. Achieng's
+    // latest post (11, "Mappers...") doesn't match, so her page is post 10.
+    dataset.per_group_reads = 0;
+    var result = try users.combine(.posts, f.posts.allowFallback().where(.title, .like, "%values%").order(.id, .desc).limit(1))
+        .mapTo(Writer, testing.allocator);
+    defer result.deinit();
+    try testing.expectEqual(0, dataset.per_group_reads);
+    try expectPostIds(&.{10}, result.items[0].posts);
+    try expectPostIds(&.{}, result.items[1].posts);
+
+    // A .fallback target the dataset runs entirely is still pushed down.
+    var pushed = try users.combine(.posts, f.posts.allowFallback().where(.published, .eq, true).order(.id, .desc).limit(1))
+        .mapTo(Writer, testing.allocator);
+    defer pushed.deinit();
+    try testing.expectEqual(1, dataset.per_group_reads);
+    try expectPostIds(&.{10}, pushed.items[0].posts);
+    try expectPostIds(&.{12}, pushed.items[1].posts);
+}
+
+test "combine: a .fallback offset the dataset can't skip is paged by combine" {
+    var f: Fixture(NoOffset) = undefined;
+    try f.init();
+    defer f.deinit();
+    const dataset = try f.gw.dataset(PostSchema);
+
+    // Only the page needs memory here: the filters and order would all go
+    // to the dataset, but not its offset, so nothing is pushed.
+    var result = try f.users.order(.id, .asc).combine(.posts, f.posts.allowFallback().order(.id, .desc).offset(1).limit(1))
+        .mapTo(Writer, testing.allocator);
+    defer result.deinit();
+    try testing.expectEqual(0, dataset.per_group_reads);
+    try expectPostIds(&.{10}, result.items[0].posts);
+    try expectPostIds(&.{}, result.items[1].posts);
+    try expectPostIds(&.{}, result.items[2].posts);
+
+    // A limit alone it can take.
+    var latest = try f.users.order(.id, .asc).combine(.posts, f.posts.allowFallback().order(.id, .desc).limit(1))
+        .mapTo(Writer, testing.allocator);
+    defer latest.deinit();
+    try testing.expectEqual(1, dataset.per_group_reads);
+    try expectPostIds(&.{11}, latest.items[0].posts);
+    try expectPostIds(&.{12}, latest.items[1].posts);
 }
 
 test "combine: a paged target frees cleanly when allocation fails partway" {

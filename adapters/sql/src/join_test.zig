@@ -255,3 +255,11 @@ test "unjoined selects are unchanged: no qualification" {
         \\SELECT "id", "name", "age", "manager_id" FROM "users" WHERE "age" > $1
     , &.{int(1)});
 }
+
+test "per_group on a joined select: the inner select is qualified, the outer reads the derived table" {
+    var rel = posts.join(.author).whereJoined(.author, .name, .eq, "ada").order(.id, .desc).limit(1);
+    rel.query.per_group = .user_id;
+    try expectSql(.postgres, rel,
+        \\SELECT "id", "user_id", "title", "published", "rating" FROM (SELECT "posts"."id", "posts"."user_id", "posts"."title", "posts"."published", "posts"."rating", ROW_NUMBER() OVER (PARTITION BY "posts"."user_id" ORDER BY "posts"."id" DESC) AS "zom_rn" FROM "posts" WHERE EXISTS (SELECT 1 FROM "users" WHERE "users"."id" = "posts"."user_id" AND "users"."name" = $1)) AS "zom_paged" WHERE "zom_rn" <= 1 ORDER BY "id" DESC
+    , &.{.{ .string = "ada" }});
+}
