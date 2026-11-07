@@ -28,6 +28,14 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- zom-pg prepares statements by name and keeps them per connection: a
+  statement whose SQL text repeats (a `byPk` get, every `combine` level,
+  `insertMany` batches) is parsed once per connection, then only bound and
+  executed. At most `Config.statement_cache_size` (default 256, `0` turns it
+  off) per connection, closing one to make room. A statement that DDL has
+  invalidated (`0A000`) or that was dropped (`26000`) is prepared again and
+  the call retried, outside a transaction. (#89)
+
 - More than one join per query: `users.join(.posts).join(.comments)` keeps
   the users with a post and with a comment, each join matched (and
   narrowed by its own `whereJoined*`) on its own rows. Up to

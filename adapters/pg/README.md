@@ -54,6 +54,7 @@ const users = try zom.Relation(UserSchema, zom_pg.Gateway).init(&gateway);
 | `user`, `password`, `database` | `"postgres"`, `null`, `null` | |
 | `pool_size` | `4` | Connections, all opened by `init`. |
 | `acquire_timeout_ms` | `10_000` | How long a call waits for a free connection. |
+| `statement_cache_size` | `256` | Prepared statements each connection keeps (see [Prepared statements](#prepared-statements)). `0` parses every statement on every call. |
 
 `init` returns `error.ConnectionFailed` when the server can't be reached or
 rejects the login, and `error.InvalidUrl` for a URL it can't parse.
@@ -255,6 +256,35 @@ it, refusing a value that does not fit (`error.ValueOutOfRange`).
 - `lt` / `lte` / `gt` / `gte` against `null` match nothing at the top level
   of a query. Inside a `whereAny` / `whereNot` group they are still
   zom-sql's `error.InvalidNullComparison`.
+
+## Prepared statements
+
+Each connection keeps the statements it has run, prepared under a name made
+from their SQL text (`zom_` and a 128-bit BLAKE3 hash). The first run of a
+statement on a connection parses and describes it; later runs with the same
+text, whatever the parameters, only bind and execute it, which saves a
+round trip and the planning. Statements that repeat are the common case: a
+`byPk` get, each level of a `combine`, each full `insertMany` batch.
+
+- The cache belongs to the connection (it is pg.zig's), so each pooled
+  connection has its own, and a connection the pool replaces starts empty.
+- It holds at most `statement_cache_size` statements per connection. When
+  it is full, preparing another closes one of the others (an arbitrary one,
+  not the least recently used) with the protocol's Close message.
+- After DDL that changes a statement's result columns, Postgres refuses it
+  (`0A000`, *cached plan must not change result type*). zom-pg closes it,
+  prepares it again and retries the call once, so the call succeeds. It
+  does the same when the session's statements were dropped (`26000`, e.g.
+  `gateway.exec("DEALLOCATE ALL")`). Inside a `transaction` that error has
+  already aborted the transaction, so the call fails with `error.Database`;
+  the statement is still closed, and the next transaction prepares it
+  afresh.
+- After five runs of a named statement, Postgres may switch it to a generic
+  plan (one that ignores the parameter values), which can be slower on
+  skewed data. If that shows, set `plan_cache_mode = force_custom_plan` for
+  the application's role or database
+  (`ALTER ROLE app SET plan_cache_mode = force_custom_plan`), or set
+  `statement_cache_size = 0`.
 
 ## Transactions
 

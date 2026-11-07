@@ -25,6 +25,7 @@ test {
     _ = @import("join_test.zig");
     _ = @import("combine_test.zig");
     _ = @import("transaction_test.zig");
+    _ = @import("statement_cache_test.zig");
     _ = @import("verify.zig");
     _ = @import("verify_test.zig");
     _ = @import("introspect_test.zig");

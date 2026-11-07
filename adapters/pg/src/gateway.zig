@@ -15,6 +15,11 @@
 //! Transactions: `transaction(ctx, f)` pins one pooled connection and hands
 //! `f` a gateway (`*Gateway`, the same type) whose datasets all run on it.
 //! A nested `transaction` on that gateway is a SAVEPOINT. See `Source`.
+//!
+//! Prepared statements: each connection keeps the statements it has run,
+//! named after their SQL text, so a statement that comes back (a `get` by
+//! key, every level of a `combine`, `insertMany` batches) is parsed once
+//! per connection and then only bound and executed. See `runCached`.
 
 const std = @import("std");
 const zom = @import("zom");
@@ -47,11 +52,17 @@ pub const Gateway = struct {
         /// Milliseconds to wait for a free connection before
         /// `error.ConnectionFailed`.
         acquire_timeout_ms: u32 = 10_000,
+        /// Most prepared statements each connection keeps (see
+        /// `runCached`). When full, preparing another closes one of them.
+        /// 0 prepares every statement unnamed, parsing it on every call.
+        statement_cache_size: u16 = 256,
     };
 
     allocator: Allocator,
     /// The pool, or inside `transaction` the connection it pinned.
     source: Source,
+    /// `Config.statement_cache_size`.
+    statement_cache: u16,
     /// One per schema, made by the first `dataset(S)` call.
     datasets: std.ArrayList(Entry) = .empty,
 
@@ -102,7 +113,7 @@ pub const Gateway = struct {
                 else => error.ConnectionFailed,
             };
         };
-        return .{ .allocator = allocator, .source = .{ .pool = pool } };
+        return .{ .allocator = allocator, .source = .{ .pool = pool }, .statement_cache = config.statement_cache_size };
     }
 
     fn openPool(allocator: Allocator, config: Config) !*pg.Pool {
@@ -139,7 +150,7 @@ pub const Gateway = struct {
         }
         try self.datasets.ensureUnusedCapacity(self.allocator, 1);
         const d = try self.allocator.create(D);
-        d.* = .{ .source = self.source, .allocator = self.allocator };
+        d.* = .{ .source = self.source, .allocator = self.allocator, .statement_cache = self.statement_cache };
         self.datasets.appendAssumeCapacity(.{ .type_name = name, .ptr = d, .destroy = D.destroy });
         return d;
     }
@@ -202,7 +213,11 @@ pub const Gateway = struct {
         defer self.source.release(conn);
         const depth = self.source.nextDepth();
 
-        var tx: Gateway = .{ .allocator = self.allocator, .source = .{ .tx = .{ .conn = conn, .depth = depth } } };
+        var tx: Gateway = .{
+            .allocator = self.allocator,
+            .source = .{ .tx = .{ .conn = conn, .depth = depth } },
+            .statement_cache = self.statement_cache,
+        };
         defer tx.deinit();
 
         try begin(conn, depth);
@@ -329,6 +344,8 @@ fn PgDataset(comptime S: type) type {
         source: Source,
         /// For statements, which are freed before each call returns.
         allocator: Allocator,
+        /// `Config.statement_cache_size`.
+        statement_cache: u16,
 
         fn destroy(ptr: *anyopaque, allocator: Allocator) void {
             allocator.destroy(@as(*Self, @ptrCast(@alignCast(ptr))));
@@ -350,7 +367,7 @@ fn PgDataset(comptime S: type) type {
 
             const conn = try self.source.acquire();
             defer self.source.release(conn);
-            const result = try run(conn, compiled.sql, compiled.params);
+            const result = try runCached(conn, self.statement_cache, compiled.sql, compiled.params);
             defer result.deinit();
             errdefer result.drain() catch {};
 
@@ -380,7 +397,7 @@ fn PgDataset(comptime S: type) type {
 
             const conn = try self.source.acquire();
             defer self.source.release(conn);
-            const result = try run(conn, sql, compiled.params);
+            const result = try runCached(conn, self.statement_cache, sql, compiled.params);
             defer result.deinit();
             errdefer result.drain() catch {};
             const row = (try next(conn, result)) orelse return error.UnexpectedResult;
@@ -399,7 +416,7 @@ fn PgDataset(comptime S: type) type {
 
             const conn = try self.source.acquire();
             defer self.source.release(conn);
-            const result = try run(conn, compiled.sql, compiled.params);
+            const result = try runCached(conn, self.statement_cache, compiled.sql, compiled.params);
             defer result.deinit();
             errdefer result.drain() catch {};
             const columns = try columnMap(T, result);
@@ -425,7 +442,7 @@ fn PgDataset(comptime S: type) type {
             try begin(conn, depth);
             errdefer rollback(conn, depth);
             var n: usize = 0;
-            for (batch.statements) |s| n += try runCounting(conn, s.sql, s.params);
+            for (batch.statements) |s| n += try runCounting(conn, self.statement_cache, s.sql, s.params);
             try commit(conn, depth);
             return n;
         }
@@ -469,7 +486,7 @@ fn PgDataset(comptime S: type) type {
             defer a.free(sql);
             const conn = try self.source.acquire();
             defer self.source.release(conn);
-            return runCounting(conn, sql, compiled.params);
+            return runCounting(conn, self.statement_cache, sql, compiled.params);
         }
 
         fn checkFits(c: Q.Change) !void {
@@ -493,20 +510,198 @@ fn PgDataset(comptime S: type) type {
 
 // -- statements --------------------------------------------------------------
 
-/// Prepares `sql`, binds `params` and executes it. The caller deinits the
-/// result (and drains it if it stops reading early).
-pub fn run(conn: *pg.Conn, sql: []const u8, params: []const Value) !*pg.Result {
+/// Prepares `sql` unnamed, binds `params` and executes it: one Parse per
+/// call, for statements that don't come back (the catalog queries). The
+/// caller deinits the result (and drains it if it stops reading early).
+pub fn run(conn: *pg.Conn, sql: []const u8, params: []const Value) RunError!*pg.Result {
     var stmt = pg.Stmt.init(conn, .{ .column_names = true }) catch |err| return mapError(conn, err);
     errdefer stmt.deinit();
     stmt.prepare(sql, null) catch |err| return mapError(conn, err);
+    return bindAndExecute(conn, &stmt, params);
+}
+
+/// `run`, through the connection's prepared statements: the first call
+/// with a given `sql` on a connection parses it under the name
+/// `statementName(sql)`, and later ones only bind and execute it.
+///
+/// The statements are pg.zig's (`conn._prepared_statements`), so they live
+/// and die with the connection: a connection the pool replaces starts with
+/// none. At most `cache_size` per connection; preparing one more first
+/// closes one of the others (any of them, not the least recently used).
+/// `cache_size` 0 is `run`.
+///
+/// A statement Postgres no longer accepts is closed and prepared again,
+/// once, and the call goes on: after DDL changed its result's columns
+/// (`0A000`, cached plan must not change result type), after the session's
+/// statements were dropped (`26000`, e.g. `DEALLOCATE ALL` through `exec`),
+/// or when the name is already taken (`42P05`). Inside a transaction the
+/// error has already aborted it, so the call fails (`error.Database`), and
+/// only the next transaction gets the new statement.
+///
+/// Postgres may run a named statement with a generic plan after five
+/// executions, which can be slower on skewed data; see README.md for
+/// `plan_cache_mode`.
+fn runCached(conn: *pg.Conn, cache_size: u16, sql: []const u8, params: []const Value) RunError!*pg.Result {
+    if (cache_size == 0) return run(conn, sql, params);
+    var name_buf: [statement_name_len]u8 = undefined;
+    const name = statementName(&name_buf, sql);
+    return runNamed(conn, cache_size, name, sql, params) catch |err| {
+        if (err != error.PG or !isStale(conn)) return mapErrorOrPass(conn, err);
+        log.debug("re-preparing {s} after {s}: {s}", .{ name, conn.err.?.code, conn.err.?.message });
+        if (conn._state == .fail) {
+            // An aborted transaction: the error is the call's. Closing the
+            // statement still spares the next transaction the same error.
+            const mapped = mapError(conn, err);
+            forget(conn, name) catch |e| log.debug("closing {s} failed: {t}", .{ name, e });
+            return mapped;
+        }
+        // Not recorded for `lastError()`: the call may still succeed.
+        forget(conn, name) catch |e| return mapError(conn, e);
+        return runNamed(conn, cache_size, name, sql, params) catch |e| mapErrorOrPass(conn, e);
+    };
+}
+
+/// "zom_" and 32 hex digits: the first 128 bits of the BLAKE3 hash of the
+/// SQL. Postgres cuts names at 63 bytes, so the text itself can't be it.
+const statement_name_len = 4 + 32;
+
+fn statementName(buf: *[statement_name_len]u8, sql: []const u8) []const u8 {
+    var digest: [16]u8 = undefined;
+    std.crypto.hash.Blake3.hash(sql, &digest, .{});
+    buf.* = ("zom_" ++ std.fmt.bytesToHex(digest, .lower)).*;
+    return buf;
+}
+
+test "statementName: one name per SQL text, short enough for Postgres" {
+    var a: [statement_name_len]u8 = undefined;
+    var b: [statement_name_len]u8 = undefined;
+    const x = statementName(&a, "SELECT 1");
+    try std.testing.expectEqualStrings(x, statementName(&b, "SELECT 1"));
+    try std.testing.expect(!std.mem.eql(u8, x, statementName(&b, "SELECT 2")));
+    try std.testing.expect(std.mem.startsWith(u8, x, "zom_"));
+    try std.testing.expect(x.len <= 63);
+}
+
+/// The SQLSTATEs after which `runCached` prepares the statement again.
+fn isStale(conn: *pg.Conn) bool {
+    const pge = conn.err orelse return false;
+    for ([_][]const u8{ "0A000", "26000", "42P05" }) |code| {
+        if (std.mem.eql(u8, pge.code, code)) return true;
+    }
+    return false;
+}
+
+const RunError = Gateway.Error || error{WrongNumberOfParameters};
+
+/// `mapError`, except for the errors zom-pg returns as they are.
+fn mapErrorOrPass(conn: *pg.Conn, err: anyerror) RunError {
+    if (err == error.WrongNumberOfParameters) return error.WrongNumberOfParameters;
+    return mapError(conn, err);
+}
+
+/// pg.zig's errors, unmapped: `runCached` looks at the SQLSTATE first.
+fn runNamed(conn: *pg.Conn, cache_size: u16, name: []const u8, sql: []const u8, params: []const Value) !*pg.Result {
+    const opts: pg.Conn.QueryOpts = .{ .column_names = true, .cache_name = name };
+    const statements = &conn._prepared_statements;
+
+    if (statements.getPtr(name)) |describe| {
+        // Prepared: no Parse, no Describe.
+        var stmt = try pg.Stmt.fromDescribe(conn, describe, opts);
+        errdefer stmt.deinit();
+        try conn._reader.startFlow(stmt.arena.allocator(), null);
+        stmt.buf.reset();
+        try stmt.prepareForBind(@intCast(describe.param_oids.len));
+        return bindAndExecuteRaw(&stmt, params);
+    }
+
+    if (statements.count() >= cache_size) try evictOne(conn);
+
+    var stmt = try pg.Stmt.init(conn, opts);
+    errdefer stmt.deinit();
+    {
+        // What the statement's later calls need (its parameter and column
+        // types), in an arena that `conn` owns once it is in `statements`.
+        var describe_arena: std.heap.ArenaAllocator = .init(conn._allocator);
+        errdefer describe_arena.deinit();
+        const owned_name = try describe_arena.allocator().dupe(u8, name);
+        // Reserved first: once Postgres has the statement, it must be
+        // recorded, or the next Parse of the name fails (42P05).
+        try statements.ensureUnusedCapacity(conn._allocator, 1);
+        try stmt.prepare(sql, describe_arena.allocator());
+        statements.putAssumeCapacityNoClobber(owned_name, .{
+            .arena = describe_arena,
+            .param_oids = stmt.param_oids,
+            .result_state = stmt.result_state,
+        });
+    }
+    return bindAndExecuteRaw(&stmt, params);
+}
+
+fn bindAndExecute(conn: *pg.Conn, stmt: *pg.Stmt, params: []const Value) RunError!*pg.Result {
+    return bindAndExecuteRaw(stmt, params) catch |err| mapErrorOrPass(conn, err);
+}
+
+/// Binds `params` and executes. On error the caller deinits `stmt`.
+fn bindAndExecuteRaw(stmt: *pg.Stmt, params: []const Value) !*pg.Result {
     if (stmt.param_count != params.len) return error.WrongNumberOfParameters;
-    for (params) |p| bindValue(&stmt, p) catch |err| return mapError(conn, err);
-    return stmt.execute() catch |err| return mapError(conn, err);
+    for (params) |p| try bindValue(stmt, p);
+    return stmt.execute();
+}
+
+/// Closes one of the connection's statements to make room for another.
+fn evictOne(conn: *pg.Conn) !void {
+    var it = conn._prepared_statements.keyIterator();
+    const victim = (it.next() orelse return).*;
+    log.debug("statement cache full, closing {s}", .{victim});
+    try forget(conn, victim);
+}
+
+/// Drops the statement `name` from the connection, on both sides. Postgres
+/// may not have it (`26000`); closing it anyway is not an error.
+fn forget(conn: *pg.Conn, name: []const u8) !void {
+    // `name` may live in the entry's arena: close before freeing it.
+    try closeStatement(conn, name);
+    if (conn._prepared_statements.fetchRemove(name)) |kv| {
+        var arena = kv.value.arena;
+        arena.deinit();
+    }
+}
+
+/// The protocol's Close (not `DEALLOCATE`, which fails on a statement that
+/// does not exist, aborting the transaction it is in). Postgres also takes
+/// it in an aborted transaction.
+fn closeStatement(conn: *pg.Conn, name: []const u8) !void {
+    try conn._reader.startFlow(null, null);
+    defer conn._reader.endFlow() catch {
+        conn._state = .fail;
+    };
+    const buf = &conn._buf;
+    buf.reset();
+    // Close ('C', a statement 'S'), then Sync.
+    try buf.writeByte('C');
+    try buf.writeIntBig(u32, @intCast(4 + 1 + name.len + 1));
+    try buf.writeByte('S');
+    try buf.write(name);
+    try buf.writeByte(0);
+    try buf.write(&.{ 'S', 0, 0, 0, 4 });
+    conn._state = .query;
+    conn.write(buf.string()) catch |err| {
+        conn._state = .fail;
+        return err;
+    };
+    const msg = conn.read() catch |err| {
+        if (err == error.PG) try conn.recoverFromError();
+        return err;
+    };
+    // CloseComplete
+    if (msg.type != '3') return conn.unexpectedDBMessage();
+    // Sets the state from Postgres's ReadyForQuery.
+    try conn.readyForQuery();
 }
 
 /// Runs `sql` and returns how many rows it returned.
-fn runCounting(conn: *pg.Conn, sql: []const u8, params: []const Value) !usize {
-    const result = try run(conn, sql, params);
+fn runCounting(conn: *pg.Conn, cache_size: u16, sql: []const u8, params: []const Value) !usize {
+    const result = try runCached(conn, cache_size, sql, params);
     defer result.deinit();
     errdefer result.drain() catch {};
     var n: usize = 0;
