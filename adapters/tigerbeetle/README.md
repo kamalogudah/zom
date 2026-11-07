@@ -5,11 +5,41 @@ on its C client (`tb_client`). TigerBeetle tests zom's adapter contract
 hardest: two fixed schemas, 128-bit ids, immutable records, batched writes
 and limited queries (plan.md, Phase 6).
 
-**Status:** inserts (#55), reads (#56) and account history (#57).
-`create` and `createMany` work, with typed errors for TigerBeetle's result
-codes, relations read through `lookup_*` and `query_*`, and `combine` loads
-an account's transfers and balances through `get_account_transfers` and
-`get_account_balances`.
+**Status:** complete for Phase 6: inserts, reads, account history and
+linked chains, tested against a TigerBeetle dev cluster in CI
+(`.github/workflows/tigerbeetle.yml`).
+[`examples/double_entry`](../../examples/double_entry/src/main.zig) opens
+two accounts, posts transfers (a linked chain included) and reads the
+balances back through zom relations and changesets only.
+
+## What's supported, and what isn't
+
+| zom | TigerBeetle | |
+|---|---|---|
+| `create`, `createMany` | `create_accounts` / `create_transfers`, batched | [Inserts](#inserts) |
+| `relation.linked().add(..).commit()` | a chain of `flags.linked` events in one request | [Linked chains](#linked-chains) |
+| `byPk`, `where(.id, ...)`, `whereIn(.id, ...)` | `lookup_accounts` / `lookup_transfers` | [Reads](#reads) |
+| `where` `.eq` on `user_data_*`, `ledger`, `code`; `timestamp` ranges; `order(.timestamp, ...)`; `limit` | `query_accounts` / `query_transfers` | [Reads](#reads) |
+| `count` | pages through the matches | [Reads](#reads) |
+| `combine(.transfers)`, `combine(.balances)`, `belongsTo` | `get_account_transfers`, `get_account_balances`, `lookup_*` | [Account history](#account-history) |
+| `update`, `delete` | none: records are immutable | compile error |
+| `container.transaction` | none: no transactions | compile error, pointing to `linked()` |
+| `offset`, other filters and orders | none: the cluster only filters and orders this much | compile error, or in memory with `allowFallback()` |
+| `like`, `join`, projections, other schemas | none | compile error |
+
+**Why.** TigerBeetle is a ledger, not a general database. Accounts and
+transfers are its only two record types, with fixed fields. A record is
+never changed or removed once created: a correction is a new transfer.
+Atomicity comes from linked events in one request, not from a session that
+can roll back. Queries go through a few indexes (`user_data_*`, `ledger`,
+`code`, `timestamp`), and results come in `timestamp` order only.
+
+**Strict and fallback.** A relation is strict by default: a query
+TigerBeetle can't run in full is a compile error that names the call, so a
+filter or order never quietly turns into a scan. `allowFallback()` on the
+relation lets zom send TigerBeetle the part it can run and do the rest in
+memory (`offset`, `.gt` on `amount`, `order(.amount, ...)`, ...). See
+[Reads](#reads) for exactly what goes to the cluster.
 
 ## Schemas
 
@@ -330,14 +360,28 @@ As with any combine, a `limit` or `offset` on the combined relation is
 ### zom.lint
 
 zom.lint defines its own schema (`lint_users`, with a string `name`), and
-TigerBeetle's two schemas are fixed, so the suite can't run here. Instead,
-a live test (`lint read checks` in gateway.zig) seeds six accounts. It runs
-the kinds of queries lint's read checks use on them: every supported op,
-`in`, ranges, `whereAny` / `whereNot`, orders, limit and offset, strict
-and `.fallback`. It compares each result and count with the same query
-evaluated in memory on the seeded rows. Lint's order checks (by `name`,
-`age`, `id`) have no counterpart, because TigerBeetle orders by
-`timestamp` only.
+TigerBeetle's two schemas are fixed, so `zom.lint.run` can't be called
+here. Instead, a live test (`lint read checks` in gateway.zig) seeds six
+accounts. It runs the kinds of queries lint's read checks use on them:
+every supported op, `in`, ranges, `whereAny` / `whereNot`, orders, limit
+and offset, strict and `.fallback`. It compares each result and count with
+the same query evaluated in memory on the seeded rows. Lint's order checks
+(by `name`, `age`, `id`) have no counterpart, because TigerBeetle orders by
+`timestamp` only. Lint's insert checks have their own live tests.
+
+Lint's update and delete checks can't apply. The test reports them the
+way `run` reports a skipped check, from `zom.lint.capabilitySkips`, so the
+log says why:
+
+```
+zom.lint [tigerbeetle]: skipped on 'accounts': update: count, error.DuplicatePrimaryKey, error.ValueOutOfRange (dataset has no `updatable` capability)
+zom.lint [tigerbeetle]: skipped on 'accounts': delete: count, rows gone (dataset has no `deletable` capability)
+zom.lint [tigerbeetle]: skipped on 'transfers': update: ...
+zom.lint [tigerbeetle]: skipped on 'transfers': delete: ...
+```
+
+It also asserts that these two are the only checks skipped for lack of a
+capability.
 
 ## Threads
 
@@ -379,6 +423,17 @@ var gateway = try zom_tigerbeetle.Gateway.init(allocator, .{
 });
 defer gateway.deinit();
 ```
+
+### CI
+
+`.github/workflows/tigerbeetle.yml` downloads the `tigerbeetle` release
+binary (pinned to the client's release, checked by SHA-256), formats a
+single-replica `--development` data file, starts it, and runs
+`zig build test-tigerbeetle` with `ZOM_TB_ADDRESSES` set. A skipped cluster
+test fails the job, since it means the address didn't reach the tests,
+and so does a missing lint skip line for update or delete. Then it runs
+`examples/double_entry` (`zig build test` checks its output, `zig build
+run` prints it).
 
 `init` starts the client, which connects in the background. An unreachable
 cluster shows up on the first request, not in `init`. `init` only fails on

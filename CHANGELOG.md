@@ -9,6 +9,19 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- `examples/double_entry`: two accounts on one ledger, a deposit, a linked
+  chain that posts and one that is refused as a whole, then the balances
+  and the customer's history, through zom relations and changesets only.
+- CI for zom-tigerbeetle (`.github/workflows/tigerbeetle.yml`): the pinned
+  `tigerbeetle` 0.17.9 binary, a `--development` cluster, the adapter's
+  tests against it (failing on any skipped cluster test) and the
+  double-entry example.
+- `zom.lint.capabilitySkips(G, S)` and `zom.lint.printSkips(G, S)`: the
+  checks a dataset lacks a capability for, with `run`'s reasons, for an
+  adapter that can't run `run` itself. zom-tigerbeetle's lint read test
+  reports lint's update and delete checks as skipped with them.
+- zom-tigerbeetle README: what's supported, what isn't and why, and the
+  strict / fallback behaviour.
 - zom-tigerbeetle linked chains: `relation.linked().add(a).add(b).commit()`
   creates its events (transfers or accounts) all or nothing, in one
   request, with `flags.linked` set on a copy of every event but the last

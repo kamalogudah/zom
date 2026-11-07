@@ -5,7 +5,8 @@ name: CI
 # workflow neither fetches pg.zig nor needs Postgres; zom-pg has its own
 # workflow, pg.yml, so a Postgres problem never fails a core run.
 # zom-tigerbeetle is built and its offline tests run (it fetches the prebuilt
-# C client); its cluster test skips without ZOM_TB_ADDRESSES.
+# C client); its cluster tests skip without ZOM_TB_ADDRESSES, and run against
+# a dev cluster in tigerbeetle.yml.
 
 on:
   push:

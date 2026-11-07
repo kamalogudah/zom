@@ -181,22 +181,63 @@ pub fn run(comptime G: type, comptime F: type) !void {
     }
 }
 
-fn skipReason(comptime A: type, comptime c: Check) ?[]const u8 {
+/// A check that can't run on an adapter, and why.
+pub const Skip = struct {
+    check: []const u8,
+    reason: []const u8,
+};
+
+/// The checks that `S`'s dataset in `G` lacks a capability for (`update`
+/// and `delete` on a dataset without `updatable` / `deletable`, ...), with
+/// the reason `run` would print. For an adapter whose fixed schemas can't
+/// hold lint's `Users` (TigerBeetle), so `run` can't be called: it runs its
+/// own read checks and reports these, so its log says which of lint's write
+/// checks don't apply, as `run`'s does. Query-feature skips (`like`, an
+/// order) depend on `Users`, so they are not included.
+pub fn capabilitySkips(comptime G: type, comptime S: type) []const Skip {
+    const skips = comptime blk: {
+        const A = adapter.Adapter(G);
+        var out: []const Skip = &.{};
+        for (checks) |entry| {
+            const c: Check = entry[0];
+            if (capabilityGap(A, S, c)) |why| out = out ++ [_]Skip{.{ .check = c.name, .reason = why }};
+        }
+        break :blk out;
+    };
+    return skips;
+}
+
+/// Prints `capabilitySkips(G, S)` as `run` prints a skipped check, naming
+/// the dataset, and returns them.
+pub fn printSkips(comptime G: type, comptime S: type) []const Skip {
+    const skips = comptime capabilitySkips(G, S);
+    inline for (skips) |s| std.debug.print("zom.lint [{s}]: skipped on '{s}': {s} ({s})\n", .{ adapter.Adapter(G).name, S.name, s.check, s.reason });
+    return skips;
+}
+
+/// Why `S`'s dataset can't run check `c`, as far as capabilities go.
+fn capabilityGap(comptime A: type, comptime S: type, comptime c: Check) ?[]const u8 {
     // Checking the dataset contract for every entry in `checks` adds up.
     @setEvalBranchQuota(10_000);
     for (c.needs) |cap| {
-        if (!A.has(Users, cap))
+        if (!A.has(S, cap))
             return std.fmt.comptimePrint("dataset has no `{t}` capability", .{cap});
     }
     if (c.needs_any.len > 0) {
         for (c.needs_any) |cap| {
-            if (A.has(Users, cap)) break;
+            if (A.has(S, cap)) break;
         } else {
             var tags: []const u8 = "";
             for (c.needs_any, 0..) |cap, i| tags = tags ++ (if (i == 0) "" else " or ") ++ "`" ++ @tagName(cap) ++ "`";
             return "dataset has no " ++ tags ++ " capability";
         }
     }
+    return null;
+}
+
+fn skipReason(comptime A: type, comptime c: Check) ?[]const u8 {
+    @setEvalBranchQuota(10_000);
+    if (capabilityGap(A, Users, c)) |why| return why;
     const s = A.supports(Users);
     for (c.features) |f| {
         if (!@field(s, f))

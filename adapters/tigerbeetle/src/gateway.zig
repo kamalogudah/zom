@@ -1388,9 +1388,20 @@ test "allowFallback: other filters, orders and offset run in memory" {
 // in memory on the seeded rows: `Query.matches`, then a stable sort and
 // the window, as the memory adapter does. Without an order a query
 // returns rows by timestamp, the order they were seeded in.
+//
+// Lint's insert checks have counterparts above ("insert: ...",
+// "insertMany: ..."). Its update and delete checks can't apply, and are
+// reported skipped in lint's own words, with the capability each lacks.
 test "lint read checks: every query agrees with the same one in memory" {
     var gateway = try testGateway(.{});
     defer gateway.deinit();
+    inline for (.{ schemas.Account, schemas.Transfer }) |S| {
+        const skips = comptime zom.lint.capabilitySkips(Gateway, S);
+        comptime std.debug.assert(skips.len == 2);
+        comptime std.debug.assert(std.mem.startsWith(u8, skips[0].check, "update:"));
+        comptime std.debug.assert(std.mem.startsWith(u8, skips[1].check, "delete:"));
+        _ = zom.lint.printSkips(Gateway, S);
+    }
     const accounts = try Accounts.init(&gateway);
     const tag, const s = try seedAccounts(accounts);
     const rel = accounts.where(.user_data_128, .eq, tag);

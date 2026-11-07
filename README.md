@@ -1327,8 +1327,13 @@ TigerBeetle's result codes is a typed error (`error.ExceedsCredits`, ...).
 `user_data_128/64/32`, `ledger` and `code`, and `timestamp` ranges, are
 `query_*`, ordered by `timestamp` either way and paged through. Any other
 filter or order, and `offset`, is a compile error unless the relation
-`allowFallback()`s. The dependency decision, the supported targets and the
-setup are in [adapters/tigerbeetle/README.md](adapters/tigerbeetle/README.md).
+`allowFallback()`s. `relation.linked()` takes the place of a transaction:
+a chain of events created all or nothing. What is and isn't supported (and
+why), the dependency decision, the supported targets and the setup are in
+[adapters/tigerbeetle/README.md](adapters/tigerbeetle/README.md).
+[examples/double_entry](examples/double_entry/src/main.zig) is a small
+ledger through zom only, run in zom-tigerbeetle's CI workflow against a dev
+cluster (`cd examples/double_entry && TB_ADDRESSES=3000 zig build run`).
 
 ```zig
 var tb = try zom_tigerbeetle.Gateway.init(allocator, .{ .io = io, .cluster_id = 0, .addresses = "3000" });

@@ -82,6 +82,18 @@ test "a read-only adapter passes zom.lint, seeding through its factory" {
     try zom.lint.run(ReadOnlyGateway, ReadOnlyFactory);
 }
 
+test "capabilitySkips: the write checks a dataset has no capability for" {
+    // Memory has every capability: nothing to skip.
+    try testing.expectEqual(0, zom.lint.capabilitySkips(zom.memory.Gateway, zom.lint.Users).len);
+    // Read only: every insert, update and delete check, each with its reason.
+    const skips = comptime zom.lint.capabilitySkips(ReadOnlyGateway, zom.lint.Users);
+    try testing.expectEqual(5, skips.len);
+    try testing.expect(std.mem.startsWith(u8, skips[3].check, "update:"));
+    try testing.expectEqualStrings("dataset has no `updatable` capability", skips[3].reason);
+    try testing.expect(std.mem.startsWith(u8, skips[4].check, "delete:"));
+    try testing.expectEqualStrings("dataset has no `deletable` capability", skips[4].reason);
+}
+
 /// A gateway whose dataset has `insert` but no `insertMany`, `update` or
 /// `delete`, like an append-only log: lint seeds through `insert`, and
 /// `createMany` falls back to the `insert` loop.

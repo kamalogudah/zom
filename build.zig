@@ -201,8 +201,6 @@ fn addTigerBeetle(
         adapter.module.linkSystemLibrary("ws2_32", .{});
         adapter.module.linkSystemLibrary("ntdll", .{});
     }
-    // The cluster test reads ZOM_TB_ADDRESSES, which the cache can't see.
-    adapter.run_tests.has_side_effects = true;
     // The cluster tests read ZOM_TB_ADDRESSES, which the cache can't see;
     // without it they are skipped.
     adapter.run_tests.has_side_effects = true;
@@ -284,8 +282,10 @@ pub fn addInferStep(b: *std.Build, options: InferOptions) Infer {
 /// on zom by path, the way an application depends on it. They are listed
 /// rather than found by scanning, because `examples/` is not in zom's
 /// `.paths`: a project that fetches zom doesn't get them, and these steps
-/// only run from a checkout. examples/pg_repo is not listed: it needs a
-/// Postgres server, so zom-pg's CI workflow (pg.yml) runs it instead.
+/// only run from a checkout. examples/pg_repo and examples/double_entry
+/// are not listed: they need a Postgres server and a TigerBeetle cluster,
+/// so zom-pg's CI workflow (pg.yml) and zom-tigerbeetle's (tigerbeetle.yml)
+/// run them instead.
 const example_dirs = [_][]const u8{"csv_users"};
 
 /// Runs `zig build test` inside each example's directory: it builds the
