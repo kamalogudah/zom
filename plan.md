@@ -71,7 +71,7 @@ zom (core package)
 
 zom-sql          dialect-agnostic SQL compiler (SELECT/INSERT/UPDATE/DELETE, joins)
 ├── zom-pg       driver binding on karlseguin/pg.zig
-└── zom-sqlite   translate-c binding over the SQLite amalgamation (post-v1)
+└── zom-sqlite   translate-c binding over the SQLite amalgamation
 zom-csv          file gateway over memory.Store, read-only by default, optional sync
 zom-yaml         same pattern as csv, nested values
 zom-tigerbeetle  accounts/transfers over the native Zig client; immutable, batched
@@ -159,7 +159,7 @@ checks these.
 - `zom.memory` stays in core, like `ROM::Memory`, because tests, the lint
   suite and the file adapters all build on it.
 - `zom.sql.compileSelect` moves out to `zom-sql`, so core has no SQL in it.
-- `zom-sqlite` (post-v1) uses no third-party Zig wrapper. It fetches the
+- `zom-sqlite` (`adapters/sqlite`) uses no third-party Zig wrapper. It fetches the
   SQLite amalgamation as a `build.zig.zon` URL dependency, compiles it with
   `addCSourceFile`, and binds `sqlite3.h` with `b.addTranslateC`. zom only
   needs about 15 functions (`open_v2`, `prepare_v3`, `bind_*`, `step`,
@@ -396,7 +396,7 @@ The four open questions were decided in #29:
    fetched (3.2).
 2. `.fallback` exists, opt-in per relation, with a scan hook (3.1).
 3. The core `Value` grows: `uint128`, `timestamp`, `bytes` (3.3).
-4. `zom-sqlite` is post-v1 and uses a translate-c binding (3.2).
+4. `zom-sqlite` uses a translate-c binding (3.2); it is in `adapters/sqlite`.
 
 Later decisions:
 

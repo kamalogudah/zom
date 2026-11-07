@@ -4,12 +4,13 @@ The driver-free half of rom's `rom-sql`. zom-sql compiles a relation's
 query into a parameterized `SELECT`, and inserts, updates and deletes into
 `INSERT`, `UPDATE` and `DELETE`, for a `Dialect`. It is **not a gateway**:
 it never opens a connection. A gateway pairs it with a driver.
-[zom-pg](../pg/README.md) is that pairing for Postgres: compile, bind
-`params`, decode rows.
+[zom-pg](../pg/README.md) is that pairing for Postgres, and
+[zom-sqlite](../sqlite/README.md) for SQLite: compile, bind `params`,
+decode rows.
 
 Use it directly to:
 
-- build a gateway for another SQL database (SQLite, MySQL, ...);
+- build a gateway for another SQL database (MySQL, ...);
 - log or snapshot-test the SQL that a relation produces;
 - run zom's queries through a driver you already have.
 

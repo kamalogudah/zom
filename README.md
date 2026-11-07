@@ -21,7 +21,7 @@ that each do one thing, and nothing is an "active record".
 | `ROM::Mapper`, `map_with`, `map_to`        | `zom.Mapper(Tuple, Entity, .{ .renames = ... })`, `mapWith`, `mapTo` |
 | `users.combine(:posts)`                    | `users.combine(.posts, posts).mapTo(Author, allocator)` (see [Combine](docs/associations.md#combine)) |
 | `users.join(:posts).where(posts[:published] => true)` | `users.join(.posts).whereJoined(.posts, .published, .eq, true)` (see [Join](docs/associations.md#join)) |
-| rom-sql (Sequel)                           | [zom-sql](adapters/sql/README.md) compiles relations to SQL, and [zom-pg](adapters/pg/README.md) runs them on Postgres |
+| rom-sql (Sequel)                           | [zom-sql](adapters/sql/README.md) compiles relations to SQL, and [zom-pg](adapters/pg/README.md) and [zom-sqlite](adapters/sqlite/README.md) run them on Postgres and SQLite |
 
 ## What Zig gives you for free
 
@@ -65,9 +65,10 @@ exe.root_module.addImport("zom", dep.module("zom"));
 exe.root_module.addImport("zom_csv", dep.module("zom_csv")); // also zom_yaml, zom_sql
 ```
 
-zom-pg and zom-tigerbeetle pull in a third-party dependency, so they are
-off unless you ask for them: `.pg = true` (fetches pg.zig) or
-`.tigerbeetle = true` (fetches TigerBeetle's C client).
+zom-pg, zom-sqlite and zom-tigerbeetle pull in a third-party dependency,
+so they are off unless you ask for them: `.pg = true` (fetches pg.zig),
+`.sqlite = true` (fetches the SQLite amalgamation) or `.tigerbeetle = true`
+(fetches TigerBeetle's C client).
 
 ## Quick start, in memory
 
@@ -143,6 +144,7 @@ built and run with `zig build run` from its directory:
 | [zom-yaml](adapters/yaml/README.md) | `zom_yaml` | YAML files, read-only or writable |
 | [zom-sql](adapters/sql/README.md) | `zom_sql` | not a gateway: compiles relations to SQL for a dialect |
 | [zom-pg](adapters/pg/README.md) | `zom_pg` | PostgreSQL, with transactions, joins and schema generation |
+| [zom-sqlite](adapters/sqlite/README.md) | `zom_sqlite` | SQLite, compiled in, with transactions and joins |
 | [zom-tigerbeetle](adapters/tigerbeetle/README.md) | `zom_tigerbeetle` | TigerBeetle accounts and transfers |
 
 [adapters/README.md](adapters/README.md) compares what each one supports.

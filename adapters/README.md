@@ -14,6 +14,7 @@ const dep = b.dependency("zom", .{ .target = target, .optimize = optimize });
 const zom = dep.module("zom");         // includes zom.memory
 const zom_csv = dep.module("zom_csv"); // also zom_yaml, zom_sql
 // .pg = true          -> dep.module("zom_pg")          (fetches pg.zig)
+// .sqlite = true      -> dep.module("zom_sqlite")      (fetches the SQLite amalgamation)
 // .tigerbeetle = true -> dep.module("zom_tigerbeetle") (fetches TigerBeetle's C client)
 ```
 
@@ -24,6 +25,7 @@ const zom_csv = dep.module("zom_csv"); // also zom_yaml, zom_sql
 | yaml | `zom_yaml` | one YAML file, or one per dataset | `WritableGateway` + `sync()` | no | [yaml/README.md](yaml/README.md) |
 | sql | `zom_sql` | none: a SQL compiler, not a gateway | n/a | n/a | [sql/README.md](sql/README.md) |
 | pg | `zom_pg` | PostgreSQL, via pg.zig | yes | yes | [pg/README.md](pg/README.md) |
+| sqlite | `zom_sqlite` | a SQLite file or `:memory:`, SQLite compiled in | yes | yes (savepoints nest) | [sqlite/README.md](sqlite/README.md) |
 | tigerbeetle | `zom_tigerbeetle` | a TigerBeetle cluster | inserts only (records are immutable) | `linked()` chains | [tigerbeetle/README.md](tigerbeetle/README.md) |
 
 What a gateway leaves out is a **compile error**, not a runtime one. For
@@ -44,12 +46,16 @@ supports.
 - **An application database:** zom-pg. It has every capability, including
   joins and transactions, and can generate your schema structs from the
   live database (`zig build infer`).
+- **An embedded database, or a single-process app:** zom-sqlite. It has
+  the same capabilities as zom-pg except schema checks and generation,
+  needs no server, and its in-memory databases make fast integration
+  tests.
 - **Money and ledgers:** zom-tigerbeetle. It has fixed `Account`,
   `Transfer` and `AccountBalance` schemas, typed result-code errors, and
   linked chains that commit all or nothing.
 - **Another SQL database:** zom-sql compiles relations to SQL for a
   `Dialect` (Postgres and SQLite presets). You pair it with a driver to
-  build a gateway, the way zom-pg does.
+  build a gateway, the way zom-pg and zom-sqlite do.
 
 You can mix gateways in one container. See
 [examples/csv_users](../examples/csv_users), where users come from CSV and
@@ -60,6 +66,7 @@ posts from memory.
 ```sh
 zig build test-adapters      # every adapter's tests
 zig build test-pg            # zom-pg only (database tests need ZOM_PG_URL)
+zig build test-sqlite        # zom-sqlite only (in-memory databases, nothing to set up)
 zig build test-tigerbeetle   # zom-tigerbeetle only (cluster tests need ZOM_TB_ADDRESSES)
 ```
 

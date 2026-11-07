@@ -2,7 +2,7 @@ const std = @import("std");
 
 /// zom is one package that exports several modules: the core, `zom`, and one
 /// module per adapter (`zom_csv`, `zom_yaml`, `zom_sql`, `zom_pg`,
-/// `zom_tigerbeetle`). An
+/// `zom_sqlite`, `zom_tigerbeetle`). An
 /// application depends on the package once and picks the modules it uses:
 ///
 ///     const dep = b.dependency("zom", .{ .target = target, .optimize = optimize });
@@ -12,7 +12,8 @@ const std = @import("std");
 /// zom-pg needs pg.zig, a lazy dependency, so it only exists when asked for
 /// with `.pg = true`: an application that doesn't use Postgres never fetches
 /// pg.zig. zom-tigerbeetle likewise needs TigerBeetle's prebuilt C client,
-/// so it only exists with `.tigerbeetle = true`. The adapters' code lives under `adapters/<name>/src` and imports
+/// so it only exists with `.tigerbeetle = true`, and zom-sqlite compiles
+/// the SQLite amalgamation, so it only exists with `.sqlite = true`. The adapters' code lives under `adapters/<name>/src` and imports
 /// zom only through its public module, so an adapter can still move to a
 /// repo of its own later without code changes (see plan.md, section 3.2).
 pub fn build(b: *std.Build) void {
@@ -22,6 +23,7 @@ pub fn build(b: *std.Build) void {
     // pkg_hash is empty), so `zig build test` covers zom-pg; off by default
     // when zom is someone else's dependency.
     const with_pg = b.option(bool, "pg", "Build the zom_pg module (fetches pg.zig)") orelse (b.pkg_hash.len == 0);
+    const with_sqlite = b.option(bool, "sqlite", "Build the zom_sqlite module (fetches the SQLite amalgamation)") orelse (b.pkg_hash.len == 0);
     const with_tigerbeetle = b.option(bool, "tigerbeetle", "Build the zom_tigerbeetle module (fetches TigerBeetle's C client)") orelse (b.pkg_hash.len == 0);
 
     // Turns deprecated declarations (zom.combineMany) into compile errors,
@@ -66,6 +68,16 @@ pub fn build(b: *std.Build) void {
     } else {
         const fail = b.addFail("zom-pg is off: pass -Dpg=true (or `.pg = true` to b.dependency)");
         b.step("test-pg", "Run zom-pg's tests (its database tests need ZOM_PG_URL)").dependOn(&fail.step);
+    }
+
+    const test_sqlite = b.step("test-sqlite", "Run zom-sqlite's tests (in-memory databases, no server needed)");
+    if (with_sqlite) {
+        if (b.lazyDependency("sqlite", .{})) |sqlite_dep| {
+            addSqlite(b, test_adapters, test_sqlite, mod, zom_sql.module, sqlite_dep, target, optimize);
+        }
+    } else {
+        const fail = b.addFail("zom-sqlite is off: pass -Dsqlite=true (or `.sqlite = true` to b.dependency)");
+        test_sqlite.dependOn(&fail.step);
     }
 
     const test_tigerbeetle = b.step("test-tigerbeetle", "Run zom-tigerbeetle's tests (its cluster test needs ZOM_TB_ADDRESSES)");
@@ -153,6 +165,57 @@ fn addPg(
     if (b.args) |args| run_infer.addArgs(args);
     b.step("infer", "Run zom-pg-infer (pass its options after --)").dependOn(&run_infer.step);
 }
+
+/// The `zom_sqlite` module and its tests. The amalgamation is compiled into
+/// the module, and its header translated, so nothing is needed from the
+/// system but libc.
+fn addSqlite(
+    b: *std.Build,
+    test_adapters: *std.Build.Step,
+    test_sqlite: *std.Build.Step,
+    zom: *std.Build.Module,
+    zom_sql: *std.Build.Module,
+    sqlite_dep: *std.Build.Dependency,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) void {
+    const header = b.addTranslateC(.{
+        .root_source_file = sqlite_dep.path("sqlite3.h"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const adapter = addAdapter(b, test_adapters, "sqlite", &.{
+        .{ .name = "zom", .module = zom },
+        .{ .name = "zom_sql", .module = zom_sql },
+        .{ .name = "sqlite3", .module = header.createModule() },
+    }, target, optimize);
+    adapter.module.link_libc = true;
+    adapter.module.addCSourceFile(.{
+        .file = sqlite_dep.path("sqlite3.c"),
+        .flags = &sqlite_flags,
+    });
+    test_sqlite.dependOn(&adapter.run_tests.step);
+}
+
+/// How zom-sqlite compiles SQLite. `SQLITE_CASE_SENSITIVE_LIKE` makes `LIKE`
+/// match case as the memory adapter does (`ilike` is rendered as
+/// `LOWER(x) LIKE LOWER(y)`), `SQLITE_DQS=0` makes `"x"` an identifier only,
+/// as zom-sql quotes them, and UBSan is off for SQLite's C, which relies on
+/// behaviour it flags (it is SQLite's to test, not zom's).
+const sqlite_flags = [_][]const u8{
+    "-std=c99",
+    "-fno-sanitize=undefined",
+    "-DSQLITE_CASE_SENSITIVE_LIKE",
+    "-DSQLITE_DQS=0",
+    "-DSQLITE_THREADSAFE=1",
+    "-DSQLITE_DEFAULT_MEMSTATUS=0",
+    "-DSQLITE_DEFAULT_FOREIGN_KEYS=1",
+    "-DSQLITE_OMIT_LOAD_EXTENSION",
+    "-DSQLITE_OMIT_DEPRECATED",
+    "-DSQLITE_OMIT_SHARED_CACHE",
+    "-DSQLITE_USE_ALLOCA",
+};
 
 /// The `zom_tigerbeetle` module and its tests. TigerBeetle's C client comes
 /// prebuilt from the tigerbeetle-go release tarball (`native/`): its header,

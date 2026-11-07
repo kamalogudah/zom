@@ -19,6 +19,13 @@
             .hash = "N-V-__8AAGycPwCtpzQ4XDECKNT32ToihjKtvdqD9HQ3ZtNy",
             .lazy = true,
         },
+        // The SQLite amalgamation (sqlite3.c and sqlite3.h), compiled into
+        // zom_sqlite. Only fetched with `-Dsqlite=true`.
+        .sqlite = .{
+            .url = "https://www.sqlite.org/2026/sqlite-amalgamation-3540100.zip",
+            .hash = "N-V-__8AAETTsABEodUZZFAyfdAm9hEyqBXuLw9pRSO0vFh9",
+            .lazy = true,
+        },
     },
     .paths = .{
         "build.zig",
@@ -33,6 +40,8 @@
         "adapters/sql/README.md",
         "adapters/pg/src",
         "adapters/pg/README.md",
+        "adapters/sqlite/src",
+        "adapters/sqlite/README.md",
         "adapters/tigerbeetle/src",
         "adapters/tigerbeetle/README.md",
         "examples/readme.zig",

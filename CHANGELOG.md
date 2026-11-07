@@ -7,6 +7,20 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ## [Unreleased]
 
+### Added
+
+- **zom-sqlite** (`adapters/sqlite`, module `zom_sqlite`, `.sqlite = true`):
+  a gateway for SQLite on the SQLite 3.54.1 amalgamation, compiled into the
+  module and bound with `translate-c` (no system library, no wrapper).
+  Statements come from zom-sql's `.sqlite` dialect. It passes `zom.lint`
+  and has every capability and query feature, joins and `combine`'s
+  per-parent paging included. `transaction` nests as savepoints, and a
+  failed statement doesn't abort the transaction around it. Errors map to
+  zom's shared names plus `error.Busy`, with `Gateway.lastError()` for
+  SQLite's code and message. Statements are kept per connection by their
+  SQL text (`statement_cache_size`). Its tests run on in-memory databases,
+  so `zig build test` covers it with nothing to set up.
+
 ## [0.16.0] - 2026-11-07
 
 zom's version now follows the Zig release it builds with: 0.16.x builds

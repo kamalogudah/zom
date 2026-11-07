@@ -7,6 +7,8 @@ name: CI
 # zom-tigerbeetle is built and its offline tests run (it fetches the prebuilt
 # C client); its cluster tests skip without ZOM_TB_ADDRESSES, and run against
 # a dev cluster in tigerbeetle.yml.
+# zom-sqlite is built (it fetches and compiles the SQLite amalgamation) and
+# all its tests run here, on in-memory databases.
 
 on:
   push:

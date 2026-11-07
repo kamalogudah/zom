@@ -166,9 +166,10 @@ const zom_csv = dep.module("zom_csv"); // also zom_yaml, zom_sql
 `zom_pg` needs pg.zig, which is a lazy dependency, so it exists only when
 asked for: `b.dependency("zom", .{ ..., .pg = true })`. Applications that
 don't use Postgres never fetch pg.zig. In a checkout of zom, `-Dpg` is on by
-default; `-Dpg=false` leaves zom-pg out. `zom_tigerbeetle` works the same
-way with `.tigerbeetle = true` (`-Dtigerbeetle`), for TigerBeetle's
-prebuilt C client.
+default; `-Dpg=false` leaves zom-pg out. `zom_sqlite` works the same way with
+`.sqlite = true` (`-Dsqlite`), for the SQLite amalgamation, and
+`zom_tigerbeetle` with `.tigerbeetle = true` (`-Dtigerbeetle`), for
+TigerBeetle's prebuilt C client.
 
 Each adapter's code lives in `adapters/<name>/src`, and the root `build.zig`
 exports `adapters/<name>/src/root.zig` as the module `zom_<name>`:
@@ -199,7 +200,7 @@ this way. The contract is listed in `src/file.zig` and checked with
 `@hasDecl` when the gateway type is built.
 
 `zig build test-adapters` runs every adapter's tests, `zig build test-pg`
-only zom-pg's, `zig build test-tigerbeetle` only zom-tigerbeetle's, and `zig build test` runs them all along with the core.
+only zom-pg's, `zig build test-sqlite` only zom-sqlite's, `zig build test-tigerbeetle` only zom-tigerbeetle's, and `zig build test` runs them all along with the core.
 Every adapter's tests should call `zom.lint.run` once it can store the lint
 seed rows.
 
