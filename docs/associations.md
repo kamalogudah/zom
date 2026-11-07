@@ -280,7 +280,7 @@ that struct, `@TypeOf(scoped).Input`, and commits with
 but a Zig struct has no unset fields, so a post literal without `user_id`
 doesn't compile. Giving the key a default in the tuple would let a post
 silently belong to user 0. Making `create` accept a partial struct would
-mean an `anytype` parameter, and Zig 0.16 doesn't coerce an anonymous
+mean an `anytype` parameter, and Zig doesn't coerce an anonymous
 struct to a named one, so every `create` literal would lose its result
 type (`.id = @intCast(n)` would stop compiling). So `create` keeps taking a
 whole tuple. ROM's order still works if you give the key a value first:

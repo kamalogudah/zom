@@ -218,8 +218,8 @@ test "is_null / is_not_null, and eq null as their alias" {
 }
 
 test "every op has an operand shape" {
-    inline for (@typeInfo(zom.Op).@"enum".fields) |f| {
-        const op: zom.Op = @enumFromInt(f.value);
+    inline for (@typeInfo(zom.Op).@"enum".field_values) |value| {
+        const op: zom.Op = @fromBackingInt(value);
         _ = op.operand();
     }
 }

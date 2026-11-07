@@ -1,7 +1,7 @@
 //! TigerBeetle's types, as `tb_client.h` declares them.
 //!
 //! `Account` and `Transfer` are the C client's own structs (translated by
-//! `b.addTranslateC`), not mirrors: they are `extern struct`s of plain
+//! the translate-c package, with `default_init`), not mirrors: they are `extern struct`s of plain
 //! integers (`u128` ids, amounts and `user_data_128`, `u64`, `u32`, `u16`),
 //! every field defaulting to 0, 128 bytes each. `flags` is a `u16` there,
 //! so zom stores, compares and filters it like any other integer. The

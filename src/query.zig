@@ -491,7 +491,7 @@ pub const Join = struct {
     nodes: [max_nodes]FilterNode = undefined,
     node_count: u8 = 0,
     /// The nodes the join AND-s together; the others sit in a group.
-    top: std.StaticBitSet(max_nodes) = .initEmpty(),
+    top: std.bit_set.Static(max_nodes) = .empty,
 
     comptime {
         // `targetQuery` copies the tree into a query of any tuple as is.
@@ -518,7 +518,7 @@ pub const Join = struct {
     }
 
     /// The indices into `nodeSlice()` of the nodes the join AND-s.
-    pub fn topNodes(self: *const Join) std.StaticBitSet(max_nodes).Iterator(.{}) {
+    pub fn topNodes(self: *const Join) std.bit_set.Static(max_nodes).Iterator(.{}) {
         return self.top.iterator(.{});
     }
 
@@ -682,7 +682,7 @@ pub fn Query(comptime T: type) type {
         nodes: [max_nodes]Node = undefined,
         node_count: u8 = 0,
         /// The nodes the query AND-s together; the others sit in a group.
-        top: std.StaticBitSet(max_nodes) = .initEmpty(),
+        top: std.bit_set.Static(max_nodes) = .empty,
         /// Sort keys, most significant first: `orders[1]` breaks ties on
         /// `orders[0]`, and so on. Read through `orderSlice()`.
         orders: [max_orders]Order = undefined,
@@ -778,18 +778,18 @@ pub fn Query(comptime T: type) type {
             const info = @typeInfo(K);
             if (info != .@"struct" or !info.@"struct".is_tuple)
                 @compileError("zom: reorder takes a tuple of .{ field, direction } pairs, e.g. .{ .{ .age, .desc } }, got " ++ @typeName(K));
-            const fields = info.@"struct".fields;
+            const fields = info.@"struct".field_names;
             if (fields.len > max_orders)
                 @compileError(std.fmt.comptimePrint("zom: reorder has {d} keys, more than max_orders ({d})", .{ fields.len, max_orders }));
             var next = self;
             next.order_count = 0;
             inline for (fields) |f| {
-                const key = @field(keys, f.name);
+                const key = @field(keys, f);
                 const P = @TypeOf(key);
                 const pinfo = @typeInfo(P);
-                if (pinfo != .@"struct" or !pinfo.@"struct".is_tuple or pinfo.@"struct".fields.len != 2)
+                if (pinfo != .@"struct" or !pinfo.@"struct".is_tuple or pinfo.@"struct".field_names.len != 2)
                     @compileError("zom: a reorder key is .{ field, direction }, e.g. .{ .age, .desc }, got " ++ @typeName(P));
-                if (!pinfo.@"struct".fields[0].is_comptime)
+                if (!pinfo.@"struct".field_attrs[0].@"comptime")
                     @compileError("zom: a reorder key's field must be comptime-known, e.g. .{ .age, .desc }");
                 next.addOrder(.{ .field = comptime key[0], .direction = key[1] });
             }
@@ -808,7 +808,7 @@ pub fn Query(comptime T: type) type {
 
         /// The indices into `nodeSlice()` of the nodes the query AND-s, in
         /// the order they were added.
-        pub fn topNodes(self: *const Self) std.StaticBitSet(max_nodes).Iterator(.{}) {
+        pub fn topNodes(self: *const Self) std.bit_set.Static(max_nodes).Iterator(.{}) {
             return self.top.iterator(.{});
         }
 
@@ -991,10 +991,10 @@ pub fn Query(comptime T: type) type {
 
         fn condSize(comptime C: type) Size {
             if (comptime groupKind(C) != null) {
-                const fields = groupFields(C);
+                _ = groupFields(C); // checks the group's shape
                 var size: Size = .{ .nodes = 1, .filters = 0 };
-                for (fields) |f| {
-                    const child = condSize(f.type);
+                for (@typeInfo(@FieldType(C, "conds")).@"struct".field_types) |Cond| {
+                    const child = condSize(Cond);
                     size.nodes += child.nodes;
                     size.filters += child.filters;
                 }
@@ -1015,16 +1015,16 @@ pub fn Query(comptime T: type) type {
             return @typeInfo(C) == .@"struct" and @hasDecl(C, "zom_not");
         }
 
-        fn groupFields(comptime C: type) []const std.builtin.Type.StructField {
+        fn groupFields(comptime C: type) []const [:0]const u8 {
             const name = "zom." ++ @tagName(C.zom_group);
             const Conds = @FieldType(C, "conds");
             const info = @typeInfo(Conds);
             if (info != .@"struct" or !info.@"struct".is_tuple)
                 @compileError("zom: " ++ name ++ " takes a tuple of conditions, e.g. .{ .{ .age, .gt, 30 }, .{ .role, .eq, .admin } }, got " ++
                     @typeName(Conds));
-            if (info.@"struct".fields.len == 0)
+            if (info.@"struct".field_names.len == 0)
                 @compileError("zom: " ++ name ++ " needs at least one condition");
-            return info.@"struct".fields;
+            return info.@"struct".field_names;
         }
 
         /// Writes `cond` into `nodes[slot]`, which the caller reserved.
@@ -1040,7 +1040,7 @@ pub fn Query(comptime T: type) type {
                     .all => .{ .and_group = children },
                     .any => .{ .or_group = children },
                 };
-                inline for (fields, 0..) |f, k| self.writeCond(@intCast(children.first + k), @field(cond.conds, f.name));
+                inline for (fields, 0..) |f, k| self.writeCond(@intCast(children.first + k), @field(cond.conds, f));
             } else if (comptime isNot(C)) {
                 const child = self.node_count;
                 self.node_count += 1;
@@ -1055,11 +1055,11 @@ pub fn Query(comptime T: type) type {
         fn leafFilter(cond: anytype) Filter {
             const C = @TypeOf(cond);
             const info = @typeInfo(C);
-            if (info != .@"struct" or !info.@"struct".is_tuple or info.@"struct".fields.len != 3)
+            if (info != .@"struct" or !info.@"struct".is_tuple or info.@"struct".field_names.len != 3)
                 @compileError("zom: a condition is .{ field, op, value }, zom.any(...), zom.all(...) or zom.not(...), got " ++
                     @typeName(C));
-            const fields = info.@"struct".fields;
-            if (!fields[0].is_comptime or !fields[1].is_comptime)
+            const attrs = info.@"struct".field_attrs;
+            if (!attrs[0].@"comptime" or !attrs[1].@"comptime")
                 @compileError("zom: a condition's field and op must be comptime-known, e.g. .{ .age, .gt, 30 }");
             const field: Field = comptime cond[0];
             const op: Op = comptime cond[1];
@@ -1088,36 +1088,37 @@ pub fn Query(comptime T: type) type {
                     break :blk .{ .one = toValue(value) };
                 },
                 .many => blk: {
-                    const fields = comptime tupleFields(V, op_name, name, "a tuple of values, e.g. .{ 1, 2, 3 }; " ++
+                    const tuple = comptime tupleInfo(V, op_name, name, "a tuple of values, e.g. .{ 1, 2, 3 }; " ++
                         "use whereIn for a runtime slice");
-                    if (fields.len > max_in)
+                    const n = tuple.field_names.len;
+                    if (n > max_in)
                         @compileError(std.fmt.comptimePrint("zom: {s} on '{s}' has {d} values, more than max_in ({d})", .{
-                            op_name, name, fields.len, max_in,
+                            op_name, name, n, max_in,
                         }));
-                    inline for (fields) |f| {
-                        if (!f.is_comptime)
-                            @compileError("zom: " ++ op_name ++ " on '" ++ name ++ "': value " ++ f.name ++
+                    inline for (tuple.field_names, tuple.field_attrs) |f, attrs| {
+                        if (!attrs.@"comptime")
+                            @compileError("zom: " ++ op_name ++ " on '" ++ name ++ "': value " ++ f ++
                                 " is not comptime-known; use whereIn for runtime values");
-                        checkValue(F, @field(value, f.name), name);
+                        checkValue(F, @field(value, f), name);
                     }
                     // A static array: the filter can point at it forever.
                     const Static = struct {
-                        const values: [fields.len]Value = v: {
-                            var out: [fields.len]Value = undefined;
-                            for (fields, &out) |f, *o| o.* = if (f.type == @TypeOf(null))
+                        const values: [n]Value = v: {
+                            var out: [n]Value = undefined;
+                            for (tuple.field_types, tuple.field_attrs, &out) |E, attrs, *o| o.* = if (E == @TypeOf(null))
                                 .null
                             else
-                                toValue(f.defaultValue().?);
+                                toValue(attrs.defaultValue(E).?);
                             break :v out;
                         };
                     };
                     break :blk .{ .many = .of(Value, &Static.values) };
                 },
                 .range => blk: {
-                    const fields = comptime tupleFields(V, op_name, name, "a tuple .{ lo, hi }");
-                    if (fields.len != 2)
+                    const n = (comptime tupleInfo(V, op_name, name, "a tuple .{ lo, hi }")).field_names.len;
+                    if (n != 2)
                         @compileError(std.fmt.comptimePrint("zom: {s} on '{s}' takes .{{ lo, hi }}, got {d} values", .{
-                            op_name, name, fields.len,
+                            op_name, name, n,
                         }));
                     checkValue(F, value[0], name);
                     checkValue(F, value[1], name);
@@ -1151,16 +1152,16 @@ pub fn Query(comptime T: type) type {
             return .{ .field = field, .op = op, .operand = .{ .many = .of(E, items) } };
         }
 
-        fn tupleFields(
+        fn tupleInfo(
             comptime V: type,
             comptime op_name: []const u8,
             comptime name: []const u8,
             comptime want: []const u8,
-        ) []const std.builtin.Type.StructField {
+        ) std.lang.Type.Struct {
             const info = @typeInfo(V);
             if (info != .@"struct" or !info.@"struct".is_tuple)
                 @compileError("zom: " ++ op_name ++ " on '" ++ name ++ "' takes " ++ want ++ ", got " ++ @typeName(V));
-            return info.@"struct".fields;
+            return info.@"struct";
         }
 
         /// `assertAssignable`, plus `assertLiteral` when the value is a literal.
@@ -1299,7 +1300,7 @@ pub fn Query(comptime T: type) type {
                 inline else => |tag| {
                     const E = Base(@FieldType(T, @tagName(tag)));
                     if (comptime @typeInfo(E) != .@"enum") return a.order(b);
-                    return std.math.order(@intFromEnum(toEnum(E, a)), @intFromEnum(toEnum(E, b)));
+                    return std.math.order(@backingInt(toEnum(E, a)), @backingInt(toEnum(E, b)));
                 },
             }
         }

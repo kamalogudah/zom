@@ -461,7 +461,8 @@ memory.
 
 ## How the client is fetched (the dependency decision)
 
-zom builds with Zig 0.16. There were three ways to reach TigerBeetle:
+zom builds with Zig 0.17 (it was on 0.16 when this was decided). There were
+three ways to reach TigerBeetle:
 
 1. **A source dependency on the tigerbeetle repo, importing its Zig
    client.** Ruled out. TigerBeetle's releases pin their own Zig: the
@@ -490,8 +491,10 @@ and these libraries:
 
 zom's `build.zig.zon` pins that tarball (1.3 MB) at tag `v0.17.9`, and the
 tag sets the client release. zom's `build.zig` translates the header with
-the built-in `b.addTranslateC` (no translate-c package needed) and links
-the library for the target. Any other target gets a build error that names
+the [translate-c](https://codeberg.org/ziglang/translate-c) package (Zig
+0.17 deprecated the built-in `b.addTranslateC`), with `default_init` so
+the client's structs keep zeroed defaults, and links the library for the
+target. Any other target gets a build error that names
 the supported ones. The module links libc, because the library uses libc
 for its thread and its I/O.
 
@@ -507,7 +510,8 @@ To move to another client release, pick the tag that matches your cluster
 zig fetch --save=tigerbeetle_go https://github.com/tigerbeetle/tigerbeetle-go/archive/refs/tags/v<release>.tar.gz
 ```
 
-If TigerBeetle releases on Zig 0.16 later, option 1 could replace this. The
+If TigerBeetle releases on the Zig that zom builds with, option 1 could
+replace this. The
 schemas would stay the same, because the Zig client's `Account` and
 `Transfer` have the same layout. Only `flags` would become the packed
 struct.

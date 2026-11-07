@@ -88,7 +88,7 @@ fn scenario(comptime G: type, gw: *G) !void {
         const rel = books.where(.pages, .gt, 300).order(.id, .asc).select(.{ .id, .title });
         const titles = try rel.toSlice(a);
         defer rel.free(a, titles);
-        try testing.expectEqual(2, @typeInfo(@TypeOf(titles[0])).@"struct".fields.len);
+        try testing.expectEqual(2, @typeInfo(@TypeOf(titles[0])).@"struct".field_names.len);
         try testing.expectEqual(3, titles.len);
         try testing.expectEqualStrings("Kintu", titles[0].title);
         try testing.expectEqualStrings("Petals of Blood", titles[1].title);

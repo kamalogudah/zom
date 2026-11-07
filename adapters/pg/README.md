@@ -13,10 +13,10 @@ It passes the whole `zom.lint` suite, has every capability including
 ## Setup
 
 zom-pg is the `zom_pg` module of the zom package. It imports zom and
-zom-sql, and needs pg.zig, pinned in zom's `build.zig.zon` to the
-`zig-0.16.0` branch at commit
-[`1f2bf9e`](https://github.com/karlseguin/pg.zig/commit/1f2bf9e5487b0884f907cd5a8cc751a02d5f7f9c)
-(pg.zig's `master` targets Zig 0.17). To move the pin:
+zom-sql, and needs pg.zig, pinned in zom's `build.zig.zon` to its
+`master` branch (which targets Zig 0.17) at commit
+[`a9fb170`](https://github.com/karlseguin/pg.zig/commit/a9fb17023e2f534dd1712628c80eaa9a551473a5).
+To move the pin:
 
 ```sh
 # from the repo root; then put `.lazy = true` back on the pg entry

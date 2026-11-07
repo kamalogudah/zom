@@ -422,14 +422,14 @@ pub fn expectSharedError(label: []const u8, comptime want: adapter.Error, result
     };
     const name = @errorName(want);
     const declared = comptime blk: {
-        const set = @typeInfo(E).error_set orelse break :blk true; // anyerror
-        for (set) |e| if (std.mem.eql(u8, e.name, name)) break :blk true;
+        const set = @typeInfo(E).error_set.error_names orelse break :blk true; // anyerror
+        for (set) |e| if (std.mem.eql(u8, e, name)) break :blk true;
         break :blk false;
     };
     if (!declared) {
         const members = comptime blk: {
             var out: []const u8 = "";
-            for (@typeInfo(E).error_set.?, 0..) |e, i| out = out ++ (if (i == 0) "" else ", ") ++ e.name;
+            for (@typeInfo(E).error_set.error_names.?, 0..) |e, i| out = out ++ (if (i == 0) "" else ", ") ++ e;
             break :blk out;
         };
         std.debug.print("zom.lint:   case: {s}: the call cannot return error.{s} (its errors: {s}); " ++

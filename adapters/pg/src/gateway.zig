@@ -392,7 +392,7 @@ fn PgDataset(comptime S: type) type {
             };
             defer compiled.deinit(a);
             // Counting the SELECT keeps its limit and offset.
-            const sql = try std.fmt.allocPrint(a, "SELECT COUNT(*) FROM ({s}) AS \"zom_count\"", .{compiled.sql});
+            const sql = try a.print("SELECT COUNT(*) FROM ({s}) AS \"zom_count\"", .{compiled.sql});
             defer a.free(sql);
 
             const conn = try self.source.acquire();
@@ -482,7 +482,7 @@ fn PgDataset(comptime S: type) type {
         /// return a row per affected row and count those.
         fn runWrite(self: *Self, compiled: zom_sql.Compiled) !usize {
             const a = self.allocator;
-            const sql = try std.fmt.allocPrint(a, "{s} RETURNING 1", .{compiled.sql});
+            const sql = try a.print("{s} RETURNING 1", .{compiled.sql});
             defer a.free(sql);
             const conn = try self.source.acquire();
             defer self.source.release(conn);
@@ -868,11 +868,11 @@ const connection_errors = [_][]const u8{
 /// For each field of `P`, the index of its column in `result`, found by
 /// name: `RETURNING *` lists the table's columns in table order, which
 /// need not be the struct's.
-fn columnMap(comptime P: type, result: *pg.Result) ![@typeInfo(P).@"struct".fields.len]usize {
-    var columns: [@typeInfo(P).@"struct".fields.len]usize = undefined;
-    inline for (@typeInfo(P).@"struct".fields, &columns) |f, *c| {
-        c.* = result.columnIndex(f.name) orelse {
-            log.debug("the result has no column '{s}'", .{f.name});
+fn columnMap(comptime P: type, result: *pg.Result) ![@typeInfo(P).@"struct".field_names.len]usize {
+    var columns: [@typeInfo(P).@"struct".field_names.len]usize = undefined;
+    inline for (@typeInfo(P).@"struct".field_names, &columns) |name, *c| {
+        c.* = result.columnIndex(name) orelse {
+            log.debug("the result has no column '{s}'", .{name});
             return error.MissingColumn;
         };
     }
@@ -882,20 +882,20 @@ fn columnMap(comptime P: type, result: *pg.Result) ![@typeInfo(P).@"struct".fiel
 /// Decodes one row into `P`, copying strings into `allocator`. On error
 /// the strings copied so far are freed.
 fn decodeRow(comptime P: type, row: *const pg.Row, columns: []const usize, allocator: Allocator) !P {
-    const fields = @typeInfo(P).@"struct".fields;
+    const info = @typeInfo(P).@"struct";
     var out: P = undefined;
     var done: usize = 0;
-    errdefer inline for (fields, 0..) |f, i| {
-        if (comptime zom.strings.isStringField(f.type)) {
-            if (i < done) switch (@typeInfo(f.type)) {
-                .optional => if (@field(out, f.name)) |s| allocator.free(s),
-                else => allocator.free(@field(out, f.name)),
+    errdefer inline for (info.field_names, info.field_types, 0..) |name, F, i| {
+        if (comptime zom.strings.isStringField(F)) {
+            if (i < done) switch (@typeInfo(F)) {
+                .optional => if (@field(out, name)) |s| allocator.free(s),
+                else => allocator.free(@field(out, name)),
             };
         }
     };
-    inline for (fields, 0..) |f, i| {
-        @field(out, f.name) = decodeField(f.type, row, columns[i], allocator) catch |err| {
-            log.debug("column '{s}' (oid {d}) could not be read as {s}: {t}", .{ f.name, row.oids[columns[i]], @typeName(f.type), err });
+    inline for (info.field_names, info.field_types, 0..) |name, F, i| {
+        @field(out, name) = decodeField(F, row, columns[i], allocator) catch |err| {
+            log.debug("column '{s}' (oid {d}) could not be read as {s}: {t}", .{ name, row.oids[columns[i]], @typeName(F), err });
             return err;
         };
         done = i + 1;
@@ -943,7 +943,7 @@ fn decodeField(comptime F: type, row: *const pg.Row, col: usize, allocator: Allo
         .pointer => {
             if (comptime !zom.strings.isFreeableString(F)) @compileError("zom-pg: string attributes must be slices such as []const u8, found " ++ @typeName(F));
             const raw = try row.get([]const u8, col);
-            if (comptime @typeInfo(F).pointer.sentinel() != null) return allocator.dupeZ(u8, raw);
+            if (comptime @typeInfo(F).pointer.sentinel() != null) return allocator.dupeSentinel(u8, raw, 0);
             return allocator.dupe(u8, raw);
         },
         else => @compileError("zom-pg: unsupported attribute type " ++ @typeName(F)),

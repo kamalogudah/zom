@@ -71,13 +71,13 @@ pub fn Container(comptime spec: anytype) type {
     var gateway_names: [gateway_fields.len][]const u8 = undefined;
     var gateway_types: [gateway_fields.len]type = undefined;
     var config_types: [gateway_fields.len]type = undefined;
-    var config_attrs: [gateway_fields.len]std.builtin.Type.StructField.Attributes = undefined;
-    for (gateway_fields, 0..) |f, i| {
-        const G = @field(spec.gateways, f.name);
+    var config_attrs: [gateway_fields.len]std.lang.Type.Struct.FieldAttributes = undefined;
+    for (gateway_fields, 0..) |name, i| {
+        const G = @field(spec.gateways, name);
         if (@TypeOf(G) != type)
-            @compileError("zom: container gateway '" ++ f.name ++ "' must be a gateway type, found a value of type `" ++ @typeName(@TypeOf(G)) ++ "`");
+            @compileError("zom: container gateway '" ++ name ++ "' must be a gateway type, found a value of type `" ++ @typeName(@TypeOf(G)) ++ "`");
         _ = adapter.Adapter(G);
-        gateway_names[i] = f.name;
+        gateway_names[i] = name;
         gateway_types[i] = G;
         config_types[i] = G.Config;
         config_attrs[i] = .{ .default_value_ptr = defaultConfig(G.Config) };
@@ -86,11 +86,11 @@ pub fn Container(comptime spec: anytype) type {
     var relation_names: [relation_fields.len][]const u8 = undefined;
     var relation_types: [relation_fields.len]type = undefined;
     var relation_gateways: [relation_fields.len][]const u8 = undefined;
-    for (relation_fields, 0..) |f, i| {
-        const entry = @field(spec.relations, f.name);
-        const S, const gateway = relationEntry(f.name, entry);
-        const g = gatewayIndex(&gateway_names, f.name, gateway);
-        relation_names[i] = f.name;
+    for (relation_fields, 0..) |name, i| {
+        const entry = @field(spec.relations, name);
+        const S, const gateway = relationEntry(name, entry);
+        const g = gatewayIndex(&gateway_names, name, gateway);
+        relation_names[i] = name;
         relation_types[i] = Relation(S, gateway_types[g]);
         relation_gateways[i] = gateway;
     }
@@ -270,8 +270,8 @@ fn initGateway(comptime G: type, allocator: Allocator, config: G.Config) !G {
     return G.init(allocator, config);
 }
 
-/// The fields of `spec.<name>`, which must be a struct literal.
-fn specFields(comptime spec: anytype, comptime name: []const u8) []const std.builtin.Type.StructField {
+/// The field names of `spec.<name>`, which must be a struct literal.
+fn specFields(comptime spec: anytype, comptime name: []const u8) []const [:0]const u8 {
     const Spec = @TypeOf(spec);
     if (@typeInfo(Spec) != .@"struct")
         @compileError("zom: Container expects `.{ .gateways = .{ ... }, .relations = .{ ... } }`, found `" ++ @typeName(Spec) ++ "`");
@@ -280,7 +280,7 @@ fn specFields(comptime spec: anytype, comptime name: []const u8) []const std.bui
     const T = @TypeOf(@field(spec, name));
     if (@typeInfo(T) != .@"struct")
         @compileError("zom: Container `." ++ name ++ "` must be a struct literal, found `" ++ @typeName(T) ++ "`");
-    return @typeInfo(T).@"struct".fields;
+    return @typeInfo(T).@"struct".field_names;
 }
 
 /// Splits `.{ Schema, .gateway }` into the schema and the gateway's name.
@@ -288,7 +288,7 @@ fn relationEntry(comptime relation: []const u8, comptime entry: anytype) struct 
     const usage = "zom: container relation '" ++ relation ++ "' must be `.{ Schema, .gateway_name }`";
     const E = @TypeOf(entry);
     const info = @typeInfo(E);
-    if (info != .@"struct" or !info.@"struct".is_tuple or info.@"struct".fields.len != 2)
+    if (info != .@"struct" or !info.@"struct".is_tuple or info.@"struct".field_names.len != 2)
         @compileError(usage ++ ", found `" ++ @typeName(E) ++ "`");
     if (@TypeOf(entry[0]) != type)
         @compileError(usage ++ ": the first element must be a zom.Schema type");
@@ -307,8 +307,8 @@ fn gatewayIndex(comptime names: []const []const u8, comptime relation: []const u
 /// A pointer to `C{}` when every field of `C` has a default, else null.
 fn defaultConfig(comptime C: type) ?*const anyopaque {
     if (@typeInfo(C) != .@"struct") return null;
-    for (@typeInfo(C).@"struct".fields) |f| {
-        if (f.default_value_ptr == null) return null;
+    for (@typeInfo(C).@"struct".field_attrs) |attrs| {
+        if (attrs.default_value_ptr == null) return null;
     }
     const value: C = .{};
     return @ptrCast(&value);

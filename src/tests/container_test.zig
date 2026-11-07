@@ -40,11 +40,11 @@ test "Config fields default only when the gateway's Config is all defaults" {
         .gateways = .{ .mem = zom.memory.Gateway, .needs = Fake("needs", .{}), .opt = Fake("opt", .{}) },
         .relations = .{},
     });
-    const fields = @typeInfo(App.Config).@"struct".fields;
-    try testing.expect(fields[0].type == zom.memory.Gateway.Config);
-    try testing.expect(fields[0].default_value_ptr != null);
+    const info = @typeInfo(App.Config).@"struct";
+    try testing.expect(info.field_types[0] == zom.memory.Gateway.Config);
+    try testing.expect(info.field_attrs[0].default_value_ptr != null);
     // Fake's Config has a field without a default.
-    try testing.expect(fields[1].default_value_ptr == null);
+    try testing.expect(info.field_attrs[1].default_value_ptr == null);
 
     const Defaults = zom.Container(.{
         .gateways = .{ .a = Defaulted, .b = zom.memory.Gateway },

@@ -24,7 +24,7 @@ pub fn build(b: *std.Build) void {
     // The database URL comes from DATABASE_URL, or from the first argument:
     // `zig build run -- postgres://...`.
     const run = b.addRunArtifact(exe);
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     const run_step = b.step("run", "Sign two users up in transactions against Postgres (needs DATABASE_URL)");
     run_step.dependOn(&run.step);
 

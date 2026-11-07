@@ -146,7 +146,8 @@ pub const Format = struct {
 
     fn loadRecords(comptime S: type, ctx: LoadContext, records: []const yaml.Record, store: *zom.memory.Store(S)) !void {
         const T = S.Tuple;
-        const fields = @typeInfo(T).@"struct".fields;
+        const info = @typeInfo(T).@"struct";
+        const fields = info.field_names;
         const index = comptime zom.file.fieldIndex(T);
         const ignore = ctx.config.unknown_keys == .ignore;
 
@@ -170,16 +171,16 @@ pub const Format = struct {
                     columns[fi] = fi;
                 } else nulls[fi] = f.line;
             }
-            inline for (fields, 0..) |f, fi| {
-                if (comptime zom.file.isRequired(f)) {
-                    if (columns[fi] == null and nulls[fi] == null) problems.add("missing key \"{s}\"", .{f.name});
+            inline for (info.field_names, info.field_types, info.field_attrs, 0..) |field_name, F, attrs, fi| {
+                if (comptime zom.file.isRequired(F, attrs)) {
+                    if (columns[fi] == null and nulls[fi] == null) problems.add("missing key \"{s}\"", .{field_name});
                 }
             }
             if (problems.finish()) return error.SchemaMismatch;
 
-            inline for (fields, 0..) |f, fi| {
-                if (@typeInfo(f.type) != .optional) if (nulls[fi]) |line| {
-                    ctx.diagnostic.set("{s}:{d}: {s}[{d}].{s}: null, but the field is not optional", .{ ctx.file, line, S.name, i, f.name });
+            inline for (info.field_names, info.field_types, 0..) |field_name, F, fi| {
+                if (@typeInfo(F) != .optional) if (nulls[fi]) |line| {
+                    ctx.diagnostic.set("{s}:{d}: {s}[{d}].{s}: null, but the field is not optional", .{ ctx.file, line, S.name, i, field_name });
                     return error.UnexpectedNull;
                 };
             }
@@ -194,9 +195,9 @@ pub const Format = struct {
             };
             // `decodeRow` gave a missing value the field's default; an
             // explicit null wins over it.
-            inline for (fields, 0..) |f, fi| {
-                if (@typeInfo(f.type) == .optional) {
-                    if (nulls[fi] != null) @field(tuple, f.name) = null;
+            inline for (info.field_names, info.field_types, 0..) |field_name, F, fi| {
+                if (@typeInfo(F) == .optional) {
+                    if (nulls[fi] != null) @field(tuple, field_name) = null;
                 }
             }
             _ = try store.load(tuple);
@@ -226,12 +227,12 @@ pub fn writeDataset(w: *Io.Writer, comptime T: type, name: []const u8, rows: []c
 }
 
 fn writeRecord(w: *Io.Writer, comptime T: type, row: T, indent: []const u8, buf: *Io.Writer.Allocating) WriteError!void {
-    inline for (@typeInfo(T).@"struct".fields, 0..) |f, i| {
+    inline for (@typeInfo(T).@"struct".field_names, 0..) |name, i| {
         try w.writeAll(indent);
         try w.writeAll(if (i == 0) "- " else "  ");
-        try yaml.writeScalar(w, f.name, .plain_if_safe);
+        try yaml.writeScalar(w, name, .plain_if_safe);
         try w.writeAll(": ");
-        try writeValue(w, @field(row, f.name), buf);
+        try writeValue(w, @field(row, name), buf);
         try w.writeByte('\n');
     }
 }

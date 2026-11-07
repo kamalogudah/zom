@@ -161,7 +161,7 @@ checks these.
 - `zom.sql.compileSelect` moves out to `zom-sql`, so core has no SQL in it.
 - `zom-sqlite` (`adapters/sqlite`) uses no third-party Zig wrapper. It fetches the
   SQLite amalgamation as a `build.zig.zon` URL dependency, compiles it with
-  `addCSourceFile`, and binds `sqlite3.h` with `b.addTranslateC`. zom only
+  `addCSourceFile`, and binds `sqlite3.h` with the translate-c package. zom only
   needs about 15 functions (`open_v2`, `prepare_v3`, `bind_*`, `step`,
   `column_*`, `finalize`, `extended_errcode`, `close_v2`), since binding goes
   through `Value` and decoding through `zom.codec`. zig-sqlite's typed

@@ -79,7 +79,7 @@ test "clear drops every row and the store can be refilled" {
     var store = Store.init(testing.allocator);
     defer store.deinit();
 
-    const long = "n" ** 4096;
+    const long = &@as([4096]u8, @splat('n'));
     _ = try store.insertMany(&.{ user(1, long, 1), user(2, long, 2) });
     store.clear();
     try testing.expectEqual(@as(usize, 0), store.rows().len);
@@ -95,7 +95,7 @@ fn loadManyUnderAllocationFailure(allocator: std.mem.Allocator) !void {
     defer store.deinit();
     _ = try store.insert(user(1, "First", 1));
 
-    const long = "n" ** 4096;
+    const long = &@as([4096]u8, @splat('n'));
     const n = store.loadMany(&.{ user(2, long, 2), user(3, long, 3), user(4, long, 4) }) catch |err| {
         try testing.expectEqual(@as(usize, 1), store.rows().len);
         return err;
@@ -111,7 +111,7 @@ test "a loadMany that runs out of memory loads nothing" {
 fn loadUnderAllocationFailure(allocator: std.mem.Allocator) !void {
     var store = Store.init(allocator);
     defer store.deinit();
-    _ = store.load(user(1, "n" ** 4096, 1)) catch |err| {
+    _ = store.load(user(1, &@as([4096]u8, @splat('n')), 1)) catch |err| {
         try testing.expectEqual(@as(usize, 0), store.rows().len);
         return err;
     };

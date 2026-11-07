@@ -146,38 +146,38 @@ pub fn decodeField(comptime F: type, text: []const u8, opts: Options) DecodeErro
 pub fn decodeRow(comptime T: type, cells: []const []const u8, opts: Options, diag: ?*Diagnostic) DecodeError!T {
     if (@typeInfo(T) != .@"struct")
         @compileError("zom.codec.decodeRow: expected a tuple struct, got " ++ @typeName(T));
-    const fields = @typeInfo(T).@"struct".fields;
-    if (opts.columns) |c| std.debug.assert(c.len == fields.len);
+    const info = @typeInfo(T).@"struct";
+    if (opts.columns) |c| std.debug.assert(c.len == info.field_names.len);
 
     var out: T = undefined;
-    inline for (fields, 0..) |f, i| {
+    inline for (info.field_names, info.field_types, info.field_attrs, 0..) |name, F, attrs, i| {
         const index: ?usize = if (opts.columns) |c| c[i] else i;
         const cell: ?[]const u8 = if (index) |x| (if (x < cells.len) cells[x] else null) else null;
         const column = if (index) |x| x + 1 else 0;
 
         if (cell) |text| {
-            @field(out, f.name) = decodeField(f.type, text, opts) catch |err| {
+            @field(out, name) = decodeField(F, text, opts) catch |err| {
                 if (diag) |d| d.* = .{
                     .row = opts.row,
                     .column = column,
-                    .field = f.name,
+                    .field = name,
                     .text = text,
                     .err = err,
-                    .expected = comptime expected(f.type),
+                    .expected = comptime expected(F),
                 };
                 return err;
             };
-        } else if (comptime f.defaultValue()) |default| {
-            @field(out, f.name) = default;
-        } else if (@typeInfo(f.type) == .optional) {
-            @field(out, f.name) = null;
+        } else if (comptime attrs.defaultValue(F)) |default| {
+            @field(out, name) = default;
+        } else if (@typeInfo(F) == .optional) {
+            @field(out, name) = null;
         } else {
             if (diag) |d| d.* = .{
                 .row = opts.row,
                 .column = column,
-                .field = f.name,
+                .field = name,
                 .err = error.MissingField,
-                .expected = comptime expected(f.type),
+                .expected = comptime expected(F),
             };
             return error.MissingField;
         }
@@ -216,9 +216,9 @@ pub fn encodeField(writer: *std.Io.Writer, value: anytype, opts: Options) Encode
 pub fn encodeRow(writer: *std.Io.Writer, comptime T: type, row: T, opts: Options, sep: []const u8) EncodeError!void {
     if (@typeInfo(T) != .@"struct")
         @compileError("zom.codec.encodeRow: expected a tuple struct, got " ++ @typeName(T));
-    inline for (@typeInfo(T).@"struct".fields, 0..) |f, i| {
+    inline for (@typeInfo(T).@"struct".field_names, 0..) |name, i| {
         if (i != 0) try writer.writeAll(sep);
-        try encodeField(writer, @field(row, f.name), opts);
+        try encodeField(writer, @field(row, name), opts);
     }
 }
 
@@ -247,7 +247,7 @@ fn isNull(text: []const u8, opts: Options) bool {
 
 fn isText(comptime F: type) bool {
     return switch (@typeInfo(F)) {
-        .pointer => |p| p.size == .slice and p.child == u8 and p.is_const,
+        .pointer => |p| p.size == .slice and p.child == u8 and p.attrs.@"const",
         else => false,
     };
 }
@@ -274,7 +274,7 @@ fn expected(comptime F: type) []const u8 {
         .bool => "a boolean (true, false, 1, 0, t, f)",
         .@"enum" => |e| blk: {
             var s: []const u8 = "one of:";
-            for (e.fields, 0..) |tag, i| s = s ++ (if (i == 0) " " else ", ") ++ tag.name;
+            for (e.field_names, 0..) |tag, i| s = s ++ (if (i == 0) " " else ", ") ++ tag;
             break :blk s;
         },
         else => "text",

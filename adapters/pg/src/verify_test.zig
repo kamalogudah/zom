@@ -65,7 +65,7 @@ fn expectDiagnostics(sqls: []const []const u8, expected: []const u8) !void {
     defer diag.deinit();
     const result = g.verify(Users, &diag);
 
-    const text = try std.fmt.allocPrint(testing.allocator, "{f}", .{diag});
+    const text = try testing.allocator.print("{f}", .{diag});
     defer testing.allocator.free(text);
     try testing.expectEqualStrings(expected, text);
     if (expected.len == 0) try result else try testing.expectError(error.SchemaMismatch, result);

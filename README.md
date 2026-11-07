@@ -1,6 +1,6 @@
 # zom
 
-A [rom-rb](https://github.com/hanakai-rb/rom) style data mapping toolkit for Zig 0.16.
+A [rom-rb](https://github.com/hanakai-rb/rom) style data mapping toolkit for Zig 0.17.
 
 rom's core idea carries over directly: persistence is split into small layers
 that each do one thing, and nothing is an "active record".
@@ -47,14 +47,15 @@ part by part.
 
 ## Install
 
-zom needs **Zig 0.16.0**. Add it to your project:
+zom needs **Zig 0.17.1**. Add it to your project:
 
 ```sh
-zig fetch --save git+https://github.com/kamalogudah/zom#v0.16.1
+zig fetch --save git+https://github.com/kamalogudah/zom#v0.17.0
 ```
 
-zom's version tracks Zig's: the `v0.16.x` tags build with Zig 0.16.0. Use
-`#main` for the latest unreleased changes.
+zom's version tracks Zig's: the `v0.17.x` tags build with Zig 0.17.1, and
+the `v0.16.x` tags with Zig 0.16.0. Use `#main` for the latest unreleased
+changes.
 
 zom is one package with a module per adapter. Depend on it once and import
 the modules you use:

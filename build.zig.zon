@@ -1,14 +1,14 @@
 .{
     .name = .zom,
-    .version = "0.16.1",
+    .version = "0.17.0",
     .fingerprint = 0x77415e19c6fe7460,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.1",
     .dependencies = .{
         // Only zom_pg uses it, and only with `-Dpg=true` (`.pg = true` from a
         // dependent's build.zig), so applications without Postgres never fetch it.
         .pg = .{
-            .url = "git+https://github.com/karlseguin/pg.zig#1f2bf9e5487b0884f907cd5a8cc751a02d5f7f9c",
-            .hash = "pg-0.0.0-Wp_7gRBNBwB5UeWisHZe3lpWmy9swOS61GYbZCtOXaLE",
+            .url = "git+https://github.com/karlseguin/pg.zig#a9fb17023e2f534dd1712628c80eaa9a551473a5",
+            .hash = "pg-0.0.0-Wp_7gRJyBwC7ca9P685_O1w7RLoLXAdYpDMgHEmkDJpM",
             .lazy = true,
         },
         // TigerBeetle's C client (tb_client), prebuilt: tigerbeetle-go ships
@@ -24,6 +24,16 @@
         .sqlite = .{
             .url = "https://www.sqlite.org/2026/sqlite-amalgamation-3540100.zip",
             .hash = "N-V-__8AAETTsABEodUZZFAyfdAm9hEyqBXuLw9pRSO0vFh9",
+            .lazy = true,
+        },
+        // Zig 0.17 removed `@cImport` and deprecated `b.addTranslateC`; this
+        // package replaces them. zom-sqlite and zom-tigerbeetle translate their
+        // C headers with it, and it is the commit pg.zig pins, so the three
+        // share one copy. Fetched only with `-Dsqlite=true` or
+        // `-Dtigerbeetle=true` (pg.zig fetches its own with `-Dpg=true`).
+        .translate_c = .{
+            .url = "git+https://codeberg.org/ziglang/translate-c?ref=2.0.1#4f5ad374e50d1a98d3da79fa5d3bda9949103bf7",
+            .hash = "translate_c-2.0.1-Q_BUWmpOBwCIhy--up1q6cl3OlIQE86iJU8R-bZ01aPj",
             .lazy = true,
         },
     },

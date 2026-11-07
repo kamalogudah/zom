@@ -504,14 +504,14 @@ fn TbDataset(comptime S: type) type {
             // `.linked_event_failed`; the cause is the other code.
             var cause: ?ChainFailure = null;
             for (replies, 0..) |r, index| {
-                if (r.status == @intFromEnum(Code.created)) continue;
-                const code: Code = @enumFromInt(r.status);
+                if (r.status == @backingInt(Code.created)) continue;
+                const code: Code = @fromBackingInt(r.status);
                 if (cause == null or (cause.?.code == .linked_event_failed and code != .linked_event_failed))
                     cause = .{ .index = index, .code = code };
             }
             const found = cause orelse return rows.len;
             if (failure) |out| out.* = found;
-            return errorFor(@intFromEnum(found.code)).?;
+            return errorFor(@backingInt(found.code)).?;
         }
 
         /// The rows matching `query`, through `lookup_*` or `query_*`
@@ -673,7 +673,7 @@ fn TbDataset(comptime S: type) type {
         }
 
         fn errorFor(status: u32) ?InsertError {
-            const code: Code = @enumFromInt(status);
+            const code: Code = @fromBackingInt(status);
             const err = results.errorOf(Code, CreateError, code) orelse return null;
             if (err == error.UnknownResult) log.warn("unknown {s} result code {d}", .{ @typeName(Code), status });
             return err;
@@ -701,10 +701,10 @@ fn TbDataset(comptime S: type) type {
                     else => |e| return e,
                 };
                 for (replies, start..) |r, index| {
-                    if (r.status == @intFromEnum(Code.created)) {
+                    if (r.status == @backingInt(Code.created)) {
                         created += 1;
                     } else {
-                        try sink.failed(index, @as(Code, @enumFromInt(r.status)));
+                        try sink.failed(index, @as(Code, @fromBackingInt(r.status)));
                     }
                 }
                 start = end;
@@ -744,7 +744,7 @@ fn TbDataset(comptime S: type) type {
             linked_event_failed: bool = false,
 
             fn failed(self: *FirstError, _: usize, code: Code) error{}!void {
-                const err = errorFor(@intFromEnum(code)).?;
+                const err = errorFor(@backingInt(code)).?;
                 if (err == error.LinkedEventFailed) {
                     self.linked_event_failed = true;
                 } else if (self.err == null) {

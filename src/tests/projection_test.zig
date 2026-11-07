@@ -9,9 +9,9 @@ const Posts = fixtures.Posts;
 const seed = fixtures.seed;
 
 fn fieldNames(comptime T: type) []const []const u8 {
-    const fields = @typeInfo(T).@"struct".fields;
+    const fields = @typeInfo(T).@"struct".field_names;
     var names: [fields.len][]const u8 = undefined;
-    for (fields, 0..) |f, i| names[i] = f.name;
+    for (fields, 0..) |f, i| names[i] = f;
     const final = names;
     return &final;
 }
@@ -32,11 +32,11 @@ test "select reads a struct with exactly the selected fields" {
     defer testing.allocator.free(rows);
 
     const Row = @typeInfo(@TypeOf(rows)).pointer.child;
-    const fields = @typeInfo(Row).@"struct".fields;
-    try testing.expectEqual(2, fields.len);
+    const types = @typeInfo(Row).@"struct".field_types;
+    try testing.expectEqual(2, types.len);
     try expectFieldNames(Row, &.{ "id", "name" });
-    try testing.expectEqual(u32, fields[0].type);
-    try testing.expectEqual([]const u8, fields[1].type);
+    try testing.expectEqual(u32, types[0]);
+    try testing.expectEqual([]const u8, types[1]);
 
     try testing.expectEqual(3, rows.len);
     try testing.expectEqual(1, rows[0].id);
@@ -47,10 +47,10 @@ test "select reads a struct with exactly the selected fields" {
 test "Project keeps the given order, the types and the defaults" {
     const P = zom.Project(UserTuple, .{ .role, .deleted_at, .id });
     try expectFieldNames(P, &.{ "role", "deleted_at", "id" });
-    const fields = @typeInfo(P).@"struct".fields;
-    try testing.expectEqual(fixtures.Role.member, fields[0].defaultValue().?);
-    try testing.expectEqual(@as(?i64, null), fields[1].defaultValue().?);
-    try testing.expectEqual(@as(?u32, null), fields[2].defaultValue());
+    const info = @typeInfo(P).@"struct";
+    try testing.expectEqual(fixtures.Role.member, info.field_attrs[0].defaultValue(info.field_types[0]).?);
+    try testing.expectEqual(@as(?i64, null), info.field_attrs[1].defaultValue(info.field_types[1]).?);
+    try testing.expectEqual(@as(?u32, null), info.field_attrs[2].defaultValue(info.field_types[2]));
 
     const p: P = .{ .id = 7 };
     try testing.expectEqual(fixtures.Role.member, p.role);

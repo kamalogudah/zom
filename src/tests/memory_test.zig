@@ -159,11 +159,11 @@ test "every string type is copied on insert and update" {
     defer gw.deinit();
     const contacts = try Contacts.init(&gw);
 
-    const name = try testing.allocator.dupeZ(u8, "Achieng");
+    const name = try testing.allocator.dupeSentinel(u8, "Achieng", 0);
     defer testing.allocator.free(name);
     const handle = try testing.allocator.dupe(u8, "achieng");
     defer testing.allocator.free(handle);
-    const nickname = try testing.allocator.dupeZ(u8, "Chi");
+    const nickname = try testing.allocator.dupeSentinel(u8, "Chi", 0);
     defer testing.allocator.free(nickname);
 
     _ = try contacts.create(.{ .id = 1, .name = name, .handle = handle, .nickname = nickname }).commit();
@@ -207,7 +207,7 @@ fn updateUnderAllocationFailure(allocator: std.mem.Allocator) !void {
     defer allocator.free(before);
 
     // Long enough that every copy needs a fresh arena buffer.
-    const name = "n" ** 4096;
+    const name = &@as([4096]u8, @splat('n'));
     const changed = users.update().set(.name, name).set(.email, name).commit() catch |err| {
         const after = try users.order(.id, .asc).toSlice(testing.allocator);
         defer testing.allocator.free(after);
@@ -270,7 +270,7 @@ fn insertManyUnderAllocationFailure(allocator: std.mem.Allocator) !void {
     try seed(users, try Posts.init(&gw));
 
     // Long enough that every copy needs a fresh arena buffer.
-    const long = "n" ** 4096;
+    const long = &@as([4096]u8, @splat('n'));
     const batch = [_]fixtures.UserTuple{
         .{ .id = 4, .name = long, .email = long, .age = 1 },
         .{ .id = 5, .name = long, .email = long, .age = 2 },
