@@ -199,15 +199,18 @@ test "joining the same association again changes nothing" {
     try expectIds(&.{ 1, 3 }, rows);
 }
 
-test "a joined relation refuses update and delete" {
+test "joined update and delete use the matching semi-join rows" {
     var f: Fixture = .{ .gw = undefined };
     try f.init();
     defer f.deinit();
 
     const joined = f.users.join(.posts).whereJoined(.posts, .published, .eq, false);
-    try testing.expectError(error.JoinedWrite, joined.delete());
-    try testing.expectError(error.JoinedWrite, joined.update().set(.age, 1).commit());
-    try testing.expectEqual(4, try f.users.count());
+    try testing.expectEqual(2, try joined.update().set(.age, 1).commit());
+    try testing.expectEqual(0, try f.users.join(.posts).whereJoined(.posts, .published, .eq, false).where(.age, .gt, 1).delete());
+    try testing.expectEqual(1, try f.users.join(.posts).whereJoined(.posts, .published, .eq, true).where(.id, .eq, 2).delete());
+    try testing.expectEqual(2, try joined.delete());
+    try testing.expectEqual(1, try f.users.count());
+    try testing.expectEqual(4, (try f.users.one(testing.allocator)).?.id);
 }
 
 test "join and combine together: authors with a published post, with all their posts" {

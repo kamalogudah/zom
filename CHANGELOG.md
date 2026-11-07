@@ -9,6 +9,9 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- Joined `update` and `delete` use the same semi-join selection as reads.
+  zom-sql renders a correlated `EXISTS` predicate, and memory selects
+  matching rows before mutation. A join alone bounds a SQL write. (#81)
 - Boolean groups and runtime lists on joined rows:
   `whereJoinedAny(.assoc, conds)` and `whereJoinedNot(.assoc, cond)` take
   the conditions `whereAny` / `whereNot` take, over the joined tuple (so

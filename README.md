@@ -381,8 +381,8 @@ relation and never touch the dataset. `field` is always an enum literal, and
 
 On a `.fallback` relation, `update().commit()` and `delete()` return
 `error.UnsupportedFilter` when the dataset can't evaluate every filter:
-writes never run in memory. On a joined relation they return
-`error.JoinedWrite`.
+writes never run in memory. Joined writes use the same semi-join selection
+as joined reads.
 
 What `where` takes for each op. Every value is type-checked against the
 attribute, and a comptime value (`.c`, `300`) must fit it.
@@ -985,9 +985,9 @@ its key is in it, in O(users + posts).
 
 A query holds one join: joining the same association again changes
 nothing, and joining a second one panics, as does `whereJoined` without
-the `join`. `update` and `delete` on a joined relation return
-`error.JoinedWrite`, because which rows a join keeps depends on the other
-table.
+the `join`. `update` and `delete` on a joined relation affect each matching
+source row once. The SQL compiler uses a correlated `EXISTS` subquery;
+memory snapshots the matching rows before changing them.
 
 #### Associated creates
 
@@ -1339,7 +1339,7 @@ through `zom.query.toValue`: optional fields set to null bind `.null`, and
 enums bind their tag name.
 
 **Unfiltered writes are refused.** `compileUpdate` and `compileDelete` return
-`error.UnboundedWrite` for a query with no filters, so a forgotten `where`
+`error.UnboundedWrite` for a query with no filters or join, so a forgotten `where`
 can't empty or rewrite a table. Set `query.all = true` to mean it. `order`,
 `limit` and `offset` don't count as filters, and the write statements ignore
 them, as the memory adapter does. An update with no changes is
@@ -1423,11 +1423,10 @@ const newest = try accounts.where(.ledger, .eq, 700).order(.timestamp, .desc).li
 | `error.ValueOutOfRange` | `update().set(...).commit()` with a runtime value that does not fit the attribute, e.g. a `u32` holding 300 set on a `u8`. |
 | `error.MoreThanOneTuple` | `one`. |
 | `error.DatasetTypeMismatch` | `memory.Gateway.dataset` (and so `Relation.init`), when two different schema types share a dataset name. |
-| `error.UnboundedWrite` | zom-sql's `compileUpdate` and `compileDelete`, for a query with no filters and `all` not set. |
+| `error.UnboundedWrite` | zom-sql's `compileUpdate` and `compileDelete`, for a query with no filters or join and `all` not set. |
 | `error.ScanLimitExceeded` | zom-tigerbeetle's reads and counts, after fetching `Config.scan_max` records without finishing. |
 | `error.EmptyUpdate` | zom-sql's `compileUpdate`, with no changes. |
 | `error.UnsupportedFilter` | `update().commit()` and `delete()` on a `.fallback` relation with a filter its dataset can't evaluate. |
-| `error.JoinedWrite` | `update().commit()` and `delete()` on a relation with a `join`, and zom-sql's `compileUpdate` / `compileDelete` on a joined query. |
 | `error.JoinUnavailable` | A join read on a `memory.Store` that no `memory.Gateway` handed out, so it has no other dataset to join. |
 | `error.OutOfMemory` | Anything that takes or uses an allocator. |
 

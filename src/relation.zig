@@ -471,11 +471,8 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
         /// The query `update` and `delete` hand to the dataset. Writes never
         /// run in memory: on a `.fallback` relation whose filters the
         /// dataset can't all evaluate, this is `error.UnsupportedFilter`.
-        /// On a joined relation it is `error.JoinedWrite`: which rows a
-        /// join keeps depends on another dataset, and writes only ever
-        /// filter on their own.
-        pub fn writeQuery(self: Self) error{ UnsupportedFilter, JoinedWrite }!Q {
-            if (self.query.join != null) return error.JoinedWrite;
+        /// Joined writes are evaluated by the dataset as a semi-join.
+        pub fn writeQuery(self: Self) error{UnsupportedFilter}!Q {
             if (comptime mode == .strict) return self.query;
             var it = self.query.topNodes();
             while (it.next()) |i| {
@@ -642,8 +639,8 @@ pub fn RelationWith(comptime S: type, comptime Gateway: type, comptime Out: type
         /// on a `.fallback` relation, because a join reads another dataset
         /// and can't run in memory on this one's rows. A query has at most
         /// one join: joining the same association again changes nothing,
-        /// and joining a second one panics. `update` and `delete` on a
-        /// joined relation return `error.JoinedWrite`.
+        /// and joining a second one panics. `update` and `delete` keep
+        /// only source rows matched by the join.
         pub fn join(self: Self, comptime assoc: @TypeOf(.enum_literal)) Self {
             const a = comptime S.association(assoc);
             comptime requireJoin(a, "join(." ++ a.name ++ ")");

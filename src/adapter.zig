@@ -114,9 +114,9 @@ pub const Supports = struct {
     /// which set `query.join` (a `zom.Join`). A dataset with it must read
     /// that join in `read` and `count`: keep only the rows with at least one
     /// row of the joined dataset matching the join's keys and filters, each
-    /// once. It is never evaluated in memory, so a relation without it can't
-    /// join even in `.fallback` mode. Writes never see a join (they return
-    /// `error.JoinedWrite` first).
+    /// once. If it also supports update or delete, those operations must
+    /// apply the same semi-join selection. A relation without it can't join
+    /// even in `.fallback` mode.
     join: bool = false,
 
     /// Every feature, e.g. for an adapter that evaluates queries in memory.

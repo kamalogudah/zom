@@ -220,10 +220,11 @@ fn scenario(comptime G: type, gw: *G) !void {
         try expectIds(&.{12}, rows);
     }
 
-    // Writes never take a join, and nothing changed.
-    try testing.expectError(error.JoinedWrite, users.join(.posts).delete());
-    try testing.expectError(error.JoinedWrite, users.join(.posts).update().set(.age, 1).commit());
-    try testing.expectEqual(4, try users.count());
+    // The same joined writes run against memory and PostgreSQL.
+    try testing.expectEqual(2, try users.join(.posts).whereJoined(.posts, .published, .eq, false).update().set(.age, 1).commit());
+    try testing.expectEqual(0, try posts.join(.author).whereJoined(.author, .age, .eq, 1).where(.id, .eq, 15).delete());
+    try testing.expectEqual(2, try posts.join(.author).whereJoined(.author, .age, .eq, 1).where(.published, .eq, false).delete());
+    try testing.expectEqual(4, try posts.count());
 }
 
 fn expectIds(expected: []const u32, rows: anytype) !void {

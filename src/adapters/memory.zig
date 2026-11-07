@@ -332,7 +332,7 @@ pub fn Store(comptime S: type) type {
             var hits: std.ArrayList(T) = .empty;
             errdefer hits.deinit(allocator);
             if (query.join) |*j| {
-                try self.joined(j, &query, allocator, &hits);
+                try self.joined(j, &query, allocator, &hits, null);
             } else for (self.list.items) |row| {
                 if (query.matches(row)) try hits.append(allocator, row);
             }
@@ -346,13 +346,13 @@ pub fn Store(comptime S: type) type {
         /// Appends to `hits` the rows matching `query` that `j` keeps. The
         /// association is looked up by name among `S`'s, so each one gets
         /// its own typed semi-join.
-        fn joined(self: *Self, j: *const q.Join, query: *const Q, allocator: Allocator, hits: *std.ArrayList(T)) !void {
+        fn joined(self: *Self, j: *const q.Join, query: *const Q, allocator: Allocator, hits: *std.ArrayList(T), selected: ?[]bool) !void {
             inline for (S.association_names) |name| {
                 // A custom association can't be joined (`relation.join`
                 // refuses it), and has no keys to semi-join on.
                 if (comptime @field(S.associations, name).kind == .custom) continue;
                 if (std.mem.eql(u8, name, j.assoc))
-                    return self.semiJoin(@field(S.associations, name), j, query, allocator, hits);
+                    return self.semiJoin(@field(S.associations, name), j, query, allocator, hits, selected);
             }
             // `relation.join` only stores names of `S`'s associations.
             return error.UnknownAssociation;
@@ -365,6 +365,7 @@ pub fn Store(comptime S: type) type {
             query: *const Q,
             allocator: Allocator,
             hits: *std.ArrayList(T),
+            selected: ?[]bool,
         ) !void {
             const source_key = if (a.kind == .has_many) a.primary_key else a.foreign_key;
             const target_key = if (a.kind == .has_many) a.foreign_key else a.primary_key;
@@ -387,10 +388,12 @@ pub fn Store(comptime S: type) type {
                 const key: Key = keyOf(Key, @field(row, target_key)) orelse continue;
                 try keys.put(allocator, key, {});
             }
-            for (self.list.items) |row| {
+            for (self.list.items, 0..) |row, i| {
                 if (!query.matches(row)) continue;
                 const key: Key = keyOf(Key, @field(row, source_key)) orelse continue;
-                if (keys.contains(key)) try hits.append(allocator, row);
+                if (keys.contains(key)) {
+                    if (selected) |flags| flags[i] = true else try hits.append(allocator, row);
+                }
             }
         }
 
@@ -426,18 +429,17 @@ pub fn Store(comptime S: type) type {
         /// Converts every change (copying strings once) into `patch` before
         /// touching a row, so a bad value, a key clash or running out of
         /// memory leaves the store unchanged. Applying cannot fail.
-        /// `error.JoinedWrite` for a joined query, like `delete`: which rows
-        /// it keeps depends on another store.
         pub fn update(self: *Self, query: Q, changes: []const Q.Change) !usize {
-            if (query.join != null) return error.JoinedWrite;
+            const selected = try self.writeSelection(query);
+            defer if (selected) |flags| self.allocator.free(flags);
             var patch: T = undefined;
             for (changes) |c| try self.prepare(&patch, c);
             for (changes) |c| {
-                if (c.field == pk) try self.checkKeyChange(query, c.value);
+                if (c.field == pk) try self.checkKeyChange(query, selected, c.value);
             }
             var n: usize = 0;
-            for (self.list.items) |*row| {
-                if (!query.matches(row.*)) continue;
+            for (self.list.items, 0..) |*row, i| {
+                if (if (selected) |flags| !flags[i] else !query.matches(row.*)) continue;
                 for (changes) |c| apply(row, &patch, c.field);
                 n += 1;
             }
@@ -445,10 +447,11 @@ pub fn Store(comptime S: type) type {
         }
 
         pub fn delete(self: *Self, query: Q) !usize {
-            if (query.join != null) return error.JoinedWrite;
+            const selected = try self.writeSelection(query);
+            defer if (selected) |flags| self.allocator.free(flags);
             var kept: usize = 0;
-            for (self.list.items) |row| {
-                if (!query.matches(row)) {
+            for (self.list.items, 0..) |row, i| {
+                if (if (selected) |flags| !flags[i] else !query.matches(row)) {
                     self.list.items[kept] = row;
                     kept += 1;
                 }
@@ -456,6 +459,18 @@ pub fn Store(comptime S: type) type {
             const removed = self.list.items.len - kept;
             self.list.shrinkRetainingCapacity(kept);
             return removed;
+        }
+
+        /// Snapshot joined membership before a write changes either side of
+        /// a self-join. Null means the unjoined query needs no scratch space.
+        fn writeSelection(self: *Self, query: Q) !?[]bool {
+            const j = if (query.join) |*join| join else return null;
+            const flags = try self.allocator.alloc(bool, self.list.items.len);
+            errdefer self.allocator.free(flags);
+            @memset(flags, false);
+            var unused: std.ArrayList(T) = .empty;
+            try self.joined(j, &query, self.allocator, &unused, flags);
+            return flags;
         }
 
         /// Writes the change's typed value into `patch`, checking its range
@@ -472,10 +487,10 @@ pub fn Store(comptime S: type) type {
 
         /// Setting the key is only valid for at most one row, and the new
         /// key must not belong to any row outside the update.
-        fn checkKeyChange(self: *Self, query: Q, key: q.Value) !void {
+        fn checkKeyChange(self: *Self, query: Q, selected: ?[]bool, key: q.Value) !void {
             var matched: usize = 0;
-            for (self.list.items) |row| {
-                if (query.matches(row)) {
+            for (self.list.items, 0..) |row, i| {
+                if (if (selected) |flags| flags[i] else query.matches(row)) {
                     matched += 1;
                 } else if (Q.fieldValue(row, pk).eql(key)) {
                     return error.DuplicatePrimaryKey;

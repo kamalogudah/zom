@@ -224,11 +224,25 @@ test "a joined lt null is InvalidNullComparison, like an unjoined one" {
     try testing.expectError(error.InvalidNullComparison, zom_sql.compileRelation(.postgres, testing.allocator, rel));
 }
 
-test "UPDATE and DELETE refuse a joined query" {
-    const q = users.join(.posts).where(.id, .eq, 1).query;
-    try testing.expectError(error.JoinedWrite, zom_sql.compileDelete(.postgres, User, testing.allocator, "users", q));
+test "UPDATE and DELETE use correlated EXISTS for joined queries" {
+    const q = users.join(.posts).whereJoined(.posts, .published, .eq, false).where(.id, .eq, 1).query;
+    const deleted = try zom_sql.compileDelete(.postgres, User, testing.allocator, "users", q);
+    defer deleted.deinit(testing.allocator);
+    try testing.expectEqualStrings("DELETE FROM \"users\" WHERE \"users\".\"id\" = $1 AND EXISTS (SELECT 1 FROM \"posts\" WHERE \"posts\".\"user_id\" = \"users\".\"id\" AND \"posts\".\"published\" = $2)", deleted.sql);
+    try testing.expectEqualDeep(&[_]Value{ int(1), .{ .boolean = false } }, deleted.params);
     const changes = [_]zom.Query(User).Change{.{ .field = .age, .value = int(1) }};
-    try testing.expectError(error.JoinedWrite, zom_sql.compileUpdate(.postgres, User, testing.allocator, "users", q, &changes));
+    const updated = try zom_sql.compileUpdate(.postgres, User, testing.allocator, "users", q, &changes);
+    defer updated.deinit(testing.allocator);
+    try testing.expectEqualStrings("UPDATE \"users\" SET \"age\" = $1 WHERE \"users\".\"id\" = $2 AND EXISTS (SELECT 1 FROM \"posts\" WHERE \"posts\".\"user_id\" = \"users\".\"id\" AND \"posts\".\"published\" = $3)", updated.sql);
+    try testing.expectEqualDeep(&[_]Value{ int(1), int(1), .{ .boolean = false } }, updated.params);
+
+    const any_post = try zom_sql.compileDelete(.postgres, User, testing.allocator, "users", users.join(.posts).query);
+    defer any_post.deinit(testing.allocator);
+    try testing.expectEqualStrings("DELETE FROM \"users\" WHERE EXISTS (SELECT 1 FROM \"posts\" WHERE \"posts\".\"user_id\" = \"users\".\"id\")", any_post.sql);
+
+    const self_join = try zom_sql.compileDelete(.postgres, User, testing.allocator, "users", users.join(.manager).whereJoined(.manager, .age, .gt, 50).query);
+    defer self_join.deinit(testing.allocator);
+    try testing.expectEqualStrings("DELETE FROM \"users\" WHERE EXISTS (SELECT 1 FROM \"users\" AS \"manager\" WHERE \"manager\".\"id\" = \"users\".\"manager_id\" AND \"manager\".\"age\" > $1)", self_join.sql);
 }
 
 test "unjoined selects are unchanged: no qualification" {

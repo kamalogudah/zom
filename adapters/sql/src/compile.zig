@@ -57,10 +57,6 @@ pub const WriteError = CompileError || error{
     /// least one column). Nothing would change; a gateway can skip the
     /// statement, as `Update.commit` does.
     EmptyUpdate,
-    /// An `UPDATE` or `DELETE` whose query has a join. Which rows a join
-    /// keeps depends on another table, and a write only filters on its own,
-    /// so it would touch rows the join leaves out.
-    JoinedWrite,
 };
 
 /// `WriteError` for the `write*` functions, which render into a writer.
@@ -540,7 +536,7 @@ pub fn writeUpdate(
         try w.writeAll(" = ");
         try params.bind(dialect, w, c.value);
     }
-    try writeWhere(dialect, T, w, params, null, query, null);
+    try writeWriteWhere(dialect, T, w, params, table, query);
 }
 
 /// Renders `compileDelete`'s statement into `w`.
@@ -555,15 +551,45 @@ pub fn writeDelete(
     try checkBounded(T, query);
     try w.writeAll("DELETE FROM ");
     try writeIdent(dialect, w, table);
-    try writeWhere(dialect, T, w, params, null, query, null);
+    try writeWriteWhere(dialect, T, w, params, table, query);
 }
 
-/// The safety rules: a write is never joined, and needs a filter, or
-/// `query.all`.
-fn checkBounded(comptime T: type, query: *const zom.Query(T)) error{ UnboundedWrite, JoinedWrite }!void {
-    if (query.join != null) return error.JoinedWrite;
+/// A joined write keeps a source row only when one joined row passes every
+/// joined filter. The correlated subquery also handles joins with no filters.
+fn writeWriteWhere(
+    comptime dialect: Dialect,
+    comptime T: type,
+    w: *Writer,
+    params: *Params,
+    table: []const u8,
+    query: *const zom.Query(T),
+) RenderError!void {
+    try writeWhere(dialect, T, w, params, if (query.join == null) null else table, query, null);
+    const j = if (query.join) |*join| join else return;
+    var own = query.topNodes();
+    try w.writeAll(if (own.next() == null) " WHERE EXISTS (SELECT 1 FROM " else " AND EXISTS (SELECT 1 FROM ");
+    const alias = joinAlias(table, j);
+    try writeIdent(dialect, w, j.table);
+    if (!std.mem.eql(u8, alias, j.table)) {
+        try w.writeAll(" AS ");
+        try writeIdent(dialect, w, alias);
+    }
+    try w.writeAll(" WHERE ");
+    try writeColumn(dialect, w, alias, j.target_key);
+    try w.writeAll(" = ");
+    try writeColumn(dialect, w, table, j.source_key);
+    var joined = j.topNodes();
+    while (joined.next()) |i| {
+        try w.writeAll(" AND ");
+        try writeJoinNode(dialect, w, params, alias, j, @intCast(i));
+    }
+    try w.writeByte(')');
+}
+
+/// A join itself bounds a write; without one, require a source filter or all.
+fn checkBounded(comptime T: type, query: *const zom.Query(T)) error{UnboundedWrite}!void {
     var it = query.topNodes();
-    if (it.next() == null and !query.all) return error.UnboundedWrite;
+    if (it.next() == null and query.join == null and !query.all) return error.UnboundedWrite;
 }
 
 fn setLater(comptime T: type, rest: []const zom.Query(T).Change, field: zom.Query(T).Field) bool {
