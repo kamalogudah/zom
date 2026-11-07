@@ -855,6 +855,13 @@ struct `zom.Mapper` can map it to. It needs no default. A missing field, a
 field of the wrong shape, a target relation over the wrong schema and a key
 dropped by `select` are compile errors.
 
+Combine groups by the primary key's type (without `?`), with a hash map.
+Supported key types are integers (signed up to `i64`, unsigned up to
+`u128`, so TigerBeetle ids work), enums, `bool` and strings (`[]const u8`).
+Any other key type is a `zom.combine` compile error naming it: floats,
+because they compare badly as keys, and structs, arrays or other slices,
+because composite keys aren't supported yet.
+
 `mapWith(M, allocator)` takes a `zom.Mapper`, which combine rebuilds to
 leave the association field alone, so it needs no default there either. It
 also takes a mapper written by hand: a struct with `Input` (the source

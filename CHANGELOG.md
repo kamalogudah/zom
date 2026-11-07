@@ -9,6 +9,11 @@ bump (`0.2` to `0.3`) may break the public API; a patch bump never does.
 
 ### Added
 
+- `combine` checks its key type: a key it can't hash (a float, a struct, an
+  array or a slice other than a string) is a `zom.combine` compile error
+  naming the type, not an error from inside `std.hash`. `u128` keys
+  (TigerBeetle ids) are tested in both directions. The supported key types are listed in
+  the README's "Combine" section. (#79)
 - Per-parent paging in `combine`: a `limit` or `offset` on the target
   relation now pages each parent's rows, so
   `users.combine(.posts, posts.order(.id, .desc).limit(3))` gives every

@@ -133,6 +133,7 @@
 
 const std = @import("std");
 const schema = @import("schema.zig");
+const q = @import("query.zig");
 const mapper = @import("mapper.zig");
 const FieldMapper = @import("field_mapper.zig").FieldMapper;
 
@@ -189,6 +190,7 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
     requireField(Source.Output, source_key, label, "the relation it is called on");
     if (!hooked) requireField(Rel.Output, target_key, label, "the relation passed to it");
     const Key = a.Key();
+    const KeyMap = KeyMapOf(Key, label);
 
     return struct {
         const Self = @This();
@@ -531,15 +533,6 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
             return mapper.Mapper(Rel.Output, X, .{}).call(row);
         }
 
-        const KeyMap = if (Key == []const u8)
-            std.StringHashMapUnmanaged
-        else
-            struct {
-                fn Map(comptime V: type) type {
-                    return std.AutoHashMapUnmanaged(Key, V);
-                }
-            }.Map;
-
         fn group(index: *const KeyMap(u32), value: anytype) ?u32 {
             return index.get(keyOf(value) orelse return null);
         }
@@ -548,6 +541,26 @@ pub fn Combined(comptime Source: type, comptime a: schema.Association, comptime 
             return value;
         }
     };
+}
+
+/// The hash map combine groups rows with, keyed on `K`: a string map for
+/// string keys, an auto-hashed one for integers, enums and bools. Any
+/// other key type is a compile error naming it, here rather than deep in
+/// `std.hash`: floats compare badly as keys (NaN, -0.0), and structs,
+/// arrays and other slices are composite keys, which combine doesn't group
+/// by.
+fn KeyMapOf(comptime K: type, comptime label: []const u8) fn (type) type {
+    if (comptime q.isString(K)) return std.StringHashMapUnmanaged;
+    switch (@typeInfo(K)) {
+        .int, .@"enum", .bool => {},
+        else => @compileError(label ++ ": cannot group by a key of type `" ++ @typeName(K) ++
+            "`; a combine key must be an integer (up to i64 or u128), an enum, a bool or a string"),
+    }
+    return struct {
+        fn Map(comptime V: type) type {
+            return std.AutoHashMapUnmanaged(K, V);
+        }
+    }.Map;
 }
 
 /// A combine target's `limit` and `offset`, which page each parent's

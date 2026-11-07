@@ -263,6 +263,60 @@ test "combine(.author): belongs-to gives each child its parent, or null" {
     try testing.expect(posts[4].author == null);
 }
 
+// u128 keys, as TigerBeetle account ids are: above u64, so they go
+// through `Value.uint128` in whereIn and are hashed as u128.
+const Ledger = struct { id: u128, name: []const u8 };
+const Entry = struct { id: u128, ledger_id: ?u128, amount: u64 };
+const LedgerSchema = zom.Schema(Ledger, "ledgers", .id, .{
+    .associations = struct {
+        pub const entries = zom.hasMany(EntrySchema, .ledger_id);
+    },
+});
+const EntrySchema = zom.Schema(Entry, "entries", .id, .{
+    .associations = struct {
+        pub const ledger = zom.belongsTo(LedgerSchema, .ledger_id);
+    },
+});
+
+test "combine: u128 keys group above u64, both ways" {
+    var gw = zom.memory.Gateway.init(testing.allocator, .{});
+    defer gw.deinit();
+    const ledgers = try zom.Relation(LedgerSchema, zom.memory.Gateway).init(&gw);
+    const entries = try zom.Relation(EntrySchema, zom.memory.Gateway).init(&gw);
+    const big: u128 = std.math.maxInt(u64) + 1;
+    const top: u128 = std.math.maxInt(u128);
+    _ = try ledgers.create(.{ .id = big, .name = "big" }).commit();
+    _ = try ledgers.create(.{ .id = top, .name = "top" }).commit();
+    _ = try ledgers.create(.{ .id = 1, .name = "small" }).commit();
+    _ = try entries.create(.{ .id = top - 1, .ledger_id = big, .amount = 10 }).commit();
+    _ = try entries.create(.{ .id = top - 2, .ledger_id = top, .amount = 20 }).commit();
+    _ = try entries.create(.{ .id = top - 3, .ledger_id = big, .amount = 30 }).commit();
+    _ = try entries.create(.{ .id = top - 4, .ledger_id = null, .amount = 40 }).commit();
+
+    const WithEntries = struct { id: u128, entries: []const struct { amount: u64 } };
+    var by_ledger = try ledgers.order(.id, .asc).combine(.entries, entries.order(.amount, .asc))
+        .mapTo(WithEntries, testing.allocator);
+    defer by_ledger.deinit();
+    try testing.expectEqual(3, by_ledger.items.len);
+    try testing.expectEqual(0, by_ledger.items[0].entries.len);
+    try testing.expectEqual(big, by_ledger.items[1].id);
+    try testing.expectEqual(2, by_ledger.items[1].entries.len);
+    try testing.expectEqual(10, by_ledger.items[1].entries[0].amount);
+    try testing.expectEqual(30, by_ledger.items[1].entries[1].amount);
+    try testing.expectEqual(1, by_ledger.items[2].entries.len);
+    try testing.expectEqual(20, by_ledger.items[2].entries[0].amount);
+
+    const WithLedger = struct { amount: u64, ledger: ?struct { name: []const u8 } };
+    var by_entry = try entries.order(.amount, .asc).combine(.ledger, ledgers)
+        .mapTo(WithLedger, testing.allocator);
+    defer by_entry.deinit();
+    try testing.expectEqual(4, by_entry.items.len);
+    try testing.expectEqualStrings("big", by_entry.items[0].ledger.?.name);
+    try testing.expectEqualStrings("top", by_entry.items[1].ledger.?.name);
+    try testing.expectEqualStrings("big", by_entry.items[2].ledger.?.name);
+    try testing.expect(by_entry.items[3].ledger == null);
+}
+
 test "combine: more keys than max_in are read in ceil(keys / max_in) queries" {
     var gw: CountingGateway = .init(testing.allocator, .{});
     defer gw.deinit();
