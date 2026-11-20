@@ -54,6 +54,8 @@
         "adapters/sqlite/README.md",
         "adapters/tigerbeetle/src",
         "adapters/tigerbeetle/README.md",
+        "adapters/tigerbeetle/tests/compile_errors",
+        "tests/compile_errors",
         "examples/readme.zig",
         "README.md",
         "docs",
